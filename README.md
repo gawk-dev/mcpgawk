@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.svg">
+    <img alt="mcpgawk" src="assets/brand/wordmark-light.svg" width="300">
+  </picture>
+</p>
+<p align="center"><em>gawk at it before you trust it.</em></p>
+
 # mcpgawk
 
 [![PyPI](https://img.shields.io/pypi/v/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)

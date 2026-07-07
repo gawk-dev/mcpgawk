@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 120" role="img" aria-label="mcpgawk">
+  <!-- Primary wordmark · light-on-dark (product surfaces). Nativerse/gawk.dev system. -->
+  <circle cx="40" cy="61" r="13" fill="#7B83F0"/>
+  <text x="76" y="61" dominant-baseline="central"
+        font-family="'SF Mono','JetBrains Mono',Menlo,Consolas,monospace"
+        font-size="52" letter-spacing="-1" fill="#ECEBE3">mcpgawk</text>
+</svg>
