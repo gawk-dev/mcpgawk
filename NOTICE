@@ -1,0 +1,10 @@
+The reference/ directory contains unmodified third-party source cloned for study,
+each under the Apache License 2.0, © Invariant Labs / Snyk:
+
+  - invariantlabs-ai/invariant           (reference/invariant-analyzer)
+  - invariantlabs-ai/invariant-gateway   (reference/invariant-gateway)
+  - invariantlabs-ai/mcp-scan            (reference/mcp-scan-hist, reference/recovered-local-engine)
+
+These retain their upstream LICENSE files and git history. They are NOT our code and are
+not vendored into this project's git history. Any code we derive from them will carry the
+required Apache-2.0 attribution.
