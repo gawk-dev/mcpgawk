@@ -36,10 +36,18 @@ _READER_DIRECTED = re.compile(
     re.IGNORECASE)
 
 # --- Detector 3: secret-exfil directives (read a secret AND move it). ---
-_SECRET = r"(?:\.env\b|~/\.ssh|id_rsa|/etc/passwd|credential|secret|api[_\s-]?key|password|access[_\s-]?token)"
+# Tightened after a real false positive: Vercel's `get_access_to_vercel_url` says "access ... without
+# requiring login credentials" — benign. "access" and a bare "credential" are NOT suspicious. We fire on
+# (a) reading an unambiguous secret FILE, or (b) a secret WORD paired with an explicit exfil verb.
+# Only unambiguous secret FILES — a legit tool description has no reason to name these. Secret *words*
+# ("api key", "password", "credential") appear in countless benign descriptions, so they are NOT used
+# (that was the FP source: "pass/fail with an API key", "access without credentials", etc.). Other
+# injection styles are still caught by the hidden-markup and reader-directed detectors above.
+_SECRET_FILE = r"(?:\.env\b|~/\.ssh|id_rsa|/etc/passwd|/etc/shadow)"
+_EXFIL_VERB = r"(?:pass|send|include|attach|exfiltrat\w*|leak|upload|post|forward)"
 _EXFIL_DIRECTIVE = re.compile(
-    r"(?:read|open|cat|load|access|retrieve|include|attach)\b[^.]{0,50}" + _SECRET
-    + r"|" + _SECRET + r"[^.]{0,50}\b(?:pass|send|include|attach|provide|put\s+in|add\s+to|append)\b",
+    r"(?:read|open|cat|load|retrieve|dump)\b[^.]{0,40}" + _SECRET_FILE   # read a secret file
+    + r"|" + _SECRET_FILE + r"[^.]{0,40}\b" + _EXFIL_VERB,                # secret file → moved out
     re.IGNORECASE | re.DOTALL)
 
 _DETECTORS = (

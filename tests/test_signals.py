@@ -24,6 +24,11 @@ CLEAN = [
     {"name": "createAccessibilityAuthConfig", "description": "Create an authentication configuration for accessibility scans, with credentials for the site under test."},
     {"name": "run_tests", "description": "Run the project test suite and return pass/fail with an API key from the environment."},
     {"name": "send_message", "description": "Send a message to a Slack channel as the authenticated user."},
+    # Real false positive caught on Vercel's live MCP — "access ... without credentials" is benign:
+    {"name": "get_access_to_vercel_url", "description": "Get access to a password-protected Vercel deployment URL without requiring login credentials."},
+    {"name": "reset_password", "description": "Reset the password for a user account and email them a link."},
+    {"name": "create_api_key", "description": "Create a new API key scoped to the project."},
+    {"name": "get_secret", "description": "Fetch a secret value from the project's secret store by name."},
 ]
 
 # --- Poisoned descriptions (tool-poisoning carriers). Must be flagged. ---
