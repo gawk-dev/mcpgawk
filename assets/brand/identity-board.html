@@ -1,73 +1,82 @@
-<title>mcpgawk — identity board</title>
+<title>mcpgawk — identity board (Nativerse-aligned)</title>
 <style>
-  :root{--surface:#16160F;--ink:#ECEBE3;--blue:#2832C2;--blue-dk:#7B83F0;--green:#36C28B;--muted:#8a8a80;--rule:#33332e;--paper:#fbfbf9;--paper-ink:#16160F}
+  @import url('https://api.fontshare.com/v2/css?f[]=sentient@400,500,700&f[]=supreme@400,500&f[]=tabular@400,500&display=swap');
+  :root{--surface:#16160F;--ink:#ECEBE3;--blue:#2A33C2;--blue-strong:#1F2799;--blue-dk:#7B83F0;--green:#36C28B;--muted:#8a8a80;--rule:#33332e;--paper:#FFFFFF;--paper-ink:#16160F;
+    --disp:'Sentient',Georgia,'Iowan Old Style',serif; --text:'Supreme',-apple-system,BlinkMacSystemFont,sans-serif; --mono:'Tabular',ui-monospace,Menlo,Consolas,monospace}
   *{box-sizing:border-box}
-  body{margin:0;background:#0e0e0a;color:var(--ink);font-family:'SF Mono',Menlo,Consolas,monospace;padding:40px 24px 72px}
+  body{margin:0;background:#0e0e0a;color:var(--ink);font-family:var(--text);padding:40px 24px 72px}
   .wrap{max-width:1000px;margin:0 auto;display:grid;gap:18px}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   @media(max-width:720px){.row{grid-template-columns:1fr}}
   .panel{border:1px solid var(--rule);border-radius:14px;padding:26px;position:relative;overflow:hidden}
-  .lbl{position:absolute;top:12px;left:16px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#5f5f57}
+  .lbl{position:absolute;top:12px;left:16px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#5f5f57}
   .dark{background:var(--surface)} .light{background:var(--paper)}
-  .center{display:flex;align-items:center;justify-content:center;min-height:150px}
+  .center{display:flex;align-items:center;justify-content:center;min-height:150px;gap:22px}
   .full{grid-column:1/-1}
-  h1{font-size:15px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:4px 2px 0;font-weight:600}
-  .sub{color:#5f5f57;font-size:12.5px;margin:0 2px 8px}
-  .swatch{display:flex;gap:10px;flex-wrap:wrap}
-  .chip{flex:1;min-width:120px;border-radius:10px;padding:14px;border:1px solid var(--rule)}
-  .chip b{display:block;font-size:12px} .chip span{font-size:11px;color:var(--muted)}
-  .fav{display:flex;gap:16px;align-items:center}
-  .type b{font-size:34px;color:var(--ink)} .type .t2{font-size:15px;color:var(--muted);margin-top:6px}
-  .cli{color:#5f5f57;font-size:14px;line-height:1.7}
+  h1{font-family:var(--disp);font-size:26px;letter-spacing:-.01em;margin:2px 2px 0;font-weight:500;color:var(--ink)}
+  .sub{color:#7a7a70;font-family:var(--mono);font-size:12px;margin:4px 2px 0;letter-spacing:.02em}
+  /* live lockup rendered with real fonts */
+  .lockup{display:flex;align-items:center;gap:20px}
+  .lockup img{height:78px}
+  .lockup .wm{font-family:var(--disp);font-weight:500;font-size:76px;letter-spacing:-2px;line-height:1}
+  .wm-dark{color:#ECEBE3} .wm-light{color:#16160F}
+  .swatch{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+  .chip{flex:1;min-width:130px;border-radius:10px;padding:14px;border:1px solid var(--rule)}
+  .chip b{display:block;font-size:12px;font-family:var(--text)} .chip span{font-size:11px;color:var(--muted);font-family:var(--mono)}
+  .fav{display:flex;gap:16px;align-items:center;margin-top:22px}
+  .spec div{margin-top:14px}
+  .spec .big{font-size:40px;line-height:1.1}
+  .spec .note{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:4px;letter-spacing:.02em}
+  .cli{font-family:var(--mono);color:#5f5f57;font-size:14px;line-height:1.7;margin-top:20px}
+  .redline{color:#c66;text-decoration:line-through;opacity:.6}
 </style>
 <div class="wrap">
   <div>
     <h1>mcpgawk — identity</h1>
-    <p class="sub">Nativerse / gawk.dev family · royal blue #2832C2 · dark surface #16160F · mono wordmark · ● status dot</p>
+    <p class="sub">nativerse / gawk.dev family · real mark · sentient wordmark · tabular for data · accent #2A33C2 · dark surface #16160F</p>
   </div>
 
+  <!-- live lockups rendered with the actual family fonts -->
   <div class="row">
-    <div class="panel dark center"><span class="lbl">wordmark · on dark</span><img src="wordmark-dark.svg" width="260"></div>
-    <div class="panel light center"><span class="lbl" style="color:#9a9a90">wordmark · on light</span><img src="wordmark-light.svg" width="260"></div>
+    <div class="panel dark center"><span class="lbl">lockup · on dark</span>
+      <div class="lockup"><img src="nativerse-mark.svg" alt="" style="filter:brightness(0) invert(1)"><span class="wm wm-dark">mcpgawk</span></div>
+    </div>
+    <div class="panel light center"><span class="lbl" style="color:#9a9a90">lockup · on light</span>
+      <div class="lockup"><img src="nativerse-mark.svg" alt=""><span class="wm wm-light">mcpgawk</span></div>
+    </div>
   </div>
 
   <div class="panel dark full">
-    <span class="lbl">social preview · 1280×640</span>
+    <span class="lbl">social preview · 1280×640 · what shares render as</span>
     <div style="margin-top:14px;border:1px solid var(--rule);border-radius:10px;overflow:hidden"><img src="social-preview.svg" style="width:100%;display:block"></div>
   </div>
 
   <div class="row">
     <div class="panel dark">
-      <span class="lbl">favicon / app mark</span>
-      <div class="fav" style="margin-top:22px">
-        <img src="favicon.svg" width="64"><img src="favicon.svg" width="40"><img src="favicon.svg" width="24"><img src="favicon.svg" width="16">
-      </div>
-      <p class="sub" style="margin-top:16px">the CLI's own status dot on the family tile</p>
+      <span class="lbl">favicon · family avatar</span>
+      <div class="fav"><img src="favicon.svg" width="64"><img src="favicon.svg" width="40"><img src="favicon.svg" width="24"><img src="favicon.svg" width="16"></div>
+      <p class="sub" style="margin-top:16px">the real nativerse mark, white on royal-blue tile</p>
     </div>
-    <div class="panel dark">
-      <span class="lbl">type</span>
-      <div class="type" style="margin-top:22px">
-        <b>mcpgawk</b>
-        <div class="t2">monospace wordmark — the family reserves mono for data/proof, and this is a CLI</div>
-      </div>
+    <div class="panel dark spec">
+      <span class="lbl">type · the fix</span>
+      <div><span class="big" style="font-family:var(--disp)">mcpgawk</span><div class="note">wordmark → SENTIENT (family display) — matches the <span style="font-family:var(--disp)">nativerse</span> wordmark</div></div>
+      <div><span class="big redline" style="font-family:var(--mono);font-size:30px">mcpgawk</span><div class="note">was raw mono — this is what felt out of place. mono is now DATA-ONLY.</div></div>
     </div>
   </div>
 
   <div class="panel dark full">
-    <span class="lbl">palette · one accent, semantic green for status only</span>
-    <div class="swatch" style="margin-top:22px">
+    <span class="lbl">palette · nativerse tokens · one accent, green for status only</span>
+    <div class="swatch">
       <div class="chip" style="background:#16160F"><b style="color:#ECEBE3">Surface</b><span>#16160F</span></div>
-      <div class="chip" style="background:#2832C2"><b style="color:#fff">Royal blue</b><span style="color:#cdd0f5">#2832C2</span></div>
+      <div class="chip" style="background:#2A33C2"><b style="color:#fff">Royal blue</b><span style="color:#cdd0f5">#2A33C2</span></div>
+      <div class="chip" style="background:#1F2799"><b style="color:#fff">Blue strong</b><span style="color:#cdd0f5">#1F2799</span></div>
       <div class="chip" style="background:#16160F;border-color:#7B83F0"><b style="color:#7B83F0">On dark</b><span>#7B83F0</span></div>
-      <div class="chip" style="background:#16160F;border-color:#36C28B"><b style="color:#36C28B">● Live / clean</b><span>#36C28B</span></div>
+      <div class="chip" style="background:#16160F;border-color:#36C28B"><b style="color:#36C28B">● live / clean</b><span>#36C28B</span></div>
     </div>
   </div>
 
   <div class="panel dark full">
-    <span class="lbl">voice · the mark is what the tool prints</span>
-    <div class="cli" style="margin-top:20px">
-      <span style="color:#36C28B">●</span> cli-stdio&nbsp;&nbsp;&nbsp;[stdio]&nbsp;&nbsp;proto=2025-11-25<br>
-      &nbsp;&nbsp;&nbsp;&nbsp;14 tools&nbsp;&nbsp;&nbsp;2061 tok@connect&nbsp;&nbsp;&nbsp;4 flagged&nbsp;&nbsp;·&nbsp;&nbsp;nothing uploaded
-    </div>
+    <span class="lbl">voice · the mono line is what the tool prints</span>
+    <div class="cli"><span style="color:#36C28B">●</span> cli-stdio&nbsp;&nbsp;[stdio]&nbsp;&nbsp;proto=2025-11-25<br>&nbsp;&nbsp;&nbsp;&nbsp;14 tools&nbsp;&nbsp;2061 tok@connect&nbsp;&nbsp;4 flagged&nbsp;&nbsp;·&nbsp;&nbsp;nothing uploaded</div>
   </div>
 </div>
