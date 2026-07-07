@@ -5,10 +5,10 @@
 expose — **without the server's inventory ever leaving your machine.**
 
 ```
-● browserstack           [stdio]  proto=2025-11-25
-     44 tools    12144 tok@connect   pin:86e3ca8cf0ec74b2
-      · createTestCase                 888 tok   write/no-annotation
-      · getFailureLogs                 252 tok   exfil-capable
+● example-server         [stdio]  proto=2025-11-25
+     14 tools     1890 tok@connect   pin:b5ba075b025f
+      · write_file                     108 tok   write, destructive-declared
+      · fetch_url                      120 tok   exfil-capable
       ...
 ```
 
