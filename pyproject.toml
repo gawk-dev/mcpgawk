@@ -10,7 +10,16 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Neelagiri" }]
-keywords = ["mcp", "model-context-protocol", "security", "tokens", "local-first"]
+keywords = ["mcp", "model-context-protocol", "security", "tokens", "local-first", "llm", "agents", "tokenizer", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+    "Environment :: Console",
+]
 dependencies = [
     "mcp>=1.28,<2",      # official protocol client — version-negotiated, tracks the spec
     "tiktoken>=0.7",     # named cost-index tokenizer (cl100k); honestly labelled, not Claude-exact
@@ -19,6 +28,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://mcp.gawk.dev"
+Documentation = "https://mcp.gawk.dev"
+# Repository / Issues — set to the final GitHub path at push time (see docs launch checklist).
 
 [project.scripts]
 mcpgawk = "mcpgawk.cli:main"
