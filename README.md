@@ -4,7 +4,7 @@
     <img alt="mcpgawk by nativerse" src="assets/brand/wordmark-light.png" width="320">
   </picture>
 </p>
-<p align="center"><em>gawk at it before you trust it.</em></p>
+<p align="center"><em>Make MCP lean and honest.</em></p>
 
 # mcpgawk
 
@@ -14,9 +14,8 @@
 [![CI](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml/badge.svg)](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml)
 [![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
 
-**gawk at an MCP server before you trust it.** A single, local-first command that connects to any
-[Model Context Protocol](https://modelcontextprotocol.io) server and measures what it will cost and
-expose — **without the server's inventory ever leaving your machine.**
+A local-first command that measures what a [Model Context Protocol](https://modelcontextprotocol.io)
+server costs and what it can do. It runs on your machine and uploads nothing.
 
 <p align="center">
   <img src="assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
@@ -25,9 +24,8 @@ expose — **without the server's inventory ever leaving your machine.**
 
 ## Why
 
-Every MCP server you connect dumps *all* its tool definitions into your model's context at connect
-time — whether you use one tool or none. That's a hidden **token tax** and an unvetted **trust
-surface**. mcpgawk measures both, **locally**, and never phones home about what it saw.
+Connect an MCP server and it loads all its tools into your AI's context. Every request. Used or not.
+You pay for those tokens, and you haven't checked what the tools can do. mcpgawk shows you both, locally.
 
 ## How it's different
 
@@ -81,7 +79,7 @@ mcpgawk scan mcp.json --json                                      # machine-read
 - **Facts ≠ heuristics.** Exact capability facts and the token index never mix with the bounded
   heuristic signals — separate in code, separate in output.
 - **Reproducible.** One command, identical numbers.
-- **Rides protocol evolution.** Built on the official `mcp` SDK, which negotiates the protocol version.
+- **Tracks the protocol.** Built on the official `mcp` SDK, which negotiates the protocol version.
 
 ## Develop
 
