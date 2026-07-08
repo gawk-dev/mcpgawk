@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.png">
-    <img alt="mcpgawk by nativerse" src="assets/brand/wordmark-light.png" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/wordmark-dark.png">
+    <img alt="mcpgawk by nativerse" src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/wordmark-light.png" width="320">
   </picture>
 </p>
 <p align="center"><em>Make MCP lean and honest.</em></p>
@@ -18,7 +18,7 @@ A local-first command that measures what a [Model Context Protocol](https://mode
 server costs and what it can do. It runs on your machine and uploads nothing.
 
 <p align="center">
-  <img src="assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
+  <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
 </p>
 <p align="center"><sub>Real output. Reproducible on your machine — no account, nothing uploaded.</sub></p>
 

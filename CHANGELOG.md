@@ -2,6 +2,12 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.2] — 2026-07-08
+
+### Changed
+- Plain, reader-first README and package description.
+- README images use absolute URLs so they render on PyPI (relative paths only work on GitHub).
+
 ## [0.1.1] — 2026-07-08
 
 ### Fixed
