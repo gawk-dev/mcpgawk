@@ -32,7 +32,8 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 [project.urls]
 Homepage = "https://mcp.gawk.dev"
 Documentation = "https://mcp.gawk.dev"
-# Repository / Issues — set to the final GitHub path at push time (see docs launch checklist).
+Repository = "https://github.com/gawk-dev/mcpgawk"
+Issues = "https://github.com/gawk-dev/mcpgawk/issues"
 
 [project.scripts]
 mcpgawk = "mcpgawk.cli:main"
