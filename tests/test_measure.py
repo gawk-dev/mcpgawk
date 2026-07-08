@@ -31,6 +31,13 @@ def test_readonly_hint_overrides_write_verb():
     assert m.tools[0].write is False  # declared read-only wins over the verb heuristic
 
 
+def test_destructive_hint_marks_write_even_without_verb():
+    # Emergent's `pause_job`: "pause" isn't a write-verb, but destructiveHint:true means it mutates.
+    m = measure(_snap([{"name": "pause_job", "description": "Pause a running job",
+                        "annotations": {"readOnlyHint": False, "destructiveHint": True}}]))
+    assert m.tools[0].write is True  # declared destructive => mutating
+
+
 def test_write_and_exfil_facts():
     m = measure(_snap([
         {"name": "delete_entities", "description": "delete stuff"},

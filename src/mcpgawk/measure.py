@@ -70,6 +70,8 @@ def _exfil_capable(tool: dict[str, Any]) -> bool:
 
 
 def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
+    if ann.get("destructiveHint") is True:   # a declared-destructive tool mutates, even if the verb heuristic misses it
+        return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic
         return False
     text = tool.get("name", "") + " " + (tool.get("description") or "")
