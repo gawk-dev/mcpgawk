@@ -18,18 +18,10 @@
 [Model Context Protocol](https://modelcontextprotocol.io) server and measures what it will cost and
 expose — **without the server's inventory ever leaving your machine.**
 
-```console
-$ mcpgawk scan --stdio "npx -y @modelcontextprotocol/server-filesystem /tmp"
-
-● cli-stdio               [stdio]  proto=2025-11-25
-     14 tools     2061 tok@connect   pin:84c0353c6e09180c
-      · write_file                     131 tok   write, destructive-declared
-      · edit_file                      222 tok   write, destructive-declared
-      · move_file                      148 tok   write, destructive-declared
-      ...
-TOTAL: 14 tools | 2061 tok loaded at connect | 4 capability-flagged
-```
-<sub>Real output. Reproducible on your machine — no account, nothing uploaded.</sub>
+<p align="center">
+  <img src="assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
+</p>
+<p align="center"><sub>Real output. Reproducible on your machine — no account, nothing uploaded.</sub></p>
 
 ## Why
 
@@ -43,6 +35,15 @@ surface**. mcpgawk measures both, **locally**, and never phones home about what 
   gate the verdict. mcpgawk runs entirely on your machine; nothing is uploaded, ever.
 - **vs. lazy-load gateways** — they cut tokens but tell you nothing about the *risk* surface.
 - **mcpgawk does both** — cost **and** trust — locally, reproducibly, in one command.
+
+## Features
+
+- 🔌 **Any transport** — stdio, streamable-HTTP, SSE, and OAuth remotes (via the `mcp-remote` bridge).
+- 💸 **Token cost index** — exactly what each tool adds to your context at connect.
+- 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema.
+- 📌 **Integrity pin + drift** — catch a server that silently rewrites its tools (`--track`).
+- 🚩 **Bounded signals** — injection-shaped descriptions, cross-server shadowing, under-declaring Server Cards — pointers for a human, never verdicts.
+- 🔒 **Zero egress, by construction** — the measurement layers import no network library. Enforced by a test.
 
 ## Install
 
@@ -88,4 +89,13 @@ mcpgawk scan mcp.json --json                                      # machine-read
 uv run --extra dev --with mcp --with tiktoken --with httpx python -m pytest -q
 ```
 
-Apache-2.0. The value is in the repo, not a cloud.
+## Contributing
+
+Issues and PRs welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and see the design
+boundaries in [THREAT-MODEL.md](THREAT-MODEL.md). Security reports go through [SECURITY.md](SECURITY.md)
+(privately, not a public issue).
+
+## License
+
+**Apache-2.0** — see [LICENSE](LICENSE). Part of the **nativerse** · gawk.dev family. The value is in the
+repo, not a cloud.
