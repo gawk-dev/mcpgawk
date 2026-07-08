@@ -13,6 +13,13 @@
 <link rel="preconnect" href="https://api.fontshare.com" crossorigin>
 <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=sentient@400,500,700&f[]=supreme@400,500&f[]=tabular@400,500&display=swap">
 <link rel="stylesheet" href="styles.css">
+<style>
+  /* nav CTA is an .n-btn inside .nav-links, whose `a{color}` rule would darken the
+     label to ink on the blue button (reads as black). Keep the button's own colours. */
+  .nav-links a.n-btn{color:var(--on-accent)}
+  .nav-links a.n-btn:hover{color:var(--on-accent)}
+  .nav-links a.n-btn--secondary{color:var(--ink)}
+</style>
 </head>
 <body>
 
