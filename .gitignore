@@ -6,3 +6,6 @@ venv/
 dist/
 build/
 .pytest_cache/
+
+# dev-only QA harness
+assets/brand/_qa.html
