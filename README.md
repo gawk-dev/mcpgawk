@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.svg">
-    <img alt="mcpgawk" src="assets/brand/wordmark-light.svg" width="300">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.png">
+    <img alt="mcpgawk by nativerse" src="assets/brand/wordmark-light.png" width="320">
   </picture>
 </p>
 <p align="center"><em>gawk at it before you trust it.</em></p>
