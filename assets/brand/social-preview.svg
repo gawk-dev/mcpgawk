@@ -8,8 +8,8 @@
   <text x="256" y="196" dominant-baseline="central" font-family="Sentient, Georgia, serif" font-weight="500" font-size="104" letter-spacing="-3" fill="#16160F">mcpgawk</text>
   <text x="258" y="270" font-family="Supreme, -apple-system, sans-serif" font-size="30" letter-spacing="0.5" fill="#6B6B5E">by <tspan fill="#2A33C2" font-weight="500">nativerse</tspan></text>
   <line x1="96" y1="352" x2="1184" y2="352" stroke="#E7E6E0" stroke-width="1.5"/>
-  <text x="96" y="438" font-family="Sentient, Georgia, serif" font-size="42" fill="#3A3A30">gawk at it before you trust it.</text>
+  <text x="96" y="438" font-family="Sentient, Georgia, serif" font-size="42" fill="#3A3A30">Make it lean. Make it honest.</text>
   <text x="96" y="524" font-family="Tabular, ui-monospace, Menlo, monospace" font-size="25" fill="#717166"><tspan fill="#2A9d6b">●</tspan> cli-stdio   14 tools   2061 tok@connect   4 flagged</text>
   <circle cx="102" cy="576" r="6" fill="#2A9d6b"/>
-  <text x="120" y="576" dominant-baseline="central" font-family="Tabular, ui-monospace, Menlo, monospace" font-size="24" letter-spacing="1" fill="#6B6B5E">local · no inventory ever leaves your machine</text>
+  <text x="120" y="576" dominant-baseline="central" font-family="Tabular, ui-monospace, Menlo, monospace" font-size="24" letter-spacing="1" fill="#6B6B5E">local · nothing leaves your machine</text>
 </svg>
