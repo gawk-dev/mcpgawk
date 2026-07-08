@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcpgawk · gawk at an MCP server before you trust it</title>
+<meta name="description" content="A local-first CLI that measures what an MCP server costs and exposes — before you trust it. Nothing ever leaves your machine.">
+<meta property="og:title" content="mcpgawk by nativerse">
+<meta property="og:description" content="MCP's hidden tax — you pay it on every prompt, before you type a word. Measure it locally.">
+<meta property="og:image" content="assets/brand/social-preview.svg">
+<link rel="icon" href="assets/brand/favicon.svg">
+<link href="https://api.fontshare.com/v2/css?f[]=sentient@400,500,700&f[]=supreme@400,500&f[]=tabular@400,500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FFFFFF;--paper-2:#FAFAF6;--ink:#16160F;--ink-2:#3A3A30;--muted:#6B6B5E;--faint:#8f8f84;
+    --blue:#2A33C2;--blue-strong:#1F2799;--green:#2A9D6B;--hair:#E7E6E0;
+    --disp:'Sentient',Georgia,serif;--text:'Supreme',-apple-system,BlinkMacSystemFont,sans-serif;--mono:'Tabular',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink-2);font-family:var(--text);font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:720px;margin:0 auto;padding:0 22px}
+  a{color:var(--blue);text-decoration-thickness:1.5px;text-underline-offset:.15em}
+  h1,h2{font-family:var(--disp);color:var(--ink);font-weight:500;letter-spacing:-.01em;line-height:1.1}
+  .mono{font-family:var(--mono)}
+  header{padding:40px 0 0}
+  .lock{display:flex;align-items:center;gap:14px}
+  .lock img{height:44px}
+  .lock .wm{font-family:var(--disp);font-weight:500;font-size:30px;color:var(--ink);line-height:1}
+  .lock .by{font-family:var(--text);font-size:13px;color:var(--muted);margin-top:2px}
+  .hero{padding:60px 0 24px;border-bottom:1px solid var(--hair)}
+  .kick{font-family:var(--mono);font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--blue);margin:0 0 16px}
+  .hero h1{font-size:clamp(36px,7vw,60px);margin:0 0 14px}
+  .hero p{font-size:21px;color:var(--muted);font-style:italic;margin:0}
+  section{padding:40px 0;border-bottom:1px solid var(--hair)}
+  .big{font-size:22px;line-height:1.4;color:var(--ink)}
+  .accent{color:var(--blue);font-weight:600}
+  table{border-collapse:collapse;width:100%;font-family:var(--text);font-size:15px;margin:14px 0 6px}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--hair);text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:500}
+  td:first-child{font-weight:600;color:var(--ink)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .heavy td{background:#FBF3F1}.lean td{background:#EEF6F1}
+  .cap{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:2px}
+  .cta{background:var(--paper-2);border:1px solid var(--hair);border-radius:14px;padding:26px}
+  .cta pre{font-family:var(--mono);font-size:15px;background:#16160F;color:#ECEBE3;border-radius:9px;padding:16px 18px;overflow-x:auto;margin:14px 0 0}
+  .promise{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px;color:var(--muted);margin-top:14px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block}
+  footer{padding:34px 0 60px;color:var(--faint);font-family:var(--mono);font-size:12.5px}
+  .btnrow{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px}
+  .btn{font-family:var(--text);font-weight:500;font-size:15px;padding:.7em 1.15em;border-radius:10px;text-decoration:none}
+  .btn-p{background:var(--blue);color:#fff}.btn-s{border:1px solid var(--hair);color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="lock">
+      <img src="assets/brand/nativerse-mark.svg" alt="">
+      <div><div class="wm">mcpgawk</div><div class="by">by <span style="color:var(--blue);font-weight:500">nativerse</span></div></div>
+    </div>
+  </header>
+
+  <div class="hero">
+    <p class="kick">The hidden tax of MCP</p>
+    <h1>gawk at an MCP server before you trust it.</h1>
+    <p>You pay its tax on every prompt — before you type a word.</p>
+    <div class="btnrow">
+      <a class="btn btn-p" href="#measure">Measure your stack</a>
+      <a class="btn btn-s" href="https://github.com/">View on GitHub →</a>
+    </div>
+  </div>
+
+  <section>
+    <p class="big">Connect an MCP server and it loads <em>every</em> tool definition into your model — used or not, on every request.</p>
+    <p>We measured the ones developers actually use.</p>
+    <p class="big">The two most-installed dev-tool MCPs load <span class="accent">35,600 tokens</span> at connect — roughly a quarter of your context, gone before your first prompt.</p>
+    <p>The surprise: it isn't how <em>many</em> tools. It's how <em>heavy</em>. The heaviest packs 20 tools into 23,085 tokens; Cloudflare fits 23 into 3,570 — <span class="accent">6.5× lighter</span>, same job.</p>
+    <table>
+      <thead><tr><th>Server</th><th>Tools</th><th>Tokens at connect</th></tr></thead>
+      <tbody>
+        <tr class="heavy"><td>Heaviest dev-tool MCP</td><td class="num">20</td><td class="num">23,085</td></tr>
+        <tr><td>The most-installed MCP</td><td class="num">44</td><td class="num">12,511</td></tr>
+        <tr class="lean"><td>Cloudflare</td><td class="num">23</td><td class="num">3,570</td></tr>
+        <tr class="lean"><td>Exa</td><td class="num">2</td><td class="num">520</td></tr>
+      </tbody>
+    </table>
+    <p class="cap">Measured locally with mcpgawk. Heavy servers anonymised; lean ones named with credit. Nothing uploaded.</p>
+  </section>
+
+  <section>
+    <p class="big">And heavy isn't just expensive.</p>
+    <p>In controlled tests, once the tool list gets long the model picks the <em>wrong</em> tool more often — one study: <span class="accent">13.6%</span> right, versus <span class="accent">43.1%</span> when the list is trimmed. The fix already exists: Cloudflare and Exa prove lean is a choice.</p>
+  </section>
+
+  <section id="measure">
+    <div class="cta">
+      <h2 style="margin:0 0 6px">See your own tax.</h2>
+      <p style="margin:0;color:var(--muted)">One command. Nothing leaves your machine.</p>
+      <pre>pip install mcpgawk
+mcpgawk scan mcp.json</pre>
+      <span class="promise"><span class="dot"></span> local · no inventory ever leaves your machine</span>
+    </div>
+  </section>
+
+  <footer>
+    Tokens counted with a named index (cl100k) — a comparable ruler, not exact Claude billing; the <em>relative</em> picture holds.
+    This is a cost view; per-vendor capability findings go to vendors privately. Free &amp; open-source · Apache-2.0 · part of <span style="color:var(--blue)">nativerse</span> · gawk.dev
+  </footer>
+</div>
+</body>
+</html>
