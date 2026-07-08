@@ -2,7 +2,14 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-07-08
+
+### Fixed
+- A tool declaring `destructiveHint: true` is now counted as write/mutating even when its name isn't a
+  write-verb (e.g. a `pause_job` tool). Previously the verb heuristic could leave a declared-destructive
+  tool unflagged.
+
+## [0.1.0] — 2026-07-08
 
 Initial release. Local-first MCP measurement.
 
