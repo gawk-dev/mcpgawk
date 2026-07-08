@@ -1,0 +1,62 @@
+name: 'mcpgawk — MCP hygiene gate'
+description: 'Scan your MCP servers in CI and fail the build if one is too heavy or trips a signal. Local, nothing uploaded.'
+author: 'nativerse'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  config:
+    description: 'Path to an mcp.json config to scan.'
+    required: false
+    default: 'mcp.json'
+  stdio:
+    description: 'A single stdio server command to scan instead of a config (e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp").'
+    required: false
+    default: ''
+  http:
+    description: 'A single streamable-HTTP MCP server URL to scan.'
+    required: false
+    default: ''
+  sse:
+    description: 'A single SSE MCP server URL to scan.'
+    required: false
+    default: ''
+  max-tokens:
+    description: 'Fail the build if any server loads more than this many tokens at connect. 0 = no budget.'
+    required: false
+    default: '0'
+  fail-on-flagged:
+    description: 'Fail the build if any server trips a bounded signal (injection-shaped / shadowing / undeclared).'
+    required: false
+    default: 'false'
+  version:
+    description: 'mcpgawk version to install from PyPI ("latest" or e.g. "0.1.2").'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install mcpgawk
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          pip install --quiet --disable-pip-version-check mcpgawk
+        else
+          pip install --quiet --disable-pip-version-check "mcpgawk==${{ inputs.version }}"
+        fi
+    - name: Scan and gate
+      shell: bash
+      env:
+        MCPGAWK_CONFIG: ${{ inputs.config }}
+        MCPGAWK_STDIO: ${{ inputs.stdio }}
+        MCPGAWK_HTTP: ${{ inputs.http }}
+        MCPGAWK_SSE: ${{ inputs.sse }}
+        MCPGAWK_MAX_TOKENS: ${{ inputs.max-tokens }}
+        MCPGAWK_FAIL_ON_FLAGGED: ${{ inputs.fail-on-flagged }}
+      run: python "${{ github.action_path }}/scripts/ci_gate.py"

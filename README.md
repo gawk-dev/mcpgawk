@@ -87,6 +87,21 @@ mcpgawk scan mcp.json --json                                      # machine-read
 uv run --extra dev --with mcp --with tiktoken --with httpx python -m pytest -q
 ```
 
+## CI gate — GitHub Action
+
+Scan your MCP servers on every pull request and fail the build if one gets too heavy or trips a signal.
+It runs entirely in your runner — nothing is uploaded — and posts a per-server cost/flag table to the job summary.
+
+```yaml
+- uses: gawk-dev/mcpgawk@v1
+  with:
+    config: mcp.json        # or: stdio / http / sse — a single server
+    max-tokens: 8000        # fail if any server loads more than this at connect
+    fail-on-flagged: true   # fail if any bounded signal fires
+```
+
+Available on the [GitHub Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate).
+
 ## Contributing
 
 Issues and PRs welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and see the design

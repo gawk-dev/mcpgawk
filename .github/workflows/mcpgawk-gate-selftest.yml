@@ -1,0 +1,20 @@
+name: MCP hygiene gate (self-test)
+
+# Dogfoods the mcpgawk Action against a real open server, so the marketplace
+# listing has a live, passing example.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: MCP hygiene gate
+        uses: ./
+        with:
+          stdio: 'npx -y @modelcontextprotocol/server-filesystem /tmp'
+          max-tokens: 5000
+          fail-on-flagged: true
