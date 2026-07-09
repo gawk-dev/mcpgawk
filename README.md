@@ -12,6 +12,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml/badge.svg)](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml)
+[![Open VSX](https://img.shields.io/open-vsx/v/gawk-dev/mcpgawk?label=VS%20Code%20%2F%20Cursor)](https://open-vsx.org/extension/gawk-dev/mcpgawk)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-blue?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
 [![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
 
 A local-first command that measures what a [Model Context Protocol](https://modelcontextprotocol.io)
@@ -43,11 +45,28 @@ You pay for those tokens, and you haven't checked what the tools can do. mcpgawk
 - 🚩 **Bounded signals** — injection-shaped descriptions, cross-server shadowing, under-declaring Server Cards — pointers for a human, never verdicts.
 - 🔒 **Zero egress, by construction** — the measurement layers import no network library. Enforced by a test.
 
-## Install
+## Get it — three ways
 
+**CLI** (any terminal):
 ```bash
 pip install mcpgawk        # or: uv tool install mcpgawk
+mcpgawk scan mcp.json
 ```
+
+**Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline.
+
+**CI** (GitHub Action): gate every PR on token budget / drift ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
+```yaml
+- uses: gawk-dev/mcpgawk@v1
+  with: { config: mcp.json, max-tokens: 8000, fail-on-flagged: true }
+```
+
+## When to run it
+
+- **Before you add a server** — see what it costs and what it can do, before you trust it.
+- **When your agent feels slow or picks the wrong tool** — it's often MCP bloat (too many / too-heavy tools).
+- **On every PR** — the CI gate catches drift and creeping token cost.
+- **If you *publish* an MCP server** — see what it costs your users and how it reads to a client, and fix it (usually one line per tool). Lean + well-annotated is a differentiator.
 
 ## Use
 
