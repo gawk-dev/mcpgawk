@@ -36,6 +36,17 @@
   .lead-status{font:500 14px/1.5 var(--font-text,inherit);margin-top:4px;min-height:1.2em}
   .lead-status.err{color:var(--accent)}
   .lead-done{display:none}
+
+  /* "available on" credibility strip */
+  .availbar{display:flex;align-items:center;gap:14px 30px;flex-wrap:wrap;
+    border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);padding:18px 0}
+  .availbar .n-kicker{margin:0}
+  .avail{display:inline-flex;align-items:center;gap:9px;color:var(--ink-muted);
+    text-decoration:none;font:500 14px/1 var(--font-text,inherit);transition:color .15s ease}
+  .avail:hover{color:var(--accent)}
+  .avail svg{width:19px;height:19px;fill:currentColor;flex:0 0 auto}
+  .card-src{display:inline-flex;align-items:center;gap:8px;margin-bottom:10px;color:var(--ink-muted)}
+  .card-src svg{width:18px;height:18px;fill:currentColor;flex:0 0 auto}
 </style>
 <script>
   // === Supabase lead capture — paste your project values here ===
@@ -94,6 +105,27 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- AVAILABLE ON -->
+<section class="sec" style="padding-top:6px;padding-bottom:6px">
+  <div class="wrap">
+    <div class="availbar">
+      <span class="n-kicker">Available on</span>
+      <a class="avail" href="https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate" aria-label="GitHub Marketplace">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span>GitHub Marketplace</span>
+      </a>
+      <a class="avail" href="https://open-vsx.org/extension/gawk-dev/mcpgawk" aria-label="VS Code and Cursor via Open VSX">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352ZM18.005 17.448 10.826 12l7.179-5.448v10.896Z"/></svg>
+        <span>VS Code / Cursor</span>
+      </a>
+      <a class="avail" href="https://pypi.org/project/mcpgawk/" aria-label="PyPI">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.914 0C5.82 0 6.2 2.656 6.2 2.656l.007 2.752h5.814v.826H3.9S0 4.598 0 10.747c0 6.149 3.404 5.933 3.404 5.933h2.03v-2.869s-.109-3.404 3.35-3.404h5.766s3.24.052 3.24-3.13V3.183S24.386 0 17.914 0Zm-3.206 1.85c.578 0 1.048.47 1.048 1.05a1.05 1.05 0 0 1-1.048 1.048A1.05 1.05 0 0 1 7.66 2.9c0-.58.47-1.05 1.048-1.05ZM12.087 24c6.093 0 5.712-2.656 5.712-2.656l-.007-2.752h-5.814v-.826h8.123S24 19.402 24 13.253c0-6.149-3.404-5.933-3.404-5.933h-2.03v2.869s.109 3.404-3.35 3.404H9.45s-3.24-.052-3.24 3.13v5.264S5.614 24 12.087 24Zm3.206-1.85a1.05 1.05 0 0 1-1.048-1.05c0-.58.47-1.048 1.048-1.048.578 0 1.048.47 1.048 1.048s-.47 1.05-1.048 1.05Z"/></svg>
+        <span>PyPI</span>
+      </a>
     </div>
   </div>
 </section>
