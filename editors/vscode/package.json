@@ -1,0 +1,39 @@
+{
+  "name": "mcpgawk",
+  "displayName": "mcpgawk — MCP cost & hygiene",
+  "description": "See what your MCP servers cost and expose, right in your editor. Local — nothing leaves your machine.",
+  "version": "0.1.0",
+  "publisher": "gawk-dev",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Linters", "Other"],
+  "keywords": ["mcp", "model context protocol", "tokens", "security", "cursor", "agents"],
+  "repository": { "type": "git", "url": "https://github.com/gawk-dev/mcpgawk" },
+  "homepage": "https://mcp.gawk.dev",
+  "bugs": { "url": "https://github.com/gawk-dev/mcpgawk/issues" },
+  "galleryBanner": { "color": "#16160F", "theme": "dark" },
+  "activationEvents": ["workspaceContains:**/mcp.json", "workspaceContains:**/.cursor/mcp.json"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "mcpgawk.scan", "title": "mcpgawk: Scan MCP servers", "category": "mcpgawk" }
+    ],
+    "configuration": {
+      "title": "mcpgawk",
+      "properties": {
+        "mcpgawk.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to an mcp.json config to scan (relative to the workspace). Leave empty to auto-detect."
+        },
+        "mcpgawk.command": {
+          "type": "string",
+          "default": "mcpgawk",
+          "description": "How to invoke the mcpgawk CLI (e.g. 'mcpgawk', 'uvx mcpgawk', or an absolute path)."
+        }
+      }
+    }
+  },
+  "scripts": {}
+}
