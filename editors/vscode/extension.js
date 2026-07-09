@@ -5,18 +5,17 @@ const vscode = require("vscode");
 const cp = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 let statusBar;
+let resolvedCmd; // cache: the invocation that worked, e.g. "mcpgawk" or "uvx mcpgawk"
 
 function activate(context) {
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = "mcpgawk.scan";
   context.subscriptions.push(statusBar);
-  context.subscriptions.push(
-    vscode.commands.registerCommand("mcpgawk.scan", () => scan(true))
-  );
-  // quiet pass on activation to populate the status bar
-  scan(false);
+  context.subscriptions.push(vscode.commands.registerCommand("mcpgawk.scan", () => scan(true)));
+  scan(false); // quiet pass to populate the status bar
 }
 
 function cfg(key, dflt) {
@@ -26,6 +25,37 @@ function cfg(key, dflt) {
 function workspaceRoot() {
   const f = vscode.workspace.workspaceFolders;
   return f && f.length ? f[0].uri.fsPath : undefined;
+}
+
+// GUI apps on macOS often don't inherit the shell PATH, so `mcpgawk`/`uvx` in
+// ~/.local/bin etc. aren't found. Prepend the usual install locations.
+function childEnv() {
+  const extra = [
+    path.join(os.homedir(), ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    path.join(os.homedir(), ".cargo", "bin"),
+  ];
+  const env = Object.assign({}, process.env);
+  env.PATH = extra.join(":") + ":" + (env.PATH || "");
+  return env;
+}
+
+function tryHelp(cmd) {
+  return new Promise((resolve) => {
+    cp.exec(`${cmd} --help`, { env: childEnv(), timeout: 60000 }, (err) => resolve(!err));
+  });
+}
+
+// Resolve how to call the CLI: explicit setting → mcpgawk → uvx mcpgawk → python -m mcpgawk.
+async function resolveCommand() {
+  const explicit = (cfg("command", "") || "").trim();
+  if (explicit) return explicit;
+  if (resolvedCmd) return resolvedCmd;
+  for (const cand of ["mcpgawk", "uvx mcpgawk", "python3 -m mcpgawk", "python -m mcpgawk"]) {
+    if (await tryHelp(cand)) { resolvedCmd = cand; return cand; }
+  }
+  return undefined; // not found anywhere
 }
 
 function findConfig(root) {
@@ -44,6 +74,21 @@ function extractJson(text) {
   try { return JSON.parse(m[1]); } catch (_) { return null; }
 }
 
+async function promptInstall() {
+  const pick = await vscode.window.showErrorMessage(
+    "mcpgawk CLI not found. The easiest fix needs no install — run it with uvx.",
+    "Use uvx", "pip install", "Docs");
+  if (pick === "Use uvx") {
+    await vscode.workspace.getConfiguration("mcpgawk").update("command", "uvx mcpgawk", vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage("Set mcpgawk to run via `uvx mcpgawk`. Run the scan again.");
+  } else if (pick === "pip install") {
+    const t = vscode.window.createTerminal("Install mcpgawk");
+    t.show(); t.sendText("pip install mcpgawk");
+  } else if (pick === "Docs") {
+    vscode.env.openExternal(vscode.Uri.parse("https://mcp.gawk.dev"));
+  }
+}
+
 async function scan(interactive) {
   const root = workspaceRoot();
   if (!root) { if (interactive) vscode.window.showWarningMessage("mcpgawk: open a folder with an mcp.json first."); return; }
@@ -53,34 +98,23 @@ async function scan(interactive) {
     if (interactive) vscode.window.showWarningMessage("mcpgawk: no mcp.json found in this workspace.");
     return;
   }
-  const command = cfg("command", "mcpgawk");
-  const cmd = `${command} scan ${JSON.stringify(config)} --json`;
-
-  const run = () => new Promise((resolve) => {
-    cp.exec(cmd, { cwd: root, timeout: 120000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ err, stdout: stdout || "", stderr: stderr || "" });
-    });
-  });
 
   if (interactive) statusBar.text = "$(sync~spin) mcpgawk…";
-  const { err, stdout, stderr } = await run();
-  const data = extractJson(stdout);
+  const base = await resolveCommand();
+  if (!base) { statusBar.hide(); if (interactive) await promptInstall(); return; }
+
+  const cmd = `${base} scan ${JSON.stringify(config)} --json`;
+  const result = await new Promise((resolve) => {
+    cp.exec(cmd, { cwd: root, env: childEnv(), timeout: 120000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => resolve({ err, stdout: stdout || "", stderr: stderr || "" }));
+  });
+  const data = extractJson(result.stdout);
 
   if (!data) {
     statusBar.hide();
-    const notFound = /not found|ENOENT|command not found|No module named/i.test((err && err.message) || stderr);
-    if (notFound) {
-      const pick = await vscode.window.showErrorMessage(
-        "mcpgawk CLI not found. Install it to scan MCP servers.", "Install", "Docs");
-      if (pick === "Install") {
-        const t = vscode.window.createTerminal("Install mcpgawk");
-        t.show(); t.sendText("pip install mcpgawk");
-      } else if (pick === "Docs") {
-        vscode.env.openExternal(vscode.Uri.parse("https://mcp.gawk.dev"));
-      }
-    } else if (interactive) {
-      vscode.window.showErrorMessage("mcpgawk: scan failed. " + ((stderr || "").split("\n").pop() || ""));
-    }
+    const notFound = /not found|ENOENT|No module named|No such file/i.test((result.err && result.err.message) || result.stderr);
+    if (notFound) { resolvedCmd = undefined; await promptInstall(); }
+    else if (interactive) vscode.window.showErrorMessage("mcpgawk: scan failed. " + ((result.stderr || "").trim().split("\n").pop() || ""));
     return;
   }
 
@@ -98,7 +132,7 @@ async function scan(interactive) {
   const total = rows.reduce((a, r) => a + r.tokens, 0);
 
   statusBar.text = `$(shield) ${total.toLocaleString()} tok`;
-  statusBar.tooltip = `mcpgawk — ${rows.length} MCP server(s) load ${total.toLocaleString()} tokens at connect. Click to see the breakdown.`;
+  statusBar.tooltip = `mcpgawk — ${rows.length} MCP server(s) load ${total.toLocaleString()} tokens at connect. Click for the breakdown.`;
   statusBar.show();
 
   if (interactive) showPanel(rows, total, path.basename(config));

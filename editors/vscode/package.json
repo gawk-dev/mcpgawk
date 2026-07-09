@@ -2,7 +2,7 @@
   "name": "mcpgawk",
   "displayName": "mcpgawk — MCP cost & hygiene",
   "description": "See what your MCP servers cost and expose, right in your editor. Local — nothing leaves your machine.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "gawk-dev",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -29,8 +29,8 @@
         },
         "mcpgawk.command": {
           "type": "string",
-          "default": "mcpgawk",
-          "description": "How to invoke the mcpgawk CLI (e.g. 'mcpgawk', 'uvx mcpgawk', or an absolute path)."
+          "default": "",
+          "description": "How to invoke the mcpgawk CLI. Leave empty to auto-detect (tries mcpgawk, then 'uvx mcpgawk', then 'python -m mcpgawk'). Override with e.g. 'uvx mcpgawk' or an absolute path."
         }
       }
     }
