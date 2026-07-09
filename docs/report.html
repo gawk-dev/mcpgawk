@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The MCP token tax — benchmark report · mcpgawk</title>
+<title>The MCP token tax · benchmark report · mcpgawk</title>
 <meta name="description" content="What real MCP servers cost your AI's context at connect. Measured locally with mcpgawk. Nothing uploaded.">
 <meta name="robots" content="noindex">
 <link rel="icon" href="assets/brand/favicon.svg">
@@ -41,14 +41,14 @@
   <div class="wrap" style="max-width:760px">
     <p class="n-kicker n-kicker--accent">Benchmark · cost only</p>
     <h1 class="n-display" style="margin-top:14px">The MCP token tax</h1>
-    <p class="n-lead" style="margin-top:16px">You pay it on every prompt — before you type a word.</p>
+    <p class="n-lead" style="margin-top:16px">You pay it on every prompt, before you type a word.</p>
 
     <div class="prose" style="margin-top:28px">
-      <p class="n-body">Connect an MCP server and it loads <em>every</em> tool definition into your model — used or not, on every request. We measured the ones developers actually use.</p>
+      <p class="n-body">Connect an MCP server and it loads <em>every</em> tool definition into your model, used or not, on every request. We measured the ones developers actually use.</p>
 
-      <p class="n-body" style="font-size:1.15em">The two most-installed dev-tool MCPs: <span class="n-em">35,600 tokens</span> at connect. Roughly a quarter of your context window — gone before your first prompt.</p>
+      <p class="n-body" style="font-size:1.15em">The two most-installed dev-tool MCPs load <span class="n-em">35,600 tokens</span> at connect. Roughly a quarter of your context window, gone before your first prompt.</p>
 
-      <p class="n-body">The surprise: it isn't how <em>many</em> tools. It's how <em>heavy</em>. The heaviest MCP packs 20 tools into 23,085 tokens. Cloudflare fits 23 into 3,570 — <span class="n-em">6.5&times; lighter</span>, same job.</p>
+      <p class="n-body">It isn't how <em>many</em> tools. It's how <em>heavy</em>. The heaviest MCP packs 20 tools into 23,085 tokens. Cloudflare fits 23 into 3,570. That's <span class="n-em">6.5&times; lighter</span>, same job.</p>
     </div>
 
     <div class="prose wide" style="margin-top:8px">
@@ -67,7 +67,7 @@
     </div>
 
     <div class="prose" style="margin-top:28px">
-      <p class="n-body">And heavy isn't just expensive. In controlled tests, once the tool list gets long the model picks the <em>wrong</em> tool more often — one study: <span class="n-data">13.6%</span> right, versus <span class="n-data">43.1%</span> when the list is trimmed.</p>
+      <p class="n-body">Heavy tools cost accuracy too. In controlled tests, once the tool list gets long the model picks the <em>wrong</em> tool more often. One study: <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> when the list was trimmed.</p>
 
       <p class="n-body" style="font-size:1.15em">The fix already exists.</p>
       <p class="n-body">Cloudflare: 23 tools in 3,570 tokens, destructive ones labelled. Exa: ships two, lets you add more. <strong>Lean is a choice.</strong></p>
@@ -81,7 +81,7 @@
     </div>
 
     <p class="n-small" style="margin-top:30px;border-top:1px solid var(--hairline);padding-top:16px">
-      Tokens counted with a named index (cl100k) — a comparable ruler, not exact Claude billing; the <em>relative</em> picture (6.5&times; is 6.5&times;) holds. This is a cost report; per-vendor capability findings go to vendors privately, not here. Free &amp; open-source · <a href="https://gawk.dev">gawk.dev</a>
+      Tokens counted with a named index (cl100k), a comparable ruler, not exact Claude billing; the <em>relative</em> picture (6.5&times; is 6.5&times;) holds. This is a cost report; per-vendor capability findings go to vendors privately, not here. Free and open-source · <a href="https://gawk.dev">gawk.dev</a>
     </p>
   </div>
 </section>
