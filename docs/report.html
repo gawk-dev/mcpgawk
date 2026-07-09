@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The MCP token tax — benchmark report · mcpgawk</title>
+<meta name="description" content="What real MCP servers cost your AI's context at connect. Measured locally with mcpgawk. Nothing uploaded.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="assets/brand/favicon.svg">
+<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+<link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=sentient@400,500,700&f[]=supreme@400,500&f[]=tabular@400,500&display=swap">
+<link rel="stylesheet" href="styles.css">
+<style>
+  .nav-links a.n-btn{color:var(--on-accent)}
+  .nav-links a.n-btn:hover{color:var(--on-accent)}
+  .report-table tr.heavy td{background:color-mix(in srgb, var(--accent) 9%, transparent)}
+  .report-table tr.lean td{background:color-mix(in srgb, var(--ok) 12%, transparent)}
+  .report-table td.num,.report-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .report-note{margin-top:10px}
+  .kpi{font-family:var(--font-mono,ui-monospace,monospace);font-weight:500}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/">
+      <img class="brand-icon" src="assets/brand/nativerse-mark.svg" alt="">
+      <span class="brand-name">mcpgawk</span>
+    </a>
+    <nav class="nav-links">
+      <a href="https://github.com/gawk-dev/mcpgawk">GitHub</a>
+      <a href="https://pypi.org/project/mcpgawk/">PyPI</a>
+      <a class="n-btn n-btn--sm cta" href="/#measure">Measure your stack</a>
+    </nav>
+  </div>
+</header>
+
+<!-- REPORT -->
+<section class="sec">
+  <div class="wrap" style="max-width:760px">
+    <p class="n-kicker n-kicker--accent">Benchmark · cost only</p>
+    <h1 class="n-display" style="margin-top:14px">The MCP token tax</h1>
+    <p class="n-lead" style="margin-top:16px">You pay it on every prompt — before you type a word.</p>
+
+    <div class="prose" style="margin-top:28px">
+      <p class="n-body">Connect an MCP server and it loads <em>every</em> tool definition into your model — used or not, on every request. We measured the ones developers actually use.</p>
+
+      <p class="n-body" style="font-size:1.15em">The two most-installed dev-tool MCPs: <span class="n-em">35,600 tokens</span> at connect. Roughly a quarter of your context window — gone before your first prompt.</p>
+
+      <p class="n-body">The surprise: it isn't how <em>many</em> tools. It's how <em>heavy</em>. The heaviest MCP packs 20 tools into 23,085 tokens. Cloudflare fits 23 into 3,570 — <span class="n-em">6.5&times; lighter</span>, same job.</p>
+    </div>
+
+    <div class="prose wide" style="margin-top:8px">
+      <table class="report-table">
+        <thead><tr><th>Server</th><th class="num">Tools</th><th class="num">Tokens at connect</th></tr></thead>
+        <tbody>
+          <tr class="heavy"><td>Heaviest dev-tool MCP</td><td class="num">20</td><td class="num">23,085</td></tr>
+          <tr><td>A popular web-data MCP</td><td class="num">26</td><td class="num">19,235</td></tr>
+          <tr><td>The most-installed MCP</td><td class="num">44</td><td class="num">12,511</td></tr>
+          <tr><td>A major deploy MCP</td><td class="num">24</td><td class="num">7,135</td></tr>
+          <tr class="lean"><td>Cloudflare</td><td class="num">23</td><td class="num">3,570</td></tr>
+          <tr class="lean"><td>Exa</td><td class="num">2</td><td class="num">520</td></tr>
+        </tbody>
+      </table>
+      <p class="n-small report-note">Measured locally with mcpgawk. Heavy servers anonymised; the lean ones named with credit. Nothing uploaded.</p>
+    </div>
+
+    <div class="prose" style="margin-top:28px">
+      <p class="n-body">And heavy isn't just expensive. In controlled tests, once the tool list gets long the model picks the <em>wrong</em> tool more often — one study: <span class="n-data">13.6%</span> right, versus <span class="n-data">43.1%</span> when the list is trimmed.</p>
+
+      <p class="n-body" style="font-size:1.15em">The fix already exists.</p>
+      <p class="n-body">Cloudflare: 23 tools in 3,570 tokens, destructive ones labelled. Exa: ships two, lets you add more. <strong>Lean is a choice.</strong></p>
+    </div>
+
+    <!-- CTA -->
+    <div class="n-card" style="margin-top:32px">
+      <p class="n-title" style="margin:0">See your own tax.</p>
+      <p class="n-body" style="margin:8px 0 14px">One command. Nothing leaves your machine.</p>
+      <p class="n-mono" style="background:var(--paper-3);padding:12px 14px;border-radius:8px;margin:0">pip install mcpgawk<br>mcpgawk scan mcp.json</p>
+    </div>
+
+    <p class="n-small" style="margin-top:30px;border-top:1px solid var(--hairline);padding-top:16px">
+      Tokens counted with a named index (cl100k) — a comparable ruler, not exact Claude billing; the <em>relative</em> picture (6.5&times; is 6.5&times;) holds. This is a cost report; per-vendor capability findings go to vendors privately, not here. Free &amp; open-source · <a href="https://gawk.dev">gawk.dev</a>
+    </p>
+  </div>
+</section>
+
+</body>
+</html>
