@@ -89,10 +89,31 @@
 
   .publisher-note{text-align:center;color:var(--ink-muted);max-width:60ch;margin:0 auto}
 
-  /* elegant staggered reveal for the workflow possibilities */
-  .reveal{opacity:0;transform:translateY(24px);transition:opacity .75s ease,transform .75s cubic-bezier(.22,1,.36,1)}
-  .reveal.in{opacity:1;transform:none}
-  @media (prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}}
+  /* hero proof: workflow sits BEHIND the receipt; the receipt fades off to reveal it */
+  .proof-stack{position:relative;min-height:340px}
+  .proof-layer{position:absolute;inset:0;transition:opacity .8s ease}
+  .proof-layer .receipt,.proof-layer .wf-card{height:100%}
+  .proof-receipt{z-index:2;opacity:1}
+  .proof-workflow{z-index:1;opacity:1}
+  .proof-stack.revealed .proof-receipt{opacity:0;pointer-events:none}
+  .wf-card{border:1px solid var(--hairline);border-radius:14px;background:var(--paper);
+    padding:22px 24px;display:flex;flex-direction:column}
+  .wf-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--hairline)}
+  .wf-row:last-child{border-bottom:0}
+  .wf-ic{width:22px;height:22px;flex:0 0 auto;color:var(--ink-muted);display:inline-flex}
+  .wf-ic svg{width:100%;height:100%;fill:currentColor}
+  .wf-txt{display:flex;flex-direction:column;flex:1 1 auto;min-width:0}
+  .wf-t{font:600 14px/1.2 var(--font-text,inherit);color:var(--ink)}
+  .wf-s{font:400 12.5px/1.3 var(--font-mono,ui-monospace,monospace);color:var(--ink-muted);
+    margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wf-act{flex:0 0 auto}
+  .wf-act a{font:500 12.5px/1 var(--font-text,inherit);color:var(--accent);text-decoration:none;white-space:nowrap}
+  .wf-act a:hover{text-decoration:underline}
+  button.wf-act{position:static}
+  .proof-hint{text-align:center;font:500 11.5px/1 var(--font-text,inherit);color:var(--ink-faint,var(--ink-muted));
+    letter-spacing:.04em;margin-top:12px;opacity:.7;transition:opacity .4s ease}
+  .proof-stack.revealed ~ .proof-hint{opacity:.4}
+  @media (prefers-reduced-motion:reduce){.proof-layer{transition:none}}
 </style>
 <script>
   // === Supabase lead capture — publishable key is safe in the browser; the
@@ -135,61 +156,48 @@
         <p class="hero-trust">local · nothing uploaded · reproducible · Apache-2.0</p>
       </div>
       <div class="hero-proof">
-        <div class="proof-stack">
-          <div class="receipt">
-            <div class="receipt__head">
-              <span class="receipt__mark">$ mcpgawk scan mcp.json</span>
-              <span class="n-tag n-tag--ok"><span class="n-tag__dot"></span>LOCAL</span>
+        <div class="proof-stack" id="proofStack">
+          <!-- back layer: how to run it, revealed when the receipt fades off -->
+          <div class="proof-layer proof-workflow">
+            <div class="wf-card">
+              <p class="n-kicker n-kicker--accent" style="margin:0 0 4px">Add it to your workflow</p>
+              <p class="n-small" style="margin:0 0 6px;color:var(--ink-muted)">Three ways to run it.</p>
+              <div class="wf-row">
+                <span class="wf-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2.7 4.3 3 3-3 3 1.4 1.4L12 11.7 7.1 6.9 6.7 8.3Zm6.3 6.7v2h5v-2h-5Z"/></svg></span>
+                <div class="wf-txt"><span class="wf-t">Terminal</span><span class="wf-s">pip install mcpgawk</span></div>
+                <button class="snip-copy wf-act" data-copy="pip install mcpgawk">copy</button>
+              </div>
+              <div class="wf-row">
+                <span class="wf-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352ZM18.005 17.448 10.826 12l7.179-5.448v10.896Z"/></svg></span>
+                <div class="wf-txt"><span class="wf-t">Editor</span><span class="wf-s">VS Code / Cursor</span></div>
+                <span class="wf-act"><a href="https://open-vsx.org/extension/gawk-dev/mcpgawk">Install →</a></span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-ic"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></span>
+                <div class="wf-txt"><span class="wf-t">CI</span><span class="wf-s">GitHub Action</span></div>
+                <span class="wf-act"><a href="https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate">Add →</a></span>
+              </div>
             </div>
-            <div class="receipt__body">
-              <div class="receipt__line"><span class="receipt__k" style="color:var(--ok)">●</span><span class="receipt__id">cli-stdio&nbsp;&nbsp;proto=2025-11-25</span></div>
-              <div class="receipt__line"><span class="receipt__k"></span><span class="receipt__faint">14 tools&nbsp;&nbsp;2061 tok@connect</span></div>
-              <div class="receipt__line"><span class="receipt__k">·</span><span>write_file&nbsp;&nbsp;<span class="receipt__faint">131 tok · write, destructive-declared</span></span></div>
-              <div class="receipt__line"><span class="receipt__k">·</span><span>fetch_url&nbsp;&nbsp;<span class="receipt__faint">120 tok · exfil-capable</span></span></div>
-              <div class="receipt__sep"></div>
-              <div class="receipt__line"><span class="receipt__k"></span><span class="receipt__id">TOTAL&nbsp;&nbsp;14 tools · 2061 tok · 4 flagged</span></div>
+          </div>
+          <!-- front layer: the receipt (fades off to reveal the workflow behind) -->
+          <div class="proof-layer proof-receipt" id="proofReceipt">
+            <div class="receipt">
+              <div class="receipt__head">
+                <span class="receipt__mark">$ mcpgawk scan mcp.json</span>
+                <span class="n-tag n-tag--ok"><span class="n-tag__dot"></span>LOCAL</span>
+              </div>
+              <div class="receipt__body">
+                <div class="receipt__line"><span class="receipt__k" style="color:var(--ok)">●</span><span class="receipt__id">cli-stdio&nbsp;&nbsp;proto=2025-11-25</span></div>
+                <div class="receipt__line"><span class="receipt__k"></span><span class="receipt__faint">14 tools&nbsp;&nbsp;2061 tok@connect</span></div>
+                <div class="receipt__line"><span class="receipt__k">·</span><span>write_file&nbsp;&nbsp;<span class="receipt__faint">131 tok · write, destructive-declared</span></span></div>
+                <div class="receipt__line"><span class="receipt__k">·</span><span>fetch_url&nbsp;&nbsp;<span class="receipt__faint">120 tok · exfil-capable</span></span></div>
+                <div class="receipt__sep"></div>
+                <div class="receipt__line"><span class="receipt__k"></span><span class="receipt__id">TOTAL&nbsp;&nbsp;14 tools · 2061 tok · 4 flagged</span></div>
+              </div>
+              <p class="receipt__cap">nothing uploaded · reproduce it yourself</p>
             </div>
-            <p class="receipt__cap">nothing uploaded · reproduce it yourself</p>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- WORKFLOW (directly under the hero card; items reveal on view) -->
-<section class="sec" id="workflow">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="n-kicker">Add it to your workflow</p>
-      <h2 class="n-title" style="margin-top:14px">Run it wherever you work with MCP.</h2>
-    </div>
-    <div class="tools-grid tools-grid--three" id="workflowGrid">
-      <div class="n-card reveal" style="transition-delay:0ms">
-        <p class="n-kicker n-kicker--accent">Terminal</p>
-        <p class="n-body" style="margin:8px 0 12px">Scan a config or a single server. Nothing uploaded.</p>
-        <div class="snip">
-          <button class="snip-copy" data-copy="pip install mcpgawk&#10;mcpgawk scan mcp.json">copy</button>
-          <p class="n-mono" style="background:var(--paper-3);padding:12px 14px;border-radius:6px;white-space:pre-wrap;margin:0">pip install mcpgawk
-mcpgawk scan mcp.json</p>
-        </div>
-      </div>
-      <div class="n-card reveal" style="transition-delay:130ms">
-        <p class="n-kicker n-kicker--accent">Editor · VS Code / Cursor</p>
-        <p class="n-body" style="margin:8px 0 14px">Install the extension. It scans your workspace <span class="n-mono">mcp.json</span> and shows cost and capability inline.</p>
-        <a class="n-arrowlink n-arrowlink--mono" href="https://open-vsx.org/extension/gawk-dev/mcpgawk">Install from Open VSX →</a>
-      </div>
-      <div class="n-card reveal" style="transition-delay:260ms">
-        <p class="n-kicker n-kicker--accent">CI · GitHub Action</p>
-        <p class="n-body" style="margin:8px 0 12px">Gate every PR on token budget and drift.</p>
-        <div class="snip">
-          <button class="snip-copy" data-copy="- uses: gawk-dev/mcpgawk@v1&#10;  with:&#10;    config: mcp.json&#10;    max-tokens: 8000">copy</button>
-          <p class="n-mono" style="background:var(--paper-3);padding:12px 14px;border-radius:6px;white-space:pre-wrap;margin:0 0 10px;font-size:12.5px">- uses: gawk-dev/mcpgawk@v1
-  with:
-    config: mcp.json
-    max-tokens: 8000</p>
-        </div>
-        <a class="n-arrowlink n-arrowlink--mono" href="https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate">On the Marketplace →</a>
       </div>
     </div>
   </div>
@@ -337,15 +345,15 @@ mcpgawk scan mcp.json</p>
   var backdrop = document.getElementById('rdBackdrop');
   var isModal = false;
 
-  // elegant reveal: fade the workflow possibilities in, staggered, when they scroll into view
-  var reveals = document.querySelectorAll('.reveal');
-  if('IntersectionObserver' in window && reveals.length){
-    var io = new IntersectionObserver(function(entries){
-      entries.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target); } });
-    }, {threshold:0.2, rootMargin:'0px 0px -8% 0px'});
-    for(var r=0;r<reveals.length;r++){ io.observe(reveals[r]); }
-  } else {
-    for(var r2=0;r2<reveals.length;r2++){ reveals[r2].classList.add('in'); }
+  // hero proof: the receipt fades off to reveal the workflow behind it.
+  // hovering the stack peeks back at the receipt (the proof).
+  var proofStack = document.getElementById('proofStack');
+  if(proofStack){
+    var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(!reduceMotion){ setTimeout(function(){ proofStack.classList.add('revealed'); }, 2800); }
+    else { proofStack.classList.add('revealed'); }   // no animation: show the workflow (the actionable layer)
+    proofStack.addEventListener('mouseenter', function(){ proofStack.classList.remove('revealed'); });
+    proofStack.addEventListener('mouseleave', function(){ proofStack.classList.add('revealed'); });
   }
 
   function openModal(){
