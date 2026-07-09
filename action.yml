@@ -1,4 +1,4 @@
-name: 'mcpgawk — MCP hygiene gate'
+name: 'mcpgawk MCP hygiene gate'
 description: 'Scan your MCP servers in CI and fail the build if one is too heavy or trips a signal. Local, nothing uploaded.'
 author: 'nativerse'
 branding:
