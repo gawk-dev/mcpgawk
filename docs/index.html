@@ -369,11 +369,15 @@
     proofStack.addEventListener('mouseleave', function(){ proofStack.classList.add('revealed'); });
   }
 
+  var reportSec = document.getElementById('report');
   function openModal(){
     if(isModal) return; isModal = true;
     card.classList.remove('rd-leaving');
     card.classList.add('as-modal');
     backdrop.classList.add('show');
+    // lift the report section (and its fixed card) above the backdrop — the .sec{z-index:1}
+    // rule for the logo layer otherwise traps the card BELOW the backdrop.
+    if(reportSec) reportSec.style.zIndex = '90';
     document.body.style.overflow = 'hidden';
     var f = document.getElementById('lf-name'); if(f) setTimeout(function(){ f.focus(); }, 120);
   }
@@ -384,7 +388,8 @@
     document.body.style.overflow = '';
     setTimeout(function(){
       card.classList.remove('as-modal','rd-leaving');           // dock back into the page
-      document.getElementById('report').scrollIntoView({behavior:'smooth', block:'center'});
+      if(reportSec) reportSec.style.zIndex = '';                // restore normal stacking
+      reportSec && reportSec.scrollIntoView({behavior:'smooth', block:'center'});
     }, 430);
   }
 
