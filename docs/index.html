@@ -76,6 +76,14 @@
   /* the card carries its own title only as a modal; inline, the left column already has it */
   .rd-head-in{display:none}
   .report-card.as-modal .rd-head-in{display:block}
+  /* modal polish — lift it out of "dull": blurred backdrop, accent header, stronger type */
+  .rd-backdrop{background:rgba(18,18,14,.55);backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}
+  .report-card.as-modal{border-top:4px solid var(--accent);padding-top:26px;box-shadow:0 30px 80px rgba(0,0,0,.34)}
+  .report-card.as-modal .rd-head-in h3{font-size:26px;letter-spacing:-.01em}
+  .rd-sub{color:var(--ink-muted);font-size:13.5px;line-height:1.55;margin:0 0 18px}
+  .report-card.as-modal .lead-form input[type=text],
+  .report-card.as-modal .lead-form input[type=email]{padding:13px 15px;border-radius:10px}
+  .report-card.as-modal .lead-form button[type=submit]{width:100%;padding:14px 16px;font-size:15px;border-radius:10px;cursor:pointer}
   .rd-backdrop{position:fixed;inset:0;background:rgba(20,20,15,.5);
     opacity:0;visibility:hidden;transition:opacity .45s ease,visibility .45s;z-index:80}
   .rd-backdrop.show{opacity:1;visibility:visible}
@@ -280,8 +288,9 @@
       <div class="n-card report-card" id="reportCard">
         <button class="rd-close" id="rdClose" aria-label="Close">&times;</button>
         <div class="rd-head-in">
-          <p class="n-kicker n-kicker--accent" style="margin:0 0 4px">The full benchmark</p>
-          <h3 class="n-title" style="margin:0 0 16px">Get the report</h3>
+          <p class="n-kicker n-kicker--accent" style="margin:0 0 6px">The full benchmark</p>
+          <h3 class="n-title" style="margin:0 0 8px">Get the report</h3>
+          <p class="rd-sub">Free. Every server we measured, the per-tool cost, and where the tokens actually go.</p>
         </div>
         <form class="lead-form" id="leadForm" novalidate>
           <div>
