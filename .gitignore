@@ -11,3 +11,4 @@ build/
 assets/brand/_qa.html
 editors/vscode/*.vsix
 editors/vscode/node_modules/
+.vercel

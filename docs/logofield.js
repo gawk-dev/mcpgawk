@@ -12,23 +12,23 @@
   // blended, globally-spread set (US / China / Korea+Japan / Europe / India / SEAsia / LatAm).
   var LOGOS = [
     // Western AI
-    'openai','anthropic','google','gemini','meta','mistral','nvidia','huggingface','perplexity','grok','cursor','cohere',
+    'openai','anthropic','google','gemini','meta','mistral','nvidia','huggingface','perplexity','cursor',
     // China AI
     'deepseek','qwen','kimi','baidu',
     // Western software / MCP ecosystem
-    'github','gitlab','notion','slack','linear','stripe','cloudflare','figma','vercel','supabase','discord','docker',
+    'github','notion','slack','linear','stripe','cloudflare','figma','vercel','supabase',
     // China consumer/software
-    'tiktok','wechat','alibaba','xiaomi','huawei','weibo',
+    'tiktok','wechat','alibaba','xiaomi','huawei',
     // Korea / Japan
-    'naver','line','kakaotalk','rakuten','sony',
+    'naver','line','kakaotalk','rakuten',
     // SE Asia
     'grab','shopee',
     // Europe
-    'spotify','sap','klarna',
+    'spotify','sap',
     // India
-    'paytm','zoho','infosys','swiggy',
+    'paytm','zoho','infosys',
     // LatAm
-    'mercadolibre','nubank'
+    'mercadolibre'
   ];
 
   var MODE = (new URLSearchParams(location.search).get('fx') === 'a') ? 'a' : 'b';   // default: continuous flow
