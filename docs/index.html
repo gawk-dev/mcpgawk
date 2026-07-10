@@ -510,7 +510,7 @@
   (function renderTurnstile(){
     if(!SITEKEY) return;                                  // not configured yet
     if(window.turnstile && document.getElementById('cf-turnstile')){
-      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible', appearance: 'interaction-only' }); }catch(_){} }
+      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible' }); }catch(_){} }
       return;
     }
     setTimeout(renderTurnstile, 200);
