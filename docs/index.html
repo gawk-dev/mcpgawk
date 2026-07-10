@@ -14,7 +14,13 @@
 <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=sentient@400,500,700&f[]=supreme@400,500&f[]=tabular@400,500&display=swap">
 <link rel="stylesheet" href="styles.css">
 <style>
-  :root{--section-y:clamp(30px,3.4vw,52px)}   /* tighter spacing between sections */
+  /* golden-ratio (φ≈1.618) spacing scale: 12 → 20 → 32 → 52 → 84 */
+  :root{
+    --g-s:12px; --g-m:20px; --g-l:32px; --g-xl:52px; --g-2xl:84px;
+    --section-y:clamp(var(--g-l),3.8vw,var(--g-xl));   /* golden rhythm between sections */
+  }
+  .sec-head{margin-bottom:var(--g-l)}                  /* golden gap: heading → content */
+  .sec-head .n-lead{margin-top:var(--g-m)}
   .nav-links a.n-btn{color:var(--on-accent)}
   .nav-links a.n-btn:hover{color:var(--on-accent)}
   .nav-links a.n-btn--secondary{color:var(--ink)}
@@ -34,7 +40,7 @@
   .snip-copy.copied{border-color:var(--ok);color:var(--ok)}
 
   /* cost: number contrast instead of a dense table */
-  .contrast{display:flex;align-items:stretch;gap:18px;flex-wrap:wrap;margin:30px 0 22px}
+  .contrast{display:flex;align-items:stretch;gap:var(--g-m);flex-wrap:wrap;margin:var(--g-l) 0 var(--g-m)}
   .contrast__item{flex:1 1 240px;border:1px solid var(--hairline);border-radius:14px;padding:22px 24px}
   .contrast__item--good{border-color:color-mix(in srgb,var(--ok) 45%,var(--hairline))}
   .contrast__n{display:block;font:600 38px/1 var(--font-mono,ui-monospace,monospace);letter-spacing:-.01em}
@@ -49,7 +55,7 @@
   @media (prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}}
 
   /* how-it-works flow card (replaces the "available on" strip) */
-  .how-card{border:1px solid var(--hairline);border-radius:16px;padding:30px 30px 22px;background:var(--paper)}
+  .how-card{border:1px solid var(--hairline);border-radius:16px;padding:var(--g-l) var(--g-l) var(--g-m);background:var(--paper)}
   .how-flow{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap}
   .how-node{flex:1 1 190px;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 12px;text-align:center}
   .how-ic{width:36px;height:36px;color:var(--ink-muted);display:inline-flex}
@@ -256,7 +262,7 @@
 <!-- HOW IT WORKS -->
 <section class="sec" id="how">
   <div class="wrap">
-    <div class="sec-head">
+    <div class="sec-head reveal">
       <p class="n-kicker">How it works</p>
       <h2 class="n-title" style="margin-top:12px">Point it at a server. It measures. Nothing leaves.</h2>
     </div>
@@ -291,7 +297,7 @@
 <!-- THE COST -->
 <section class="sec" id="cost">
   <div class="wrap">
-    <div class="sec-head">
+    <div class="sec-head reveal">
       <p class="n-kicker">The cost</p>
       <h2 class="n-display">A quarter of your context window, gone before your first prompt.</h2>
       <p class="n-lead">It isn't how <em>many</em> tools a server has. It's how heavy each one is.</p>
@@ -307,14 +313,14 @@
         <span class="contrast__l">tokens at connect · Cloudflare · 23 tools, same job</span>
       </div>
     </div>
-    <p class="n-body" style="max-width:60ch">Heavy tools cost accuracy too. Past a long tool list, the model picks the <em>wrong</em> tool more often. One study measured <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> once the list was trimmed. Lean is a choice.</p>
+    <p class="n-body reveal" style="max-width:60ch">Heavy tools cost accuracy too. Past a long tool list, the model picks the <em>wrong</em> tool more often. One study measured <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> once the list was trimmed. Lean is a choice.</p>
   </div>
 </section>
 
 <!-- PUBLISHER NOTE (one line) -->
 <section class="sec" style="padding-top:0">
   <div class="wrap">
-    <p class="publisher-note n-small">Publishing an MCP server? Run mcpgawk on your own. See what it costs your users, and where annotations are missing. Most fixes are one line per tool.</p>
+    <p class="publisher-note n-small reveal">Publishing an MCP server? Run mcpgawk on your own. See what it costs your users, and where annotations are missing. Most fixes are one line per tool.</p>
   </div>
 </section>
 
@@ -415,11 +421,10 @@
   // hovering the stack peeks back at the receipt (the proof).
   var proofStack = document.getElementById('proofStack');
   if(proofStack){
-    var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if(!reduceMotion){ setTimeout(function(){ proofStack.classList.add('revealed'); }, 2800); }
-    else { proofStack.classList.add('revealed'); }   // no animation: show the workflow (the actionable layer)
-    proofStack.addEventListener('mouseenter', function(){ proofStack.classList.remove('revealed'); });
-    proofStack.addEventListener('mouseleave', function(){ proofStack.classList.add('revealed'); });
+    // receipt shows by default; moving onto the tile reveals "Add it to your workflow"
+    proofStack.addEventListener('mouseenter', function(){ proofStack.classList.add('revealed'); });
+    proofStack.addEventListener('mouseleave', function(){ proofStack.classList.remove('revealed'); });
+    proofStack.addEventListener('touchstart', function(){ proofStack.classList.toggle('revealed'); }, { passive:true }); // tap toggles on mobile
   }
 
   // reveal-on-scroll for the cost tiles (flow left->right) + the proportional bar graphic
