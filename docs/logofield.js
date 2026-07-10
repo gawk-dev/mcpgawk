@@ -9,21 +9,29 @@
   var field = document.getElementById('logoField');
   if (!field) return;
 
-  // blended, globally-spread set (US / China / Korea+Japan / Europe / India / LatAm).
+  // blended, globally-spread set (US / China / Korea+Japan / Europe / India / SEAsia / LatAm).
   var LOGOS = [
     // Western AI
-    'openai','anthropic','google','gemini','meta','mistral','nvidia','huggingface','perplexity','grok','cursor',
+    'openai','anthropic','google','gemini','meta','mistral','nvidia','huggingface','perplexity','grok','cursor','cohere',
     // China AI
     'deepseek','qwen','kimi','baidu',
     // Western software / MCP ecosystem
-    'github','notion','slack','linear','stripe','cloudflare','figma','vercel','supabase',
+    'github','gitlab','notion','slack','linear','stripe','cloudflare','figma','vercel','supabase','discord','docker',
     // China consumer/software
-    'tiktok','wechat','alibaba','xiaomi',
-    // Europe / Korea+Japan / India / LatAm
-    'spotify','sap','naver','rakuten','mercadolibre','paytm'
+    'tiktok','wechat','alibaba','xiaomi','huawei','weibo',
+    // Korea / Japan
+    'naver','line','kakaotalk','rakuten','sony',
+    // SE Asia
+    'grab','shopee',
+    // Europe
+    'spotify','sap','klarna',
+    // India
+    'paytm','zoho','infosys','swiggy',
+    // LatAm
+    'mercadolibre','nubank'
   ];
 
-  var MODE = (new URLSearchParams(location.search).get('fx') === 'b') ? 'b' : 'a';
+  var MODE = (new URLSearchParams(location.search).get('fx') === 'a') ? 'a' : 'b';   // default: continuous flow
   var PERSPECTIVE = 1000;                 // must match CSS perspective on #logoField
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -62,14 +70,10 @@
     return p;
   });
 
-  function depthOpacity(z) {
-    var o = (z + 950) / 1250;
-    return Math.max(0.05, Math.min(0.6, 0.05 + o * 0.55));
-  }
   function place(p, wx, wy) {
     p.el.style.transform =
       'translate3d(' + (p.x + wx) + 'px,' + (p.y + wy) + 'px,' + p.z + 'px) translate(-50%,-50%)';
-    p.el.style.opacity = depthOpacity(p.z);
+    // full opacity — logos read at full strength (they sit behind the text either way)
   }
 
   if (reduce) {                           // no animation: settle statically
