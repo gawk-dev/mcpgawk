@@ -135,11 +135,12 @@
 </style>
 <script src="logofield.js" defer></script>
 <script>
-  // === Supabase lead capture — publishable key is safe in the browser; the
-  // leads table is INSERT-only via RLS, so the list can never be read back. ===
-  window.MCPGAWK_SUPABASE_URL = "https://jqthdujphvmlebbjvums.supabase.co";
-  window.MCPGAWK_SUPABASE_ANON_KEY = "sb_publishable_Hdwjc-HHN3eOUrGf0Ff28g_1rwXrdh8";
+  // Lead capture now goes through the /api/lead serverless function (verifies Cloudflare
+  // Turnstile + guards, inserts via the service-role key server-side). Only the public
+  // Turnstile SITE key lives here — paste it after creating the widget in Cloudflare.
+  window.MCPGAWK_TURNSTILE_SITEKEY = "";
 </script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
 
@@ -314,6 +315,7 @@
             <input type="checkbox" id="lf-optin" name="opt_in">
             <span class="lead-consent">Email me occasional MCP findings and product updates. No spam; unsubscribe anytime.</span>
           </label>
+          <div id="cf-turnstile" style="margin:2px 0"></div>
           <button class="n-btn" type="submit" id="lf-submit" style="margin-top:4px">Send me the report →</button>
           <p class="lead-status" id="lf-status" role="status"></p>
         </form>
@@ -442,15 +444,28 @@
     });
   }
 
-  // form submit -> Supabase (insert-only)
+  // form submit -> /api/lead (serverless: verifies Turnstile + guards, inserts via service-role)
   var form = document.getElementById('leadForm');
   if(!form) return;
   var status = document.getElementById('lf-status');
   var submitBtn = document.getElementById('lf-submit');
   var doneEl = document.getElementById('leadDone');
   var loadedAt = Date.now();
+  var SITEKEY = window.MCPGAWK_TURNSTILE_SITEKEY || '';
+  var tsWidget = null;
+
+  // render the Cloudflare Turnstile widget once its API + the container are both ready
+  (function renderTurnstile(){
+    if(!SITEKEY) return;                                  // not configured yet
+    if(window.turnstile && document.getElementById('cf-turnstile')){
+      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible' }); }catch(_){} }
+      return;
+    }
+    setTimeout(renderTurnstile, 200);
+  })();
 
   function fail(msg){ status.textContent = msg; status.classList.add('err'); }
+  function resetTs(){ try{ if(window.turnstile && tsWidget !== null) turnstile.reset(tsWidget); }catch(_){} }
   function reveal(){
     try{ localStorage.setItem('mcpgawk_lead_done','1'); }catch(_){}
     form.style.display = 'none';
@@ -460,32 +475,36 @@
   form.addEventListener('submit', function(e){
     e.preventDefault();
     status.textContent = ''; status.classList.remove('err');
-    if(form.website && form.website.value){ return; }                 // honeypot
+    if(form.website && form.website.value){ return; }                 // honeypot (also re-checked server-side)
     if(Date.now() - loadedAt < 2500){ fail('Just a moment — try again.'); return; }
 
     var name = form.name.value.trim();
     var email = form.email.value.trim();
     if(!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ fail('Please enter your name and a valid email.'); return; }
 
-    var URL = window.MCPGAWK_SUPABASE_URL, KEY = window.MCPGAWK_SUPABASE_ANON_KEY;
-    var payload = { name:name, email:email, company: form.company.value.trim() || null,
-      wants_scan: form.wants_scan.checked, opt_in: form.opt_in.checked, source: 'mcp.gawk.dev' };
+    var token = (window.turnstile && tsWidget !== null) ? turnstile.getResponse(tsWidget) : '';
+    if(!token){ resetTs(); fail('One moment — verifying you’re human, then hit send again.'); return; }
 
-    if(!URL || !KEY){ console.warn('[mcpgawk] Supabase not configured; revealing report without capture.'); reveal(); return; }
+    var payload = {
+      name:name, email:email, company: form.company.value.trim() || null,
+      wants_scan: form.wants_scan.checked, opt_in: form.opt_in.checked,
+      website: form.website ? form.website.value : '',
+      elapsed: Date.now() - loadedAt,
+      turnstileToken: token
+    };
 
     submitBtn.disabled = true; submitBtn.textContent = 'Sending…';
-    fetch(URL.replace(/\/$/,'') + '/rest/v1/leads', {
-      method:'POST',
-      headers:{ 'apikey':KEY, 'Authorization':'Bearer '+KEY, 'Content-Type':'application/json', 'Prefer':'return=minimal' },
-      body: JSON.stringify(payload)
-    }).then(function(res){
-      if(res.status === 201 || res.status === 409){ reveal(); return; }   // created, or already on the list
-      return res.text().then(function(t){ throw new Error(t || ('HTTP '+res.status)); });
-    }).catch(function(err){
-      console.error('[mcpgawk] lead submit failed:', err);
-      submitBtn.disabled = false; submitBtn.textContent = 'Send me the report →';
-      fail('Something went wrong — please try again in a moment.');
-    });
+    fetch('/api/lead', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) })
+      .then(function(res){
+        if(res.ok){ reveal(); return; }
+        return res.text().then(function(t){ throw new Error(t || ('HTTP '+res.status)); });
+      })
+      .catch(function(err){
+        console.error('[mcpgawk] lead submit failed:', err);
+        resetTs();
+        submitBtn.disabled = false; submitBtn.textContent = 'Send me the report →';
+        fail('Something went wrong — please try again in a moment.');
+      });
   });
 })();
 </script>
