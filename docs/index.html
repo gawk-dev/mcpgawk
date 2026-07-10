@@ -56,6 +56,10 @@
 
   /* how-it-works flow card (replaces the "available on" strip) */
   .how-card{border:1px solid var(--hairline);border-radius:16px;padding:var(--g-l) var(--g-l) var(--g-m);background:var(--paper)}
+  #howServer{position:relative}
+  .how-cyclelogo{position:absolute;left:0;top:50%;transform:translateY(-50%);width:34px;height:34px;object-fit:contain;
+    transition:opacity .45s ease;filter:drop-shadow(0 2px 6px rgba(20,20,15,.14));z-index:2}
+  @media(max-width:640px){.how-cyclelogo{left:auto;right:0;top:8px;transform:none}}
   .how-flow{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap}
   .how-node{flex:1 1 190px;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 12px;text-align:center}
   .how-ic{width:36px;height:36px;color:var(--ink-muted);display:inline-flex}
@@ -269,6 +273,7 @@
     <div class="how-card reveal">
       <div class="how-flow">
         <div class="how-node reveal" id="howServer" style="transition-delay:0ms">
+          <img id="howCycle" class="how-cyclelogo" alt="" aria-hidden="true">
           <span class="how-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm0 9h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Zm2.5-6.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 9a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg></span>
           <span class="how-t">Any MCP server</span>
           <span class="how-s">stdio · http · sse · oauth</span>
@@ -364,6 +369,9 @@
           </label>
           <div id="cf-turnstile" style="margin:2px 0"></div>
           <button class="n-btn" type="submit" id="lf-submit" style="margin-top:4px">Send me the report →</button>
+          <p class="lead-consent" style="display:flex;align-items:center;gap:6px;margin-top:2px">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 0 1 6 0v3H9Z"/></svg>
+            Protected by Cloudflare Turnstile — no puzzles, nothing tracked.</p>
           <p class="lead-status" id="lf-status" role="status"></p>
         </form>
         <div class="lead-done" id="leadDone">
@@ -437,6 +445,19 @@
   } else {
     for(var rj=0;rj<reveals.length;rj++){ reveals[rj].classList.add('in'); }
   }
+
+  // "Any MCP server" — cycle real MCP-server logos, one at a time, left of the node
+  (function(){
+    var cyc = document.getElementById('howCycle');
+    if(!cyc) return;
+    var SERVERS = ['github','notion','slack','linear','stripe','cloudflare','figma','supabase','discord','docker','vercel'];
+    var i = Math.floor(Math.random() * SERVERS.length);
+    cyc.src = 'assets/logos/' + SERVERS[i] + '.svg';
+    setInterval(function(){
+      cyc.style.opacity = '0';
+      setTimeout(function(){ i = (i + 1) % SERVERS.length; cyc.src = 'assets/logos/' + SERVERS[i] + '.svg'; cyc.style.opacity = '1'; }, 430);
+    }, 2000);
+  })();
 
   var reportSec = document.getElementById('report');
   function openModal(){
@@ -515,7 +536,7 @@
   (function renderTurnstile(){
     if(!SITEKEY) return;                                  // not configured yet
     if(window.turnstile && document.getElementById('cf-turnstile')){
-      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible' }); }catch(_){} }
+      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible', appearance: 'interaction-only' }); }catch(_){} }
       return;
     }
     setTimeout(renderTurnstile, 200);

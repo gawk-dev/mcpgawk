@@ -47,8 +47,9 @@
       fph: rand(0, 6.2832),
       // per-logo, non-uniform migration:
       migOff: rand(0, 0.30),                                            // staggered start
-      spin: (Math.random() < 0.5 ? 1 : -1) * rand(0.6, 1.7) * 2 * Math.PI, // varied turns + direction
-      toNode: (i % 6 === 2),                                            // ~1-in-6 fly to the "Any MCP" node
+      spin: (Math.random() < 0.5 ? 1 : -1) * rand(0.35, 0.85) * 2 * Math.PI, // soft arc, varied per logo
+      toNode: false,                                                    // field logos all go to the margins now
+
       z: 0
     };
   });
@@ -72,8 +73,8 @@
     if (!t0) { t0 = t; last = t; }
     var dt = Math.min(0.033, (t - last) / 1000); last = t;
     var elapsed = (t - t0) / 1000;
-    recede  += (recedeT  - recede)  * Math.min(1, dt * 3.4);    // FAST into the background
-    migrate += (migrateT - migrate) * Math.min(1, dt * 0.30);   // SLOW out to the margins (~5s)
+    recede += (recedeT - recede) * Math.min(1, dt * 3.4);       // FAST into the background (kept)
+    if (migrateT === 1) migrate = Math.min(1, migrate + dt / 7.0);  // LINEAR ~7s ramp out (no fast lurch)
     field.style.opacity = clamp(1 - 0.72 * recede + 0.30 * migrate, 0.24, 1).toFixed(3);
 
     if (migrateT === 1 && !captured) {   // freeze each margin logo's spiral start
