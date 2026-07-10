@@ -69,6 +69,9 @@
     var dt = Math.min(0.033, (t - last) / 1000); last = t;
     var elapsed = (t - t0) / 1000;
     recede += (recedeTarget - recede) * Math.min(1, dt * 3);   // ~0.35s ease
+    // as the field recedes, fade it to a faint backdrop so the small logos don't
+    // sit awkwardly over the content the reader is now looking at
+    field.style.opacity = (1 - 0.9 * recede).toFixed(3);
     var pad = 100;
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i];
