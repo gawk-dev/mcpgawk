@@ -42,6 +42,28 @@
   .contrast__x{display:flex;align-items:center;font:600 15px/1.2 var(--font-text,inherit);color:var(--accent);white-space:nowrap}
   @media(max-width:620px){.contrast__x{width:100%;justify-content:center;padding:4px 0}}
 
+  /* scroll reveal (cost tiles flow left->right) */
+  .reveal{opacity:0;transform:translateY(16px);transition:opacity .7s ease, transform .7s cubic-bezier(.22,1,.36,1)}
+  .reveal.in{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}}
+
+  /* proportional cost bars — same job, 6.5x the weight */
+  .costbars{margin:26px 0 6px;display:flex;flex-direction:column;gap:12px;max-width:640px}
+  .costbar-row{display:grid;grid-template-columns:150px 1fr auto;align-items:center;gap:14px}
+  .costbar-cap{font-size:12.5px;color:var(--ink-muted);text-align:right}
+  .costbar{position:relative;height:14px;background:var(--paper-3);border-radius:7px;overflow:hidden}
+  .costbar-fill{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:7px;
+    transition:width 1s cubic-bezier(.22,1,.36,1) .15s}
+  .reveal.in .costbar-fill{width:var(--w)}
+  .costbar-fill--heavy{background:var(--accent)}
+  .costbar-fill--lean{background:var(--ok)}
+  .costbar-num{font:600 14px/1 var(--font-mono,ui-monospace,monospace);min-width:56px;text-align:right}
+  @media(max-width:560px){.costbar-row{grid-template-columns:1fr auto;gap:6px 10px}.costbar-cap{grid-column:1/-1;text-align:left}}
+
+  /* workflow card footer — fills the dead space, pinned to bottom */
+  .wf-foot{margin-top:auto;padding-top:14px;border-top:1px solid var(--hairline);
+    font-size:12px;color:var(--ink-muted);letter-spacing:.02em}
+
   /* available-on credibility strip */
   .availbar{display:flex;align-items:center;gap:14px 30px;flex-wrap:wrap;
     border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);padding:18px 0}
@@ -200,6 +222,7 @@
                 <div class="wf-txt"><span class="wf-t">CI</span><span class="wf-s">GitHub Action</span></div>
                 <span class="wf-act"><a href="https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate">Add →</a></span>
               </div>
+              <p class="wf-foot">Runs locally · nothing leaves your machine</p>
             </div>
           </div>
           <!-- front layer: the receipt (fades off to reveal the workflow behind) -->
@@ -256,14 +279,27 @@
       <p class="n-lead">It isn't how <em>many</em> tools a server has. It's how heavy each one is.</p>
     </div>
     <div class="contrast">
-      <div class="contrast__item">
+      <div class="contrast__item reveal" style="transition-delay:0ms">
         <span class="contrast__n">23,085</span>
         <span class="contrast__l">tokens at connect · the heaviest dev-tool MCP · 20 tools</span>
       </div>
-      <div class="contrast__x">6.5× lighter&nbsp;→</div>
-      <div class="contrast__item contrast__item--good">
-        <span class="contrast__n">520</span>
-        <span class="contrast__l">tokens at connect · Exa · 2 tools, same job</span>
+      <div class="contrast__x reveal" style="transition-delay:150ms">6.5× lighter&nbsp;→</div>
+      <div class="contrast__item contrast__item--good reveal" style="transition-delay:300ms">
+        <span class="contrast__n">3,570</span>
+        <span class="contrast__l">tokens at connect · Cloudflare · 23 tools, same job</span>
+      </div>
+    </div>
+    <!-- proportional graphic: same job, 6.5× the weight -->
+    <div class="costbars reveal" style="transition-delay:420ms" aria-hidden="true">
+      <div class="costbar-row">
+        <span class="costbar-cap">Heaviest · 20 tools</span>
+        <span class="costbar"><span class="costbar-fill costbar-fill--heavy" style="--w:100%"></span></span>
+        <span class="costbar-num">23,085</span>
+      </div>
+      <div class="costbar-row">
+        <span class="costbar-cap">Cloudflare · 23 tools</span>
+        <span class="costbar"><span class="costbar-fill costbar-fill--lean" style="--w:15.5%"></span></span>
+        <span class="costbar-num">3,570</span>
       </div>
     </div>
     <p class="n-body" style="max-width:60ch">Heavy tools cost accuracy too. Past a long tool list, the model picks the <em>wrong</em> tool more often. One study measured <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> once the list was trimmed. Lean is a choice.</p>
@@ -381,6 +417,17 @@
     proofStack.addEventListener('mouseleave', function(){ proofStack.classList.add('revealed'); });
   }
 
+  // reveal-on-scroll for the cost tiles (flow left->right) + the proportional bar graphic
+  var reveals = document.querySelectorAll('.reveal');
+  if('IntersectionObserver' in window && reveals.length){
+    var revIO = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); revIO.unobserve(en.target); } });
+    }, {threshold:0.2, rootMargin:'0px 0px -6% 0px'});
+    for(var ri=0;ri<reveals.length;ri++){ revIO.observe(reveals[ri]); }
+  } else {
+    for(var rj=0;rj<reveals.length;rj++){ reveals[rj].classList.add('in'); }
+  }
+
   var reportSec = document.getElementById('report');
   function openModal(){
     if(isModal) return; isModal = true;
@@ -458,7 +505,7 @@
   (function renderTurnstile(){
     if(!SITEKEY) return;                                  // not configured yet
     if(window.turnstile && document.getElementById('cf-turnstile')){
-      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible' }); }catch(_){} }
+      if(tsWidget === null){ try{ tsWidget = turnstile.render('#cf-turnstile', { sitekey: SITEKEY, size: 'flexible', appearance: 'interaction-only' }); }catch(_){} }
       return;
     }
     setTimeout(renderTurnstile, 200);
