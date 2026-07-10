@@ -56,6 +56,11 @@
 
   /* how-it-works flow card (replaces the "available on" strip) */
   .how-card{border:1px solid var(--hairline);border-radius:16px;padding:var(--g-l) var(--g-l) var(--g-m);background:var(--paper)}
+  /* section tile frame (each content section sits on a tile) */
+  .sec-tile{border:1px solid var(--hairline);border-radius:18px;padding:var(--g-xl) var(--g-l);background:var(--paper)}
+  .sec-tile .sec-head{margin-bottom:var(--g-m)}
+  .sec-tile .contrast__item{background:var(--paper-2,var(--paper))}
+  @media(max-width:640px){.sec-tile{padding:var(--g-l) var(--g-m)}}
   #howServer{position:relative}
   .how-cyclewrap{position:absolute;left:-8px;top:50%;transform:translateY(-50%);
     width:62px;height:62px;display:flex;align-items:center;justify-content:center;z-index:2}
@@ -314,7 +319,8 @@
 <!-- THE COST -->
 <section class="sec" id="cost">
   <div class="wrap">
-    <div class="sec-head reveal">
+    <div class="sec-tile reveal">
+    <div class="sec-head">
       <p class="n-kicker">The cost</p>
       <h2 class="n-display">A quarter of your context window, gone before your first prompt.</h2>
       <p class="n-lead">It isn't how <em>many</em> tools a server has. It's how heavy each one is.</p>
@@ -330,7 +336,8 @@
         <span class="contrast__l">tokens at connect · Cloudflare · 23 tools, same job</span>
       </div>
     </div>
-    <p class="n-body reveal" style="max-width:60ch">Heavy tools cost accuracy too. Past a long tool list, the model picks the <em>wrong</em> tool more often. One study measured <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> once the list was trimmed. Lean is a choice.</p>
+    <p class="n-body" style="max-width:60ch">Heavy tools cost accuracy too. Past a long tool list, the model picks the <em>wrong</em> tool more often. One study measured <span class="n-data">13.6%</span> correct, then <span class="n-data">43.1%</span> once the list was trimmed. Lean is a choice.</p>
+    </div>
   </div>
 </section>
 

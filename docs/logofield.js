@@ -102,13 +102,18 @@
         place(p); continue;
       }
       var me = clamp((migrate - p.migOff) / (1 - p.migOff + 0.001), 0, 1);   // per-logo progress
-      // ENTROPIC path (not an arc): random wander + a pull to the margin that
-      // strengthens as it settles — each logo takes its own chaotic route.
-      p.vx += (rand(-1, 1) * 950 + (p.tx - p.x) * (0.9 + 5.5 * me)) * dt;
-      p.vy += (rand(-1, 1) * 950 + (p.ty - p.y) * (0.9 + 5.5 * me)) * dt;
-      var damp = Math.pow(0.5, dt / 0.30);
-      p.vx *= damp; p.vy *= damp;
+      // Pull firmly to the margin in X (leave the content), wander ENTROPICALLY in Y.
+      p.vx += (rand(-1, 1) * 170 + (p.tx - p.x) * (2.6 + 4 * me)) * dt;
+      p.vy += (rand(-1, 1) * 740) * dt;
+      p.vx *= Math.pow(0.5, dt / 0.26);
+      p.vy *= Math.pow(0.5, dt / 0.55);
       p.x += p.vx * dt; p.y += p.vy * dt;
+      // soft edge: a firm push-back whenever a logo strays toward the content column,
+      // so it exits gently and never sits over the text (no teleport)
+      var edge = (p.sideFrac < 0.5) ? 0.085 * W : 0.915 * W;
+      if (p.sideFrac < 0.5) { if (p.x > edge) p.vx -= (p.x - edge) * 9 * dt; }
+      else { if (p.x < edge) p.vx += (edge - p.x) * 9 * dt; }
+      if (p.y < -pad) p.y += H + 2 * pad; else if (p.y > H + pad) p.y -= H + 2 * pad;
       var deepPull = recede * (1 - migrate * 0.72);
       var bz = p.baseZ + (DEEP - p.baseZ) * deepPull;
       p.z = bz + Math.sin(elapsed * p.zSpd + p.ph) * p.zAmp * (0.5 + 0.5 * (1 - deepPull));
