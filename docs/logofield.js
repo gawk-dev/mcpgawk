@@ -36,6 +36,8 @@
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   var W = window.innerWidth, H = window.innerHeight;
+  // phones: fewer logos (CSS also shrinks them) so the field stays calm on a narrow screen
+  if (W <= 700) LOGOS = LOGOS.filter(function (_, i) { return i % 2 === 0; });
   function rand(a, b) { return a + Math.random() * (b - a); }
 
   // rest targets (mode A): bias to the margins so the readable centre stays clear.
