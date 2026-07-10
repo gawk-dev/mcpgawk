@@ -48,9 +48,7 @@
       // per-logo, non-uniform migration:
       migOff: rand(0, 0.30),                                            // staggered start
       spin: (Math.random() < 0.5 ? 1 : -1) * rand(0.35, 0.85) * 2 * Math.PI, // soft arc, varied per logo
-      toNode: false,                                                    // field logos all go to the margins now
-
-      z: 0
+      z: 0, vx: 0, vy: 0
     };
   });
   parts.forEach(function (p) { p.qt = Math.abs(p.spin) / (Math.PI / 2); });
@@ -74,17 +72,16 @@
     var dt = Math.min(0.033, (t - last) / 1000); last = t;
     var elapsed = (t - t0) / 1000;
     recede += (recedeT - recede) * Math.min(1, dt * 3.4);       // FAST into the background (kept)
-    if (migrateT === 1) migrate = Math.min(1, migrate + dt / 7.0);  // LINEAR ~7s ramp out (no fast lurch)
+    if (migrateT === 1) migrate = Math.min(1, migrate + dt / 10.0);  // LINEAR ~10s slow ramp out
     field.style.opacity = clamp(1 - 0.72 * recede + 0.30 * migrate, 0.24, 1).toFixed(3);
 
     if (migrateT === 1 && !captured) {   // freeze each margin logo's spiral start
       captured = true;
       for (var k = 0; k < parts.length; k++) {
         var q = parts[k];
-        if (q.toNode) continue;
         q.tx = q.sideFrac * W; q.ty = clamp(q.y, 0.06 * H, 0.94 * H);
-        var dx = q.x - q.tx, dy = q.y - q.ty;
-        q.R0 = Math.max(1, Math.hypot(dx, dy)); q.th0 = Math.atan2(dy, dx);
+        q.vx = Math.cos(q.heading) * q.speed;   // carry drift momentum into the wander
+        q.vy = Math.sin(q.heading) * q.speed;
       }
     }
 
@@ -104,23 +101,14 @@
         p.z = bz0 + Math.sin(elapsed * p.zSpd + p.ph) * p.zAmp * (0.5 + 0.5 * (1 - dp0));
         place(p); continue;
       }
-      var me = easeInOut(clamp((migrate - p.migOff) / (1 - p.migOff + 0.001), 0, 1));   // per-logo progress
-      if (p.toNode && nr) {               // settle faintly near the "Any MCP server" node
-        var oa = elapsed * 0.55 + p.fph;
-        var orb = 46 + 26 * Math.sin(elapsed * 0.3 + p.fph * 1.7);
-        var txn = nr.cx + Math.cos(oa) * orb;
-        var tyn = nr.cy - 6 + Math.sin(oa) * orb * 0.62;
-        p.x += (txn - p.x) * Math.min(1, me * 3 * dt);
-        p.y += (tyn - p.y) * Math.min(1, me * 3 * dt);
-        p.el.style.opacity = (0.55 - 0.32 * me).toFixed(2);       // less opaque as it settles
-        p.z = p.baseZ * 0.4 + Math.sin(elapsed * p.zSpd + p.ph) * p.zAmp * 0.5;
-        place(p); continue;
-      }
-      // margin logos: own golden spiral, converging
-      var th = p.th0 + p.spin * me;
-      var R = p.R0 * Math.pow(1 / PHI, p.qt * me) * (1 - me);
-      p.x = p.tx + Math.cos(th) * R + Math.sin(elapsed * 0.42 + p.fph) * 9 * migrate;
-      p.y = p.ty + Math.sin(th) * R + Math.cos(elapsed * 0.34 + p.fph) * 15 * migrate;
+      var me = clamp((migrate - p.migOff) / (1 - p.migOff + 0.001), 0, 1);   // per-logo progress
+      // ENTROPIC path (not an arc): random wander + a pull to the margin that
+      // strengthens as it settles — each logo takes its own chaotic route.
+      p.vx += (rand(-1, 1) * 950 + (p.tx - p.x) * (0.9 + 5.5 * me)) * dt;
+      p.vy += (rand(-1, 1) * 950 + (p.ty - p.y) * (0.9 + 5.5 * me)) * dt;
+      var damp = Math.pow(0.5, dt / 0.30);
+      p.vx *= damp; p.vy *= damp;
+      p.x += p.vx * dt; p.y += p.vy * dt;
       var deepPull = recede * (1 - migrate * 0.72);
       var bz = p.baseZ + (DEEP - p.baseZ) * deepPull;
       p.z = bz + Math.sin(elapsed * p.zSpd + p.ph) * p.zAmp * (0.5 + 0.5 * (1 - deepPull));

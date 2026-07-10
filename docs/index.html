@@ -57,9 +57,12 @@
   /* how-it-works flow card (replaces the "available on" strip) */
   .how-card{border:1px solid var(--hairline);border-radius:16px;padding:var(--g-l) var(--g-l) var(--g-m);background:var(--paper)}
   #howServer{position:relative}
-  .how-cyclelogo{position:absolute;left:0;top:50%;transform:translateY(-50%);width:34px;height:34px;object-fit:contain;
-    transition:opacity .45s ease;filter:drop-shadow(0 2px 6px rgba(20,20,15,.14));z-index:2}
-  @media(max-width:640px){.how-cyclelogo{left:auto;right:0;top:8px;transform:none}}
+  .how-cyclewrap{position:absolute;left:-2px;top:50%;transform:translateY(-50%);
+    width:46px;height:46px;display:flex;align-items:center;justify-content:center;border-radius:50%;
+    border:1.5px dotted color-mix(in srgb,var(--accent) 52%,transparent);z-index:2}
+  .how-cyclelogo{width:28px;height:28px;object-fit:contain;transition:opacity .4s ease;   /* 28:46 ≈ 1/φ */
+    filter:drop-shadow(0 1px 4px rgba(20,20,15,.12))}
+  @media(max-width:640px){.how-cyclewrap{left:auto;right:-2px;top:6px;transform:none}}
   .how-flow{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap}
   .how-node{flex:1 1 190px;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 12px;text-align:center}
   .how-ic{width:36px;height:36px;color:var(--ink-muted);display:inline-flex}
@@ -273,7 +276,7 @@
     <div class="how-card reveal">
       <div class="how-flow">
         <div class="how-node reveal" id="howServer" style="transition-delay:0ms">
-          <img id="howCycle" class="how-cyclelogo" alt="" aria-hidden="true">
+          <span class="how-cyclewrap"><img id="howCycle" class="how-cyclelogo" alt="" aria-hidden="true"></span>
           <span class="how-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm0 9h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Zm2.5-6.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 9a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg></span>
           <span class="how-t">Any MCP server</span>
           <span class="how-s">stdio · http · sse · oauth</span>
