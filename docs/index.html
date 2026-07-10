@@ -57,12 +57,22 @@
   /* how-it-works flow card (replaces the "available on" strip) */
   .how-card{border:1px solid var(--hairline);border-radius:16px;padding:var(--g-l) var(--g-l) var(--g-m);background:var(--paper)}
   #howServer{position:relative}
-  .how-cyclewrap{position:absolute;left:-2px;top:50%;transform:translateY(-50%);
-    width:46px;height:46px;display:flex;align-items:center;justify-content:center;border-radius:50%;
-    border:1.5px dotted color-mix(in srgb,var(--accent) 52%,transparent);z-index:2}
-  .how-cyclelogo{width:28px;height:28px;object-fit:contain;transition:opacity .4s ease;   /* 28:46 ≈ 1/φ */
+  .how-cyclewrap{position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+    width:62px;height:62px;display:flex;align-items:center;justify-content:center;z-index:2}
+  .how-cyclewrap::before{content:'';position:absolute;inset:0;border-radius:50%;
+    border:1.5px dotted color-mix(in srgb,var(--accent) 55%,transparent);animation:ringspin 9s linear infinite}
+  .how-cyclelogo{width:38px;height:38px;object-fit:contain;transition:opacity .4s ease;   /* 38:62 ≈ 1/φ */
     filter:drop-shadow(0 1px 4px rgba(20,20,15,.12))}
-  @media(max-width:640px){.how-cyclewrap{left:auto;right:-2px;top:6px;transform:none}}
+  @keyframes ringspin{to{transform:rotate(360deg)}}
+  /* info-flow dots streaming between the pipeline nodes */
+  .how-arrow{position:relative;width:60px;height:14px;flex:0 0 auto;overflow:hidden;align-self:center;color:var(--accent)}
+  .how-arrow i{position:absolute;top:50%;margin-top:-3px;width:6px;height:6px;border-radius:50%;
+    background:currentColor;left:-8px;animation:flow 2.1s linear infinite}
+  .how-arrow i:nth-child(2){animation-delay:.7s}
+  .how-arrow i:nth-child(3){animation-delay:1.4s}
+  @keyframes flow{0%{left:-8px;opacity:0}14%{opacity:1}86%{opacity:1}100%{left:60px;opacity:0}}
+  @media (prefers-reduced-motion:reduce){.how-cyclewrap::before{animation:none}.how-arrow i{animation:none;left:27px;opacity:.55}}
+  @media(max-width:640px){.how-cyclewrap{left:auto;right:-6px;top:4px;transform:none}}
   .how-flow{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap}
   .how-node{flex:1 1 190px;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 12px;text-align:center}
   .how-ic{width:36px;height:36px;color:var(--ink-muted);display:inline-flex}
@@ -70,7 +80,6 @@
   .how-ic svg{width:100%;height:100%;fill:currentColor}
   .how-t{font:600 15px/1.2 var(--font-text,inherit);color:var(--ink)}
   .how-s{font-size:12px;color:var(--ink-muted);line-height:1.45}
-  .how-arrow{display:flex;align-items:center;color:var(--accent);font:600 20px/1 var(--font-text,inherit)}
   .how-boundary{margin-top:20px;padding-top:16px;border-top:1px dashed var(--hairline);
     display:flex;align-items:center;justify-content:center;gap:9px;font-size:13px;color:var(--ink-muted);text-align:center}
   .how-lock{width:15px;height:15px;color:var(--ok);display:inline-flex;flex:0 0 auto}
@@ -281,13 +290,13 @@
           <span class="how-t">Any MCP server</span>
           <span class="how-s">stdio · http · sse · oauth</span>
         </div>
-        <span class="how-arrow" aria-hidden="true">→</span>
+        <span class="how-arrow" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="how-node how-node--accent reveal" style="transition-delay:160ms">
           <span class="how-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0A4.5 4.5 0 1 1 14 9.5 4.49 4.49 0 0 1 9.5 14Z"/></svg></span>
           <span class="how-t">mcpgawk scan</span>
           <span class="how-s">connects · counts tokens · reads capability</span>
         </div>
-        <span class="how-arrow" aria-hidden="true">→</span>
+        <span class="how-arrow" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="how-node reveal" style="transition-delay:320ms">
           <span class="how-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm7 1.5V8h4.5L13 3.5ZM8 12h8v1.6H8V12Zm0 3.4h8V17H8v-1.6Z"/></svg></span>
           <span class="how-t">Cost + capability</span>
