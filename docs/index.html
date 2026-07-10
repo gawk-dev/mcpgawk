@@ -95,7 +95,8 @@
   .proof-layer .receipt,.proof-layer .wf-card{height:100%}
   .proof-receipt{z-index:2;opacity:1}
   .proof-workflow{z-index:1;opacity:1}
-  .proof-stack.revealed .proof-receipt{opacity:0;pointer-events:none}
+  .proof-stack.revealed .proof-receipt{opacity:0;visibility:hidden;pointer-events:none;
+    transition:opacity .8s ease, visibility 0s linear .8s}
   .wf-card{border:1px solid var(--hairline);border-radius:14px;background:var(--paper);
     padding:22px 24px;display:flex;flex-direction:column}
   .wf-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--hairline)}
@@ -114,7 +115,16 @@
     letter-spacing:.04em;margin-top:12px;opacity:.7;transition:opacity .4s ease}
   .proof-stack.revealed ~ .proof-hint{opacity:.4}
   @media (prefers-reduced-motion:reduce){.proof-layer{transition:none}}
+
+  /* 3D flying-logo background layer (see logofield.js) */
+  #logoField{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;
+    perspective:1000px;perspective-origin:50% 42%}
+  .logo-particle{position:absolute;left:0;top:0;width:54px;height:54px;object-fit:contain;
+    will-change:transform,opacity;filter:drop-shadow(0 3px 8px rgba(20,20,15,.07))}
+  /* keep all page content above the flying field */
+  .nav,.sec,footer{position:relative;z-index:1}
 </style>
+<script src="logofield.js" defer></script>
 <script>
   // === Supabase lead capture — publishable key is safe in the browser; the
   // leads table is INSERT-only via RLS, so the list can never be read back. ===
@@ -123,6 +133,9 @@
 </script>
 </head>
 <body>
+
+<!-- 3D flying-logo background layer -->
+<div id="logoField" aria-hidden="true"></div>
 
 <header class="nav">
   <div class="nav-in">
@@ -336,7 +349,7 @@
       </div>
     </div>
   </div>
-  <p class="foot-legal n-small">Tokens counted with a named index (cl100k), a comparable ruler, not exact Claude billing; the <em>relative</em> picture holds. This is a cost view; per-vendor capability findings go to vendors privately. Free and open-source.</p>
+  <p class="foot-legal n-small">Tokens counted with a named index (cl100k), a comparable ruler, not exact Claude billing; the <em>relative</em> picture holds. This is a cost view; per-vendor capability findings go to vendors privately. Free and open-source. All company logos are trademarks of their respective owners, shown for reference only.</p>
 </footer>
 
 <script>
