@@ -416,14 +416,14 @@
   try {
     var params = new URLSearchParams(location.search);
     var force  = params.get('popup') === '1';
-    var seen   = localStorage.getItem('mcpgawk_report_seen');
-    var done   = localStorage.getItem('mcpgawk_lead_done');
+    var seen   = sessionStorage.getItem('mcpgawk_report_seen');   // once per session (not once ever)
+    var done   = localStorage.getItem('mcpgawk_lead_done');       // never re-nag someone who submitted
     if(force){ openModal(); }
     else if(!seen && !done){
       setTimeout(function(){
         if(!localStorage.getItem('mcpgawk_lead_done')){ openModal(); }
-        try{ localStorage.setItem('mcpgawk_report_seen','1'); }catch(_){}
-      }, 10000);
+        try{ sessionStorage.setItem('mcpgawk_report_seen','1'); }catch(_){}
+      }, 2000);
     }
   } catch(_){ /* localStorage blocked — no auto-popup, form still works */ }
 
