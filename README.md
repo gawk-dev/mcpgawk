@@ -39,11 +39,15 @@ You pay for those tokens, and you haven't checked what the tools can do. mcpgawk
 ## Features
 
 - 🔌 **Any transport** — stdio, streamable-HTTP, SSE, and OAuth remotes (via the `mcp-remote` bridge).
-- 💸 **Token cost index** — exactly what each tool adds to your context at connect.
-- 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema.
+- 💸 **Token cost index** — exactly what each tool adds to your context at connect, plus the 3 heaviest tools.
+- 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema, plus a
+  trust-surface summary (% write, % exfil-capable, destructive-declared count) and an annotation-completeness
+  score.
 - 📌 **Integrity pin + drift** — catch a server that silently rewrites its tools (`--track`).
 - 🚩 **Bounded signals** — injection-shaped descriptions, cross-server shadowing, under-declaring Server Cards — pointers for a human, never verdicts.
 - 🔒 **Zero egress, by construction** — the measurement layers import no network library. Enforced by a test.
+  Two checks are opt-in and make an explicit exception (see [Guarantees](#guarantees)): `--supply-chain` and
+  `--oauth-scopes`.
 
 ## Get it — three ways
 
@@ -77,24 +81,38 @@ mcpgawk scan --http https://host/mcp --header "Authorization: Bearer $TOKEN"
 mcpgawk scan --sse  https://host/sse
 mcpgawk scan mcp.json --track                                     # record + detect rug-pulls over time
 mcpgawk scan mcp.json --json                                      # machine-readable labels
+mcpgawk scan mcp.json --verbose                                   # full per-tool table, not just flagged tools
+mcpgawk scan mcp.json --supply-chain                              # opt-in: npm/PyPI deprecation check (network)
+mcpgawk scan mcp.json --oauth-scopes                              # opt-in: decode a supplied Bearer JWT's scope
 ```
 
 ## What it reports
 
 - **Cost index** — tokens each tool adds at connect (named tokenizer; a comparable index, not an
-  absolute Claude count).
-- **Capability facts** — write/mutating, exfil-capable, declared annotations.
+  absolute Claude count), plus the 3 heaviest tools.
+- **Trust surface** — capability facts (write/mutating, exfil-capable, declared annotations) rolled up
+  into % write, % exfil-capable, and a destructive-declared count.
+- **Annotation completeness** — a transparent composite (annotated ÷ total tools declaring read/write
+  intent), not a risk score.
+- **Coverage** — tools, prompts, and resources counted (`--verbose` for the full per-tool table).
 - **Integrity pin** — a hash that changes if the server silently rewrites its tools; `--track`
   turns it into rug-pull detection over time.
 - **Bounded signals** — precise, low-false-positive pointers *for a human to review*, never verdicts:
   injection-shaped descriptions (tools **and** prompts), cross-server name shadowing, and public
   Server Cards that under-declare what the server actually exposes.
+- **Supply-chain** (opt-in, `--supply-chain`) — checks the launched package against the public npm/PyPI
+  registry for deprecation/yank status.
+- **OAuth scopes** (opt-in, `--oauth-scopes`) — locally decodes a supplied Bearer JWT's `scope` claim.
 
 ## Guarantees
 
 - **No inventory egress.** The only network is the protocol client talking to the server you point
   it at. The measurement layers import no network library — they *cannot* egress by construction
   (enforced by a test). Public Server Card discovery is fetched with no auth and no redirect-following.
+  Two flags are the explicit, opt-in exception: `--supply-chain` sends the launched package's name
+  (and pinned version, if any) — never your tool inventory — to the public npm registry or PyPI JSON
+  API. `--oauth-scopes` makes no network call at all; it locally decodes a Bearer JWT you already
+  supplied. Neither runs unless you pass the flag.
 - **Facts ≠ heuristics.** Exact capability facts and the token index never mix with the bounded
   heuristic signals — separate in code, separate in output.
 - **Reproducible.** One command, identical numbers.

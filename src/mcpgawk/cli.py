@@ -14,24 +14,22 @@ import asyncio
 import json
 import shlex
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 from . import drift, history
 from .label import build_label, render_cli, render_summary
 from .measure import measure
+from .oauth_scopes import inspect as inspect_oauth_scopes
 from .probe import ServerSnapshot, probe, probe_http, probe_sse, probe_stdio
 from .signals import as_dicts, detect, detect_card_mismatch, detect_shadowing
+from .supplychain import check as check_supply_chain
 
 
 def _load_config(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return data.get("mcpServers", data)
-
-
-async def _scan_config(cfg: dict, only: set[str] | None) -> list[ServerSnapshot]:
-    targets = [(n, e) for n, e in cfg.items() if not only or n in only]
-    return await asyncio.gather(*(probe(e, n) for n, e in targets))
 
 
 def _headers(pairs: list[str] | None) -> dict[str, str]:
@@ -42,16 +40,24 @@ def _headers(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
-async def _run(args) -> list[ServerSnapshot]:
+async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict]]:
+    """Returns snapshots alongside the raw entry (command/args/headers) each came from — the
+    opt-in supply-chain/oauth-scopes checks need that, but it's never part of the core scan."""
     if args.stdio:
         parts = shlex.split(args.stdio)
-        return [await probe_stdio("cli-stdio", parts[0], parts[1:])]
+        entry = {"command": parts[0], "args": parts[1:]}
+        return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}
     if args.http:
-        return [await probe_http("cli-http", args.http, _headers(args.header))]
+        entry = {"url": args.http, "headers": _headers(args.header)}
+        return [await probe_http("cli-http", args.http, entry["headers"])], {"cli-http": entry}
     if args.sse:
-        return [await probe_sse("cli-sse", args.sse, _headers(args.header))]
+        entry = {"url": args.sse, "headers": _headers(args.header)}
+        return [await probe_sse("cli-sse", args.sse, entry["headers"])], {"cli-sse": entry}
     only = set(args.only.split(",")) if args.only else None
-    return await _scan_config(_load_config(args.config), only)
+    cfg = _load_config(args.config)
+    targets = [(n, e) for n, e in cfg.items() if not only or n in only]
+    snaps = await asyncio.gather(*(probe(e, n) for n, e in targets))
+    return list(snaps), {n: e for n, e in targets}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,12 +74,19 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--track", action="store_true",
                    help="record this scan locally and report DRIFT vs the last sighting (rug-pull detection)")
     s.add_argument("--json", action="store_true", help="emit JSON labels instead of a table")
+    s.add_argument("--verbose", action="store_true", help="show the full per-tool table, not just flagged tools")
+    s.add_argument("--supply-chain", action="store_true",
+                   help="opt-in: query the public npm/PyPI registry for the launched package's "
+                        "deprecation/yank status (network egress — package name+version only)")
+    s.add_argument("--oauth-scopes", action="store_true",
+                   help="opt-in: locally decode a supplied Bearer JWT's scope claim (no network; "
+                        "reads a credential you already provided)")
     args = p.parse_args(argv)
 
     if args.cmd == "scan" and not (args.config or args.stdio or args.http or args.sse):
         p.error("give a config path or one of --stdio/--http/--sse")
 
-    snaps = asyncio.run(_run(args))
+    snaps, entries = asyncio.run(_run(args))
     measurements = [measure(sn) for sn in snaps]
     # Cross-server shadowing needs all snapshots together; merge into each involved server's signals.
     shadow = {} if args.no_signals else detect_shadowing(snaps)
@@ -83,7 +96,18 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_signals:
             sigs = (as_dicts(detect(sn)) + as_dicts(shadow.get(sn.name, []))
                     + as_dicts(detect_card_mismatch(sn)))
-        labels.append(build_label(sn, m, bounded_signals=(sigs or None)))
+        label = build_label(sn, m, bounded_signals=(sigs or None))
+        entry = entries.get(sn.name) or {}
+        # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a
+        # credential the user already supplied (no egress, but still consent-gated).
+        if args.supply_chain and entry.get("command"):
+            finding = check_supply_chain(entry["command"], entry.get("args") or [])
+            label["x-mcpgawk"]["supply_chain"] = (
+                asdict(finding) if finding else {"checked": False,
+                                                  "reason": "package not recognised from the launch command"})
+        if args.oauth_scopes:
+            label["x-mcpgawk"]["oauth_scopes"] = inspect_oauth_scopes(entry.get("headers"))
+        labels.append(label)
 
     # --track: record locally and diff against the last sighting (rug-pull detection).
     drift_reports: dict[str, drift.DriftReport] = {}
@@ -108,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{'='*70}\nmcpgawk 0.1 — LOCAL scan (no inventory uploaded)\n{'='*70}")
     any_error = False
     for lab in labels:
-        print("\n" + render_cli(lab))
+        print("\n" + render_cli(lab, verbose=args.verbose))
         rep = drift_reports.get(lab["name"])
         if rep:
             print(drift.render(lab["name"], rep))
