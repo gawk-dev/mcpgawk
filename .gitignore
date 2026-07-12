@@ -12,3 +12,28 @@ assets/brand/_qa.html
 editors/vscode/*.vsix
 editors/vscode/node_modules/
 .vercel
+
+# ===== NEVER PUBLISH — private strategy, paid product, business/internal =====
+# Belt-and-braces guard: even if one of these is accidentally copied into this
+# public checkout, git will not track it. Primary protection is that these live
+# only in the private repo (~/devtools/mcpgawk, which has NO remote).
+HANDOFF.md
+# private strategy / research / business docs
+docs/spec/
+docs/PLATFORM-AND-FACTORY.md
+docs/foundational-decisions.md
+docs/track-v-verdict-strategy.md
+docs/platform-system-design.md
+docs/architecture-convergence.md
+docs/functional-spec.md
+docs/research-*.md
+docs/strategy-*.md
+docs/*-audit*.md
+docs/adversarial-review-prompt.md
+docs/vendor-outreach-*.md
+# the PAID platform code (verify / monitor / enforce / forge) — never in the free repo
+src/gawk_platform/
+tests/test_platform_smoke.py
+tests/test_forge_smoke.py
+# third-party study clones (Apache-2.0) — never vendored/published
+reference/
