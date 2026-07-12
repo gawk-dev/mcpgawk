@@ -36,3 +36,18 @@ jobs:
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install dist/*.whl
           /tmp/smoke/bin/mcpgawk --help
+
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CLI (pyproject.toml) and VS Code extension (package.json) versions must match
+        run: |
+          PY_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          EXT_VERSION=$(node -p "require('./editors/vscode/package.json').version")
+          echo "pyproject.toml: $PY_VERSION"
+          echo "editors/vscode/package.json: $EXT_VERSION"
+          if [ "$PY_VERSION" != "$EXT_VERSION" ]; then
+            echo "::error::Version mismatch — CLI is $PY_VERSION but the VS Code extension is $EXT_VERSION. Bump editors/vscode/package.json (and its CHANGELOG.md) alongside every pyproject.toml release."
+            exit 1
+          fi

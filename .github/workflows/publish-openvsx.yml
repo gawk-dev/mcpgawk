@@ -1,0 +1,38 @@
+name: Publish VS Code extension (Open VSX)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editors/vscode/package.json"
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fail loudly if the Open VSX token isn't configured
+        run: |
+          if [ -z "${{ secrets.OVSX_PAT }}" ]; then
+            echo "::error::OVSX_PAT secret is not set — add it under repo Settings > Secrets before this can publish."
+            exit 1
+          fi
+
+      - run: npm install -g @vscode/vsce ovsx
+
+      - name: Package
+        run: vsce package --no-dependencies
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: ovsx publish *.vsix -p "$OVSX_PAT"
