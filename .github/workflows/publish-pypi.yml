@@ -1,0 +1,51 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fail loudly if the PyPI token isn't configured
+        run: |
+          if [ -z "${{ secrets.PYPI_API_TOKEN }}" ]; then
+            echo "::error::PYPI_API_TOKEN secret is not set — add it under repo Settings > Secrets before this can publish."
+            exit 1
+          fi
+
+      - name: Skip if this version is already published (re-running main shouldn't re-publish)
+        run: |
+          LOCAL=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          LIVE=$(python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('https://pypi.org/pypi/mcpgawk/json'))['info']['version'])" 2>/dev/null || echo "none")
+          echo "local=$LOCAL live=$LIVE"
+          echo "LOCAL_VERSION=$LOCAL" >> "$GITHUB_ENV"
+          if [ "$LOCAL" = "$LIVE" ]; then
+            echo "Already published — skipping."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - run: python -m pip install --upgrade pip build
+        if: env.SKIP != '1'
+
+      - run: python -m build
+        if: env.SKIP != '1'
+
+      - name: Publish to PyPI
+        if: env.SKIP != '1'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install twine
+          twine upload dist/*
