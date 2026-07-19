@@ -22,7 +22,7 @@ from .label import build_label, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
 from .probe import ServerSnapshot, probe, probe_http, probe_sse, probe_stdio
-from .signals import as_dicts, detect, detect_card_mismatch, detect_shadowing
+from .signals import as_dicts, detect, detect_card_mismatch, detect_dynamic_dispatch, detect_shadowing
 from .supplychain import check as check_supply_chain
 
 
@@ -47,12 +47,27 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict]]:
         parts = shlex.split(args.stdio)
         entry = {"command": parts[0], "args": parts[1:]}
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}
-    if args.http:
-        entry = {"url": args.http, "headers": _headers(args.header)}
-        return [await probe_http("cli-http", args.http, entry["headers"])], {"cli-http": entry}
-    if args.sse:
-        entry = {"url": args.sse, "headers": _headers(args.header)}
-        return [await probe_sse("cli-sse", args.sse, entry["headers"])], {"cli-sse": entry}
+    if args.http or args.sse:
+        url = args.http or args.sse
+        transport = "http" if args.http else "sse"
+        entry = {"url": url, "headers": _headers(args.header)}
+        auth = server = None
+        # A remote endpoint that isn't MCP (a pasted docs/repo URL) must fail fast, not hang — so
+        # the default here is the short HTTP budget, not the 90s stdio one. --login is the one case
+        # that legitimately waits: the user has 5 min to approve the OAuth flow in the browser.
+        from .probe import HTTP_TIMEOUT
+        timeout = HTTP_TIMEOUT
+        if getattr(args, "login", False):
+            from .oauth_login import build_login_provider
+            auth, server = build_login_provider(url)
+            timeout = 330.0
+        probe_fn = probe_http if transport == "http" else probe_sse
+        try:
+            snap = await probe_fn(f"cli-{transport}", url, entry["headers"], timeout, auth)
+        finally:
+            if server is not None:
+                server.shutdown()
+        return [snap], {f"cli-{transport}": entry}
     only = set(args.only.split(",")) if args.only else None
     cfg = _load_config(args.config)
     targets = [(n, e) for n, e in cfg.items() if not only or n in only]
@@ -69,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--http", help="one streamable-HTTP server URL")
     s.add_argument("--sse", help="one SSE server URL")
     s.add_argument("--header", action="append", help='HTTP header, e.g. "Authorization: Bearer XYZ" (repeatable)')
+    s.add_argument("--login", action="store_true",
+                   help="for a remote --http/--sse server that needs OAuth: open the browser, sign "
+                        "in once, and scan (token stored locally in ~/.gawk/oauth)")
     s.add_argument("--only", help="comma-separated server names to scan from the config")
     s.add_argument("--no-signals", action="store_true", help="skip BOUNDED heuristic signals (facts only)")
     s.add_argument("--track", action="store_true",
@@ -95,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         sigs = None
         if not args.no_signals:
             sigs = (as_dicts(detect(sn)) + as_dicts(shadow.get(sn.name, []))
-                    + as_dicts(detect_card_mismatch(sn)))
+                    + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn)))
         label = build_label(sn, m, bounded_signals=(sigs or None))
         entry = entries.get(sn.name) or {}
         # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a
@@ -129,7 +147,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(labels, indent=2))
         return 0
 
-    print(f"\n{'='*70}\nmcpgawk 0.1 — LOCAL scan (no inventory uploaded)\n{'='*70}")
+    # Show the REAL installed version, not a hardcoded string. `__version__` is now single-sourced
+    # from the installed package metadata in __init__ (see there), so this banner can no longer go
+    # stale or disagree with pyproject/PyPI. A version banner that lies erodes trust in a measurement
+    # tool.
+    from . import __version__ as _ver
+    print(f"\n{'='*70}\nmcpgawk {_ver} — LOCAL scan (no inventory uploaded)\n{'='*70}")
     any_error = False
     for lab in labels:
         print("\n" + render_cli(lab, verbose=args.verbose))

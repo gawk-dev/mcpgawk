@@ -1,6 +1,6 @@
 """A transparent CRAFT grade for an MCP server.
 
-Design (accuracy-critical):
+Design (accuracy-critical, see docs/adoption-research-report-design.md):
 - The grade composes ONLY axes a server can improve without losing function:
   cost efficiency (tokens/tool) and annotation hygiene (declared read/write intent).
 - Capability (write/exfil) is a FACT, never graded — a server needs its tools.
@@ -34,8 +34,8 @@ class Grade:
 
 
 def _cost_score(tpt: int) -> int:
-    """tokens/tool -> 0-100. Piecewise-linear bands fit to a sample of real-world MCP servers
-    scanned during development (anonymised — see the bands below, not named vendors)."""
+    """tokens/tool -> 0-100. Piecewise-linear bands fit to the roster
+    (Cloudflare 155≈A, Emergent 309≈B, Sarvam 358≈C, Firecrawl 740/Notion 1154≈F)."""
     if tpt <= 200:      s = 100 - (tpt - 100) * 0.10          # 100->100, 200->90
     elif tpt <= 350:    s = 90 - (tpt - 200) * (15 / 150)     # 200->90, 350->75
     elif tpt <= 550:    s = 75 - (tpt - 350) * (20 / 200)     # 350->75, 550->55

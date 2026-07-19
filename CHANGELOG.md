@@ -2,6 +2,27 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.4] — 2026-07-20
+
+### Added
+- `--login`: scan a remote MCP server that requires OAuth. Opens the browser, signs in once via the
+  server's own OAuth flow, and scans it — the token is stored locally (`~/.gawk/oauth`) and never
+  leaves your machine.
+- Dynamic tool-dispatch detection: flags servers that hide a larger real tool catalog behind a
+  meta-tool (the Sentry / Docker mcp-gateway shape). A passive scan structurally can't see the hidden
+  tools, so this says "this scan is incomplete" rather than letting a clean-looking result be mistaken
+  for a clean server.
+
+### Changed / Fixed
+- A probe that errors (unreachable host, wrong URL, an HTML docs page that isn't an MCP endpoint,
+  a timeout) can no longer render as CLEAN — failures are now typed, not inferred from message text.
+- Remote (`--http`/`--sse`) scans fail fast (~20s) instead of hanging up to 90s on a non-MCP URL;
+  local stdio servers keep the generous cold-start budget.
+- Heuristic signals are labelled by what they are — dynamic-dispatch, tool-name shadowing and
+  server-card mismatch are no longer all reported as "possible prompt-injection".
+- Version is single-sourced from the installed package metadata (no more hand-maintained literal that
+  could go stale).
+
 ## [0.1.3] — 2026-07-12
 
 ### Added

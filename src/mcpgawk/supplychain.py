@@ -1,10 +1,10 @@
 """SUPPLY-CHAIN — opt-in, egress-required package-registry lookups.
 
-Deliberately NOT part of the default zero-egress scan. Only runs when `--supply-chain` is
-passed. Queries the public npm registry or PyPI JSON API for the package a stdio server is
-launched from, and reports whether the resolved version is deprecated (npm) or yanked (PyPI).
-Only the package name + optional pinned version are ever sent — never the tool inventory,
-never anything else.
+Deliberately NOT part of the default zero-egress scan (same precedent as the opt-in exact
+`count_tokens` mode, HANDOFF §7). Only runs when `--supply-chain` is passed. Queries the
+public npm registry or PyPI JSON API for the package a stdio server is launched from, and
+reports whether the resolved version is deprecated (npm) or yanked (PyPI). Only the package
+name + optional pinned version are ever sent — never the tool inventory, never anything else.
 """
 from __future__ import annotations
 

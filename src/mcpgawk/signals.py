@@ -18,6 +18,25 @@ from typing import Any
 
 from .probe import ServerSnapshot
 
+# THE catalog of every bounded-signal `kind` this module can emit, mapped to the detector that
+# emits it. Single source of truth for the anti-drift canary (tests/test_canary_signals.py), which
+# fails the build if:
+#   * a detector emits a `kind` literal not registered here (static scan of this file's source);
+#   * a registered kind has no live fixture proving its detector actually fires it;
+#   * a kind's family (the part before ':') has no label lead phrase (label._SIGNAL_LEAD), i.e. it
+#     could be mislabelled in the report.
+# Adding a detector without registering + fixture-testing + labelling its kind cannot pass CI. This
+# is the mechanism that ends fix-on-the-go: scan coverage and report correctness cannot silently rot.
+# (Discovery scopes will register the same way here once discovery lands — roadmap SCAN/Discovery.)
+SIGNAL_KINDS: dict[str, str] = {
+    "injection:hidden-markup": "detect",
+    "injection:reader-directed": "detect",
+    "injection:secret-exfil": "detect",
+    "dispatch:dynamic-tool-catalog": "detect_dynamic_dispatch",
+    "shadowing:name-collision": "detect_shadowing",
+    "servercard:undeclared-tools": "detect_card_mismatch",
+}
+
 # --- Detector 1: hidden markup in a description (HTML comments / pseudo-system tags). ---
 # Legit tool descriptions are plain prose; an embedded comment or <important>/<system> tag is
 # the classic tool-poisoning carrier (Invariant's own local rule keyed on <IMPORTANT>).
@@ -55,6 +74,56 @@ _DETECTORS = (
     ("injection:reader-directed", _READER_DIRECTED),
     ("injection:secret-exfil", _EXFIL_DIRECTIVE),
 )
+
+# --- Detector 4: dynamic tool-dispatch (meta-tool defeats tools/list entirely). ---
+# A 2026-07-16 dogfooding pass found this is a real, common shape, not a corner case:
+# getsentry/sentry-mcp (search_sentry_tools + execute_sentry_tool) and docker/mcp-gateway
+# (mcp-find + mcp-exec, ON BY DEFAULT) both collapse dozens-to-hundreds of real tools behind a
+# handful of declared ones. A passive tools/list scan structurally cannot see the hidden catalog,
+# so this signal exists to say "this scan is incomplete", never "this server is bad" — a clean
+# report from a server with this shape is not proof of a clean server.
+# Narrow by design (0-FP discipline): fires only on a paired discover+execute name match (both
+# tools must be present), or a single execute-shaped tool whose schema takes a free-text
+# tool-name/action selector — not on an ordinary "execute_workflow(id)"-style tool with a fixed,
+# non-dispatching argument.
+_DISCOVER_TOOL_NAME = re.compile(
+    r"(?:search|find|discover|list)[-_]?\w*tools?\b|tools?[-_]?(?:search|find|discover|list)\b"
+    r"|^mcp[-_]?find$",
+    re.IGNORECASE)
+_EXEC_TOOL_NAME = re.compile(
+    r"(?:execute|exec|invoke|dispatch|call|run)[-_]?\w*tools?\b|tools?[-_]?(?:execute|exec|invoke|dispatch)\b"
+    r"|^mcp[-_]?(?:exec|add)$|^code[-_]?mode$",
+    re.IGNORECASE)
+_DISPATCH_PARAM_NAMES = {"tool", "tool_name", "toolname", "target_tool", "action"}
+
+
+def detect_dynamic_dispatch(snap: ServerSnapshot) -> list[Finding]:
+    """Signal: this server's tools/list likely hides a larger real catalog behind a dynamic
+    tool-dispatch pattern (confirmed live on getsentry/sentry-mcp and docker/mcp-gateway)."""
+    names = [t.get("name", "?") for t in snap.tools]
+    discover = sorted({n for n in names if _DISCOVER_TOOL_NAME.search(n)})
+    executor = sorted({n for n in names if _EXEC_TOOL_NAME.search(n)})
+    if discover and executor:
+        return [Finding(
+            tool=", ".join(discover + executor),
+            kind="dispatch:dynamic-tool-catalog",
+            evidence=(f"{len(names)} tools visible via tools/list, but '{executor[0]}' paired with "
+                      f"'{discover[0]}' is the dynamic-dispatch shape (Sentry/Docker mcp-gateway "
+                      f"pattern) — the real tool catalog is likely larger and not visible to this scan"))]
+    out: list[Finding] = []
+    for t in snap.tools:
+        n = t.get("name", "?")
+        if not _EXEC_TOOL_NAME.search(n):
+            continue
+        props = ((t.get("inputSchema") or {}).get("properties") or {})
+        for pname, pschema in props.items():
+            if pname.lower().replace("-", "_") in _DISPATCH_PARAM_NAMES and (pschema or {}).get("type") == "string":
+                out.append(Finding(
+                    tool=n, kind="dispatch:dynamic-tool-catalog",
+                    evidence=(f"'{n}' takes a free-text '{pname}' selector — likely dispatches to "
+                              f"tools not visible in this scan's tools/list")))
+                break
+    return out
 
 
 @dataclass

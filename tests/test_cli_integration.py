@@ -19,7 +19,9 @@ async def _fake_probe_stdio(name, command, args=None, env=None, timeout=90.0):
     return _fake_snapshot(name, "stdio")
 
 
-async def _fake_probe_http(name, url, headers=None, timeout=90.0):
+async def _fake_probe_http(name, url, headers=None, timeout=20.0, auth=None):
+    # 5th arg `auth` matches the engine's probe_http signature (the --login OAuth provider is
+    # threaded through as an httpx.Auth). Kept in sync with src/mcpgawk/probe.py.
     return _fake_snapshot(name, "http")
 
 

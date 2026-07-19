@@ -1,3 +1,9 @@
+## 0.1.4
+- Version sync with CLI 0.1.4 (`--login` OAuth scanning, dynamic tool-dispatch detection, typed
+  error handling so a failed probe never reads CLEAN, faster remote-scan timeout, corrected signal
+  labels). No extension code change — the panel reads `tool_count`, `cost_index_tokens`,
+  `tools[].write/exfil_capable`, and `bounded_signals`, all unchanged additive fields in the label schema.
+
 ## 0.1.3
 - Version sync with CLI 0.1.3 (5-axis report, `--verbose`, opt-in `--supply-chain`/`--oauth-scopes`). No
   extension code change — the panel reads `tool_count`, `cost_index_tokens`, `tools[].write/exfil_capable`,

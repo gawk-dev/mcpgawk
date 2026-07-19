@@ -48,6 +48,10 @@ class Measurement:
     prompt_count: int = 0
     resource_count: int = 0
     caveats: list[str] = field(default_factory=list)
+    # Carried through from the snapshot so the label layer has a TYPED failure signal and never has
+    # to infer "did the scan fail?" from caveat wording (the old false-CLEAN footgun).
+    is_failure: bool = False
+    error_kind: str | None = None    # closed set — see ServerSnapshot.error_kind
 
 
 def _encoder():
@@ -101,5 +105,7 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         tokenizer=tokenizer_name, total_tokens=total, tool_count=len(tools), tools=tools,
         integrity_pin=pin, prompt_count=len(snap.prompts), resource_count=len(snap.resources))
     if snap.error:
+        m.is_failure = True
+        m.error_kind = snap.error_kind
         m.caveats.append(f"probe error: {snap.error}")
     return m

@@ -57,7 +57,7 @@ def test_annotation_completeness_matches_grade_hygiene():
 def test_coverage_shown_in_cli_text():
     label = _label([{"name": "a", "description": "b"}],
                    prompts=[{"name": "p1"}], resources=[{"uri": "r1"}])
-    out = render_cli(label)
+    out = render_cli(label, verbose=True)
     assert "coverage: 1 tools, 1 prompts, 1 resources" in out
 
 

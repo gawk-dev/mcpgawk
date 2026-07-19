@@ -2,7 +2,7 @@
   "name": "mcpgawk",
   "displayName": "mcpgawk — MCP cost & hygiene",
   "description": "See what your MCP servers cost and expose, right in your editor. Local — nothing leaves your machine.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "gawk-dev",
   "license": "Apache-2.0",
   "icon": "media/icon.png",

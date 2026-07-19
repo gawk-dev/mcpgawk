@@ -16,6 +16,16 @@ from .servercard import compare_to_reality
 
 LABEL_SCHEMA = "mcpgawk/label@0.1"
 
+# Human lead phrase per bounded-signal family (the part of `kind` before the ':'). Keeps each
+# finding named as ITSELF in the CLI report — see the render loop. Adding a new signal family
+# without a lead here falls back to a neutral "review signal in" rather than silently mislabelling.
+_SIGNAL_LEAD = {
+    "injection": "possible prompt-injection in",
+    "dispatch": "tools hidden behind dynamic dispatch in",
+    "shadowing": "tool-name shadowing on",
+    "servercard": "server-card mismatch on",
+}
+
 
 def _trust_surface(m: Measurement) -> dict[str, Any]:
     total = m.tool_count
@@ -69,6 +79,11 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
                 for t in m.tools
             ],
             "caveats": m.caveats or None,
+            # TYPED failure signal — the render layer decides CLEAN vs UNREACHABLE from this, not by
+            # scraping caveat text. is_failure True => this server was NOT measured; it must never
+            # read CLEAN. error_kind explains why (unreachable / misconfigured / not-an-mcp-endpoint).
+            "is_failure": m.is_failure,
+            "error_kind": m.error_kind,
             # BOUNDED layer — heuristic signals, kept apart from the EXACT facts above.
             "bounded_signals": bounded_signals or None,
             "disclaimer": "Local measurement. Token cost is a comparable index, not an absolute "
@@ -84,45 +99,100 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     x = label["x-mcpgawk"]
     ts = x["trust_surface"]
     ac = x["annotation_completeness"]
-    lines = [
-        f"● {label['name']:<22} [{label['transport']}]  proto={label.get('protocolVersion') or '?'}",
-        f"    {x['tool_count']:>3} tools   {x['cost_index_tokens']:>6} tok@connect   pin:{x['integrity_pin']}",
-        f"    coverage: {x['tool_count']} tools, {x['prompt_count']} prompts, {x['resource_count']} resources",
-        f"    trust surface: {ts['write_pct']}% write ({ts['write_count']})  "
-        f"{ts['exfil_pct']}% exfil-capable ({ts['exfil_count']})  "
-        f"{ts['destructive_declared_count']} destructive-declared",
-        f"    annotation completeness: {ac['score']}% ({ac['annotated']}/{ac['total']} declare read/write intent)",
-    ]
-    if x["top_heavy_tools"]:
-        heavy = ", ".join(f"{t['name']} ({t['tokens']} tok)" for t in x["top_heavy_tools"])
-        lines.append(f"    heaviest tools: {heavy}")
-    if verbose:
-        lines.append("    per-tool:")
-        for t in x["tools"]:
-            caps = []
-            if t["write"]:
-                caps.append("write")
-            if t["exfil_capable"]:
-                caps.append("exfil-capable")
-            ann = t.get("annotations") or {}
-            if ann.get("destructiveHint") is True:
-                caps.append("destructive-declared")
-            if not ann:
-                caps.append("no-annotation")
-            lines.append(f"      · {t['name']:<28} {t['tokens']:>5} tok   {', '.join(caps) or 'read'}")
+    tools = x["tools"]
+    n = x["tool_count"]
+    cost = x["cost_index_tokens"]
+    write_c, exfil_c = ts["write_count"], ts["exfil_count"]
+    has_risk = write_c > 0 or exfil_c > 0
+    heavy = cost >= 3000
+    unannotated = ac["total"] > 0 and ac["annotated"] == 0
+    # A probe that errored (unreachable host, wrong URL, an HTML docs page instead of an MCP
+    # endpoint, a timeout) must NEVER read as CLEAN. A failed scan reporting "nothing write- or
+    # exfil-capable" is a security tool's cardinal sin — a failure reading as all-clear.
+    caveats = x.get("caveats") or []
+    # Primary signal is the TYPED flag set by measure() from the snapshot. The substring check is
+    # kept only as belt-and-suspenders: neither alone can let a failed probe slip through as CLEAN,
+    # and if one mechanism ever regresses the other still catches it.
+    failed = bool(x.get("is_failure")) or any(("probe error" in c) or ("scan failed" in c) for c in caveats)
+
+    # Verdict: derived only from the real numbers, so the headline can't lie.
+    if failed:
+        verdict = "UNREACHABLE"
+    elif not has_risk and not heavy:
+        verdict = "CLEAN"
     else:
-        flagged = [t for t in x["tools"] if t["write"] or t["exfil_capable"]]
-        for t in flagged:
-            caps = []
-            if t["write"]:
-                caps.append("write" if (t.get("annotations") or {}) else "write/no-annotation")
-            if t["exfil_capable"]:
-                caps.append("exfil-capable")
-            if (t.get("annotations") or {}).get("destructiveHint") is True:
-                caps.append("destructive-declared")
-            lines.append(f"      · {t['name']:<28} {t['tokens']:>5} tok   {', '.join(caps)}")
+        verdict = " · ".join(p for p, on in
+                             (("HEAVY", heavy), ("HIGH-REACH", has_risk), ("UNANNOTATED", unannotated)) if on) or "REVIEW"
+
+    lines = [f"● {label['name']}   [{label['transport']}]   {verdict}"]
+
+    if failed:
+        raw = next((c for c in caveats if "probe error" in c or "scan failed" in c), "")
+        detail = raw.split("error:", 1)[-1].strip().rstrip(":").strip() if "error:" in raw else raw.strip()
+        if not detail or detail.lower().startswith("timeouterror"):
+            detail = "no MCP response (timed out)"
+        lines.append(f"    ✗ could not scan — {detail}. This did NOT pass; it was not measured.")
+        lines.append("      Is it a live MCP endpoint? A docs / repo / package URL is not one.")
+        lines.append("      A local server needs:  mcpgawk scan --stdio \"<launch command>\"")
+        return "\n".join(lines)
+
+    if not has_risk and not heavy:
+        lines.append(f"    {n} tool{'s' if n != 1 else ''} · {cost:,} tokens at connect · nothing write- or exfil-capable.")
+    else:
+        pct = round(cost / 200_000 * 100)
+        note = f"   (~{pct}% of a 200k context window, every request)" if cost >= 1000 else ""
+        lines += [
+            "",
+            f"    COST   {cost:,} tokens loaded into every session — before you type a word.{note}",
+            "",
+            f"    What these {n} tools can do to you:",
+            f"      change things    {write_c:>2} of {n}   create / update / delete / upload",
+            f"      send data out    {exfil_c:>2} of {n}   read + reach the network — a leak path",
+            f"      declare intent   {ac['annotated']:>2} of {n}   "
+            + ("← none, so your agent trusts them all blindly" if ac["annotated"] == 0 else "how safe they are"),
+        ]
+
+    # Tool detail: verbose shows every tool; default surfaces only the ones that can bite,
+    # scariest first (can both change data AND send it out), capped.
+    if verbose:
+        lines.append("    all tools (heaviest first):")
+        for t in sorted(tools, key=lambda t: -t["tokens"]):
+            tags = [c for c, on in (("write", t["write"]), ("exfil", t["exfil_capable"]),
+                                    ("no-annotation", not (t.get("annotations") or {}))) if on]
+            lines.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {', '.join(tags) or 'read-only'}")
+    elif has_risk:
+        flagged = sorted((t for t in tools if t["write"] or t["exfil_capable"]),
+                         key=lambda t: (0 if (t["write"] and t["exfil_capable"]) else 1 if t["write"] else 2, -t["tokens"]))
+        both = [t for t in flagged if t["write"] and t["exfil_capable"]]
+        lines.append("")
+        # Only claim "BOTH" for tools that genuinely can do both; never let the header overclaim.
+        if both:
+            lines.append("    Look at these first — can BOTH change data AND send it out:")
+            shown = both[:5]
+        else:
+            lines.append("    Tools that can change data or send it out:")
+            shown = flagged[:5]
+        for t in shown:
+            tag = "write + exfil" if (t["write"] and t["exfil_capable"]) else ("write" if t["write"] else "exfil")
+            lines.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {tag}")
+        remaining = len(flagged) - len(shown)
+        if remaining > 0:
+            lines.append(f"      (+ {remaining} more that can change or send data · --verbose for all {n})")
+
+    # Bounded heuristic signals — one actionable line each. Each KIND is a DISTINCT finding and must
+    # be named as itself: filing dynamic-dispatch, tool-shadowing and server-card-mismatch under
+    # "possible prompt-injection" (the old bug) is precisely the kind of report deviation that erodes
+    # trust in a security tool. Lead phrase is chosen from the kind's family prefix.
     for s in (x.get("bounded_signals") or []):
-        lines.append(f"    ⚠ SIGNAL {s['kind']:<26} [{s['tool']}]  — review: {s['evidence']!r}")
+        kind = s.get("kind", "")
+        family = kind.split(":", 1)[0]
+        lead = _SIGNAL_LEAD.get(family, "review signal in")
+        evidence = s.get("evidence")
+        detail = f" — review: {evidence!r}" if evidence else ""
+        lines.append(f"    ⚠  {lead} {s.get('tool', '?')} ({kind}){detail}")
+
+    if verbose:
+        lines.append(f"    coverage: {x['tool_count']} tools, {x['prompt_count']} prompts, {x['resource_count']} resources")
     sc = x.get("supply_chain")
     if sc is not None:
         if sc.get("error"):
@@ -152,7 +222,7 @@ def render_summary(labels: list[dict[str, Any]]) -> str:
     tools = sum(l["x-mcpgawk"]["tool_count"] for l in labels)
     toks = sum(l["x-mcpgawk"]["cost_index_tokens"] for l in labels)
     flagged = sum(1 for l in labels for t in l["x-mcpgawk"]["tools"] if t["write"] or t["exfil_capable"])
-    tzs = {l["x-mcpgawk"]["tokenizer"] for l in labels}
-    return ("-" * 70 + f"\nTOTAL: {tools} tools | {toks} tok loaded at connect | "
-            f"{flagged} capability-flagged | tokenizer: {', '.join(tzs)}\n"
-            "Nothing was uploaded. Re-run for identical numbers.")
+    ns = len(labels)
+    return ("─" * 64 + f"\n{ns} server{'s' if ns != 1 else ''} · {tools} tools · "
+            f"{toks:,} tokens loaded into every session · {flagged} can change or send data.\n"
+            "Scanned locally — nothing left your machine.")
