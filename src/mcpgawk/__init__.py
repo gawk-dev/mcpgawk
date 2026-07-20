@@ -5,7 +5,7 @@ without the server's inventory ever leaving your machine.
 
 Pipeline: Observe (probe) -> Bound (measure) -> Attest (label).
 """
-from .probe import ServerSnapshot, probe_stdio, probe_http, probe_sse
+from .probe import ServerSnapshot, probe_stdio, probe_http, probe_sse, probe_url
 from .measure import Measurement, measure
 from .label import build_label
 
@@ -21,6 +21,6 @@ except PackageNotFoundError:  # running from source with no (editable) install
     __version__ = "0+unknown"
 del _pkg_version, PackageNotFoundError
 __all__ = [
-    "ServerSnapshot", "probe_stdio", "probe_http", "probe_sse",
+    "ServerSnapshot", "probe_stdio", "probe_http", "probe_sse", "probe_url",
     "Measurement", "measure", "build_label", "__version__",
 ]

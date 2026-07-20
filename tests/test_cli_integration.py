@@ -19,9 +19,9 @@ async def _fake_probe_stdio(name, command, args=None, env=None, timeout=90.0):
     return _fake_snapshot(name, "stdio")
 
 
-async def _fake_probe_http(name, url, headers=None, timeout=20.0, auth=None):
-    # 5th arg `auth` matches the engine's probe_http signature (the --login OAuth provider is
-    # threaded through as an httpx.Auth). Kept in sync with src/mcpgawk/probe.py.
+async def _fake_probe_url(name, url, headers=None, timeout=90.0, auth=None,
+                          declared="http", permute=True):
+    # The CLI's remote seam is now the permuting prober (transport permutation), not probe_http.
     return _fake_snapshot(name, "http")
 
 
@@ -43,7 +43,7 @@ def test_supply_chain_flag_reaches_the_launch_command(monkeypatch, capsys):
 
 
 def test_oauth_scopes_flag_reaches_supplied_headers(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "probe_http", _fake_probe_http)
+    monkeypatch.setattr(cli, "probe_url", _fake_probe_url)
 
     rc = cli.main(["scan", "--http", "https://example.com/mcp",
                    "--header", "Authorization: Bearer not-a-jwt", "--oauth-scopes"])

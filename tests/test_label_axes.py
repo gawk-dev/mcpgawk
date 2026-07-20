@@ -105,3 +105,14 @@ def test_oauth_scopes_present_vs_absent_are_distinguishable():
     label_with_scopes = _label([{"name": "a", "description": "b"}])
     label_with_scopes["x-mcpgawk"]["oauth_scopes"] = {"token_type": "jwt", "scopes": ["read", "write"]}
     assert "oauth scopes: read, write" in render_cli(label_with_scopes)
+
+
+def test_failed_probe_reads_as_unreachable_never_clean():
+    """Security-tool cardinal sin: a scan that FAILED must never read as CLEAN / all-clear."""
+    from mcpgawk.probe import ServerSnapshot
+    snap = ServerSnapshot(name="dead", transport="http", protocol_version=None)
+    snap.error = "TimeoutError"
+    out = render_cli(build_label(snap, measure(snap)))
+    assert "UNREACHABLE" in out
+    assert "CLEAN" not in out
+    assert "could not scan" in out

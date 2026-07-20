@@ -18,12 +18,12 @@ def _server(n_tools, total_tokens, annotated_frac, write_frac=0.0):
 
 
 def test_lean_and_annotated_scores_high():
-    g = grade(_server(8, 2472, 1.0))          # lean: 309 tok/tool, 100% annotated
+    g = grade(_server(8, 2472, 1.0))          # Emergent-shape: 309 tok/tool, 100% annotated
     assert g.letter in ("A", "B") and g.hygiene_score == 100
 
 
 def test_heavy_and_unannotated_fails():
-    g = grade(_server(20, 23085, 0.0))         # heavy: 1154 tok/tool, 0% annotated
+    g = grade(_server(20, 23085, 0.0))         # Notion-shape: 1154 tok/tool, 0% annotated
     assert g.letter == "F" and g.hygiene_score == 0 and g.cost_score < 30
 
 

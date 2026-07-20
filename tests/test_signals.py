@@ -7,7 +7,7 @@ The negative corpus deliberately includes the exact descriptions that a naive ke
 from __future__ import annotations
 
 from mcpgawk.probe import ServerSnapshot
-from mcpgawk.signals import detect, detect_shadowing
+from mcpgawk.signals import detect, detect_dynamic_dispatch, detect_shadowing
 
 
 def _snap(tools, name="t", prompts=None):
@@ -80,3 +80,52 @@ def test_shadowing_fires_only_on_cross_server_collision():
 def test_shadowing_zero_fp_within_single_server():
     only = _snap([{"name": "a", "description": "x"}, {"name": "b", "description": "y"}])
     assert detect_shadowing([only]) == {}   # distinct names, one server -> nothing
+
+
+# --- Dynamic-dispatch: real confirmed shapes (2026-07-16 dogfooding), must fire. ---
+
+def test_detects_sentry_style_dispatch_pair():
+    tools = [
+        {"name": "find_organizations", "description": "List orgs."},
+        {"name": "search_sentry_tools", "description": "Search available tools."},
+        {"name": "execute_sentry_tool", "description": "Execute a tool by name."},
+    ]
+    findings = detect_dynamic_dispatch(_snap(tools))
+    assert findings and findings[0].kind == "dispatch:dynamic-tool-catalog"
+    assert "search_sentry_tools" in findings[0].evidence or "search_sentry_tools" in findings[0].tool
+
+
+def test_detects_docker_gateway_style_dispatch_pair():
+    tools = [
+        {"name": "mcp-find", "description": "Find a tool in the catalog."},
+        {"name": "mcp-exec", "description": "Execute a tool by name."},
+        {"name": "mcp-add", "description": "Add a server."},
+    ]
+    findings = detect_dynamic_dispatch(_snap(tools))
+    assert findings and findings[0].kind == "dispatch:dynamic-tool-catalog"
+
+
+def test_detects_single_dispatcher_via_schema_param():
+    tools = [{
+        "name": "execute_tool",
+        "description": "Run a named tool.",
+        "inputSchema": {"type": "object", "properties": {
+            "tool": {"type": "string"}, "args": {"type": "object"}}},
+    }]
+    findings = detect_dynamic_dispatch(_snap(tools))
+    assert findings and findings[0].kind == "dispatch:dynamic-tool-catalog"
+
+
+def test_dynamic_dispatch_zero_fp_on_ordinary_execute_tool():
+    # A fixed, non-dispatching argument (a workflow id, not a tool-name selector) must NOT fire.
+    tools = [{
+        "name": "execute_workflow",
+        "description": "Run a previously-configured workflow by id.",
+        "inputSchema": {"type": "object", "properties": {
+            "workflow_id": {"type": "string"}}},
+    }]
+    assert detect_dynamic_dispatch(_snap(tools)) == []
+
+
+def test_dynamic_dispatch_zero_fp_on_clean_corpus():
+    assert detect_dynamic_dispatch(_snap(CLEAN)) == []

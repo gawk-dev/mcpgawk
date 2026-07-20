@@ -22,9 +22,54 @@ from .probe import ServerSnapshot
 TOKENIZER_NAME = "cl100k_base (approx index; not Claude-exact)"
 
 # Structural capability detectors — deliberately conservative, fact-level only.
-_WRITE = re.compile(
-    r"\b(create|delete|remove|write|update|send|post|put|patch|execute|run|modify|drop|"
-    r"insert|upload|push|merge|deploy|revoke|grant|edit|rename|move|set|add)\b", re.I)
+# Mutating verbs — ONE list, used to build both patterns below. A second hand-written list would
+# be a second definition of "write", and the two would drift.
+#
+# The 2026-07-21 additions (second row) came from comparing this scanner against a general-purpose
+# agent: a real brokerage server's order-placement tool — an irreversible real-money trade — was not
+# counted as a write, because "place" was missing. Kept to verbs unambiguous in isolation:
+# "start"/"stop"/"open"/"close" are excluded, since "start date" and "open issue" appear constantly
+# in read-only descriptions.
+_WRITE_VERBS = (
+    "create", "delete", "remove", "write", "update", "send", "post", "put", "patch", "execute",
+    "run", "modify", "drop", "insert", "upload", "push", "merge", "deploy", "revoke", "grant",
+    "edit", "rename", "move", "set", "add",
+    "place", "cancel", "submit", "issue", "transfer", "buy", "sell", "trade", "schedule",
+    "publish", "archive", "enable", "disable", "reset", "rotate", "approve", "reject", "terminate",
+)
+
+
+def _third_person(verb: str) -> str:
+    """"create" -> "creates", "modify" -> "modifies", "patch" -> "patches". English, not a lookup
+    table, so adding a verb above needs no second edit."""
+    if verb.endswith("y") and verb[-2] not in "aeiou":
+        return verb[:-1] + "ies"
+    if verb.endswith(("s", "x", "z", "ch", "sh", "o")):
+        return verb + "es"
+    return verb + "s"
+
+
+_WRITE = re.compile(r"\b(" + "|".join(_WRITE_VERBS) + r")\b", re.I)
+
+# THIRD-PERSON, ANCHORED TO THE START OF THE DESCRIPTION — and anchored for a reason.
+#
+# The bare pattern above matches "create" but not "creates", so every third-person description was
+# invisible to write detection: "Creates a file", "Sends an email", "Deletes the record" all read as
+# read-only. That is arguably the dominant phrasing in real tool descriptions, so write counts were
+# undercounted across the board — the product's headline claim, low.
+#
+# Matching "<verb>s" ANYWHERE would trade that for false positives on plural NOUNS, and the worst
+# offenders are exactly the words in the list: "Lists issues", "Gets updates", "Returns test runs",
+# "Lists OAuth grants", "Shows scheduled posts". All read-only, all would flag.
+#
+# The grammar separates them: a third-person verb LEADS a description; a plural noun FOLLOWS a verb.
+# So the -s form counts only as the first word. Known and accepted limitation: a description that
+# opens with a plural noun ("Posts and comments for a blog") is missed — rare, and failing closed on
+# a naming style is better than crying wolf on every list-shaped tool.
+_WRITE_LEADING = re.compile(
+    r"^\W*(?:it\s+|this\s+tool\s+)?(" + "|".join(_third_person(v) for v in _WRITE_VERBS) + r")\b",
+    re.I)
+
 _EXFIL_PARAM = re.compile(r"\b(url|uri|endpoint|webhook|href|callback|redirect)\b", re.I)
 _EXFIL_NAME = re.compile(r"\b(fetch|http|request|download|browse|scrape|curl|web)\b", re.I)
 
@@ -36,6 +81,11 @@ class ToolMeasure:
     write: bool                      # EXACT (structural)
     exfil_capable: bool              # EXACT (structural)
     annotations: dict[str, Any]      # EXACT (declared)
+    # Both EXACT counts, not judgements. They exist so grade.py can ask whether a tool is described
+    # in proportion to what it does; the judgement lives there, the facts live here. Kept on this
+    # side of the wall for the same reason `write` is: counting is a fact, deciding is not.
+    param_count: int = 0
+    description_words: int = 0
 
 
 @dataclass
@@ -78,8 +128,11 @@ def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
         return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic
         return False
-    text = tool.get("name", "") + " " + (tool.get("description") or "")
-    return bool(_WRITE.search(text))
+    description = (tool.get("description") or "").strip()
+    text = tool.get("name", "") + " " + description
+    # Bare verb anywhere ("create_file", "will delete the row"), OR a third-person verb leading the
+    # description ("Creates a file") — see _WRITE_LEADING for why the second one is anchored.
+    return bool(_WRITE.search(text)) or bool(_WRITE_LEADING.match(description))
 
 
 def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -> Measurement:
@@ -94,9 +147,12 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         tk = _count(enc, blob)
         total += tk
         ann = t.get("annotations") or {}
+        props = ((t.get("inputSchema") or {}).get("properties") or {})
         tools.append(ToolMeasure(
             name=t.get("name", "?"), tokens=tk,
-            write=_is_write(t, ann), exfil_capable=_exfil_capable(t), annotations=ann))
+            write=_is_write(t, ann), exfil_capable=_exfil_capable(t), annotations=ann,
+            param_count=len(props),
+            description_words=len((t.get("description") or "").split())))
     # Integrity pin = stable hash of the (name, description) pairs the server presents.
     pin_src = json.dumps(sorted((t.get("name"), t.get("description")) for t in snap.tools),
                          sort_keys=True).encode()
@@ -108,4 +164,10 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         m.is_failure = True
         m.error_kind = snap.error_kind
         m.caveats.append(f"probe error: {snap.error}")
+    if snap.transport_corrected:
+        # NOT a failure — we got a full measurement. But the user's config is wrong, and saying
+        # nothing would leave them with a declaration that still breaks every other client.
+        m.caveats.append(
+            f"declared transport `{snap.declared_transport}` did not answer; scanned "
+            f"`{snap.transport}` at {snap.resolved_url} instead — update your config")
     return m

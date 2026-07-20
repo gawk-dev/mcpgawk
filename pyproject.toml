@@ -37,6 +37,7 @@ Issues = "https://github.com/gawk-dev/mcpgawk/issues"
 
 [project.scripts]
 mcpgawk = "mcpgawk.cli:main"
+mcpgawk-mcp = "mcpgawk.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcpgawk"]
