@@ -1,10 +1,24 @@
 name: Publish VS Code extension (Open VSX)
 
+# MANUAL ONLY — the push trigger was removed 2026-07-21, after it published a stale bundle.
+#
+# Two independent reasons it must never fire automatically:
+#
+#  1. `paths:` filters are evaluated across EVERY commit in a push, not just the tip. An engine
+#     release whose push happened to also carry an older commit touching editors/vscode/package.json
+#     fired this workflow and published v0.1.4 from stale sources. A version on Open VSX cannot be
+#     unpublished, so the number was spent on code nobody meant to ship.
+#
+#  2. There is no build step below. The extension's source of truth is the canonical repo's
+#     packages/vscode (TypeScript, main = ./dist/extension.js). `vsce package` here would ship an
+#     empty dist/ — an extension that cannot activate at all. editors/vscode in THIS repo is the old
+#     hand-written extension.js, kept only so the listing metadata has a home; it is not the product.
+#
+# Publishing is therefore a deliberate act against a locally built, locally verified .vsix:
+#     cd <canonical>/packages/vscode && npm run build && npx vsce package --no-dependencies
+#     npx ovsx publish mcpgawk-<version>.vsix -p "$OVSX_PAT"
+# Restoring an automatic trigger requires solving BOTH problems above first.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "editors/vscode/package.json"
   workflow_dispatch: {}
 
 jobs:
