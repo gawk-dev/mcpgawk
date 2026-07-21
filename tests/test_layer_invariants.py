@@ -63,7 +63,13 @@ def test_every_registered_signal_kind_is_about_language_not_capability():
     """The families this layer is allowed to have. Adding one is a deliberate act: if a new family
     is not about text aimed at the model, it is in the wrong module, and this test is where you find
     that out rather than after it ships in a report."""
-    allowed_families = {"injection", "dispatch", "shadowing", "servercard"}
+    # "obfuscation" added 2026-07-21, deliberately: invisible Unicode in a tool DESCRIPTION is
+    # model-facing language, not a capability fact — the model reads the hidden characters and a
+    # human reviewer cannot. It is kept a separate family from "injection" (matching Invariant's own
+    # split, W021 vs E001) because hiding text and instructing the model are different findings: the
+    # concealment is evidence of intent regardless of what is concealed, and the instruction it hides
+    # is reported by its own detector.
+    allowed_families = {"injection", "dispatch", "shadowing", "servercard", "obfuscation"}
     families = {k.split(":", 1)[0] for k in signals_mod.SIGNAL_KINDS}
     unexpected = families - allowed_families
     assert not unexpected, (

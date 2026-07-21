@@ -21,11 +21,23 @@ LABEL_SCHEMA = "mcpgawk/label@0.1"
 # Human lead phrase per bounded-signal family (the part of `kind` before the ':'). Keeps each
 # finding named as ITSELF in the CLI report — see the render loop. Adding a new signal family
 # without a lead here falls back to a neutral "review signal in" rather than silently mislabelling.
+#: Per-KIND overrides, consulted before the family lead. A family phrase that is right for one of
+#: its kinds can be actively wrong for another: "tool-name shadowing on X" misdescribes a
+#: cross-server REFERENCE, where the names differ entirely and the issue is one server instructing
+#: the agent about another's tool. A finding named inaccurately sends the reader to check the wrong
+#: thing.
+_SIGNAL_LEAD_BY_KIND = {
+    "shadowing:cross-server-reference": "cross-server tool reference from",
+}
+
 _SIGNAL_LEAD = {
     "injection": "possible prompt-injection in",
     "dispatch": "tools hidden behind dynamic dispatch in",
     "shadowing": "tool-name shadowing on",
     "servercard": "server-card mismatch on",
+    # Obfuscation is its OWN class, not a flavour of injection (Invariant separates them too: W021
+    # vs E001). Hiding text is evidence of intent; what it hides is reported by its own detector.
+    "obfuscation": "text hidden with invisible characters in",
 }
 
 
@@ -56,7 +68,7 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
     g = grade(m)
     _ts = _trust_surface(m)
     heavy = sorted(m.tools, key=lambda t: t.tokens, reverse=True)[:3]
-    return {
+    label: dict[str, Any] = {
         # ---- Server-Card-compatible surface ----
         "name": snap.name,
         "transport": snap.transport,
@@ -88,6 +100,9 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
             # server's self-declaration checked against what we measured (http/sse only)
             "server_card": (compare_to_reality(snap.server_card, [t.name for t in m.tools])
                             if snap.server_card else {"present": False}),
+            # Filled in below, once the label exists to compute it from. THE prose, so every
+            # renderer tells the same story — see build_narrative.
+            "narrative": None,
             "tools": [
                 {"name": t.name, "tokens": t.tokens,
                  "write": t.write, "exfil_capable": t.exfil_capable,
@@ -109,6 +124,9 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
                           "bounded_signals are heuristic pointers for a human to review, not verdicts.",
         },
     }
+    # Computed from the finished label so there is exactly one place the report's wording is decided.
+    label["x-mcpgawk"]["narrative"] = build_narrative(label)
+    return label
 
 
 def _pl(count: int, singular: str, plural: str | None = None) -> str:
@@ -241,61 +259,96 @@ def _actions(exfil_c: int, write_c: int, ac: dict[str, Any], heavy: bool,
     return acts[:3]
 
 
+def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
+    """THE prose, computed once, as structure.
+
+    Both renderers used to derive their own sentences from the same label: `render_cli` here and
+    `site/assets/report-render.js` there. They diverged — different framing, different wording, and
+    the web one showed a letter grade the CLI had deliberately dropped from the headline. Two
+    renderers telling different stories about the same scan is doctrine principle 9 (single source
+    of truth) broken on the most public surface, and it is the kind of drift no test catches because
+    each side passes its own.
+
+    So the engine decides what the report SAYS; a renderer decides only how it looks.
+    """
+    x = label["x-mcpgawk"]
+    ts, ac = x["trust_surface"], x["annotation_completeness"]
+    tools, n = x["tools"], x["tool_count"]
+    cost = x["cost_index_tokens"]
+    write_c, exfil_c = ts["write_count"], ts["exfil_count"]
+    has_risk = write_c > 0 or exfil_c > 0
+    heavy = cost >= HEAVY_TOKENS
+    caveats = x.get("caveats") or []
+    failed = bool(x.get("is_failure")) or any(("probe error" in c) or ("scan failed" in c) for c in caveats)
+    has_dispatch = any((s.get("kind") or "").startswith("dispatch:") for s in (x.get("bounded_signals") or []))
+    injections = [s for s in (x.get("bounded_signals") or []) if (s.get("kind") or "").startswith("injection:")]
+    phrase = cost_phrase(round(cost / n) if n else 0)
+    expensive = "expensive" in phrase or "mid-range" in phrase
+    concerns = _concerns(n, cost, write_c, exfil_c, ac, tools, heavy, injections, expensive)
+
+    if failed:
+        state = "auth-required" if x.get("error_kind") == "auth-required" else "unreachable"
+        verdict = "AUTH REQUIRED" if state == "auth-required" else "UNREACHABLE"
+    elif not has_risk and not heavy:
+        state = "incomplete" if has_dispatch else "clean"
+        verdict = "INCOMPLETE" if has_dispatch else "CLEAN"
+    else:
+        state = "review"
+        k = len(concerns)
+        risk = f"REVIEW — {k} thing{'s' if k != 1 else ''} worth a look" if k else "REVIEW"
+        verdict = f"INCOMPLETE · {risk}" if has_dispatch else risk
+
+    failure = None
+    if failed:
+        raw = next((c for c in caveats if "probe error" in c or "scan failed" in c), "")
+        detail = raw.split("error:", 1)[-1].strip().rstrip(":").strip() if "error:" in raw else raw.strip()
+        if not detail or detail.lower().startswith("timeouterror"):
+            detail = "no MCP response (timed out)"
+        failure = {"detail": detail, "auth": state == "auth-required"}
+
+    pct = round(cost / 200_000 * 100)
+    window = f"about {pct}% of a 200k context window" if pct >= 1 else "under 1% of a 200k context window"
+    return {
+        "verdict": verdict,
+        "state": state,
+        "failure": failure,
+        "dispatch": has_dispatch,
+        "cost_sentence": (f"{n} tool{'s' if n != 1 else ''} costing {cost:,} tokens — {window}, spent on "
+                          f"every message before you type a word. {phrase.capitalize()}."),
+        "concerns": [{"title": t, "body": b} for t, b in concerns],
+        "actions": _actions(exfil_c, write_c, ac, heavy, tools, cost),
+        # Hedged and conditional, always: we only saw the tools the server chose to show us, and we
+        # only pattern-match. It disappears entirely the moment anything is actually found.
+        "reassurance": (None if (failed or injections or has_dispatch or (not has_risk and not heavy))
+                        else f"Nothing here looks malicious in the {n} visible tool"
+                             f"{'s' if n != 1 else ''} — this is exposure, not evidence of an attack."),
+    }
+
+
 def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     x = label["x-mcpgawk"]
     ts = x["trust_surface"]
-    ac = x["annotation_completeness"]
     tools = x["tools"]
     n = x["tool_count"]
     cost = x["cost_index_tokens"]
     write_c, exfil_c = ts["write_count"], ts["exfil_count"]
     has_risk = write_c > 0 or exfil_c > 0
     heavy = cost >= HEAVY_TOKENS
-    # A probe that errored (unreachable host, wrong URL, an HTML docs page instead of an MCP
-    # endpoint, a timeout) must NEVER read as CLEAN. A failed scan reporting "nothing write- or
-    # exfil-capable" is a security tool's cardinal sin — a failure reading as all-clear.
-    caveats = x.get("caveats") or []
-    # Primary signal is the TYPED flag set by measure() from the snapshot. The substring check is
-    # kept only as belt-and-suspenders: neither alone can let a failed probe slip through as CLEAN,
-    # and if one mechanism ever regresses the other still catches it.
-    failed = bool(x.get("is_failure")) or any(("probe error" in c) or ("scan failed" in c) for c in caveats)
-
-    # Dynamic dispatch: the server hides a larger tool catalog behind a meta-tool, so tools/list — all
-    # a passive scan can see — is INCOMPLETE. A clean result on the visible tools is NOT proof of a
-    # clean server, so this must surface in the verdict itself, never as a silent CLEAN (F4). The
-    # runtime enumeration of the hidden catalog is verify's job; scan's job is to refuse to imply
-    # completeness it doesn't have.
-    has_dispatch = any((s.get("kind") or "").startswith("dispatch:") for s in (x.get("bounded_signals") or []))
-    injections = [s for s in (x.get("bounded_signals") or [])
-                  if (s.get("kind") or "").startswith("injection:")]
-    tpt = round(cost / n) if n else 0
-    phrase = cost_phrase(tpt)
-    expensive = "expensive" in phrase or "mid-range" in phrase
-    concerns = _concerns(n, cost, write_c, exfil_c, ac, tools, heavy, injections, expensive)
-
-    # Verdict: derived only from the real numbers, so the headline can't lie.
-    if failed:
-        # Both are failures and NEITHER can read as CLEAN — but "UNREACHABLE" on a server that
-        # answered 401 contradicts the body text and sends the user to debug the wrong thing.
-        verdict = "AUTH REQUIRED" if x.get("error_kind") == "auth-required" else "UNREACHABLE"
-    elif not has_risk and not heavy:
-        verdict = "INCOMPLETE" if has_dispatch else "CLEAN"
-    else:
-        # The headline is a JUDGEMENT with a count, not a vocabulary lesson: "REVIEW — 2 things
-        # worth a look" tells a reader how much work they're in for before they read a word.
-        # "HEAVY · HIGH-REACH · UNANNOTATED" was our jargon, and made three facts look like three
-        # separate alarms. The classification survives in the JSON for machine consumers.
-        k = len(concerns)
-        risk = f"REVIEW — {k} thing{'s' if k != 1 else ''} worth a look" if k else "REVIEW"
-        verdict = f"INCOMPLETE · {risk}" if has_dispatch else risk
+    # These three now come from the narrative's `state`, which build_narrative derived once. Deriving
+    # them again here is exactly how the two renderers drifted apart in the first place.
+    # THE prose comes from the label, not from here. This function decides layout only — see
+    # build_narrative. A label from an older engine has no narrative, so compute it rather than
+    # render an empty report.
+    nar = x.get("narrative") or build_narrative(label)
+    concerns = [(c["title"], c["body"]) for c in nar["concerns"]]
+    verdict = nar["verdict"]
+    failed = nar["state"] in ("unreachable", "auth-required")
+    has_dispatch = nar["dispatch"]
 
     lines = [f"● {label['name']}   [{label['transport']}]   {verdict}"]
 
     if failed:
-        raw = next((c for c in caveats if "probe error" in c or "scan failed" in c), "")
-        detail = raw.split("error:", 1)[-1].strip().rstrip(":").strip() if "error:" in raw else raw.strip()
-        if not detail or detail.lower().startswith("timeouterror"):
-            detail = "no MCP response (timed out)"
+        detail = nar["failure"]["detail"]
         lines.append(f"    ✗ could not scan — {detail}. This did NOT pass; it was not measured.")
         # The next-step hint must match the KIND of failure. Telling someone whose endpoint answered
         # 401 that "a docs URL is not an MCP endpoint" sends them to debug a URL that was right.
@@ -320,12 +373,8 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"    {n} tool{'s' if n != 1 else ''} · {cost:,} tokens at connect · nothing write- or exfil-capable{suffix}.")
     else:
         # ── The narrative: what this server IS, what to look at first, what to do. ──────────────
-        pct = round(cost / 200_000 * 100)
-        window = (f"about {pct}% of a 200k context window" if pct >= 1
-                  else "under 1% of a 200k context window")
         lines.append("")
-        lines += _wrap(f"{n} tool{'s' if n != 1 else ''} costing {cost:,} tokens — {window}, spent "
-                       f"on every message before you type a word. {phrase.capitalize()}.", "    ")
+        lines += _wrap(nar["cost_sentence"], "    ")
 
         for i, (title, body) in enumerate(concerns):
             lines += ["", f"    ▸ {'Look at this first' if i == 0 else 'Also true'}"]
@@ -338,7 +387,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         if not verbose and has_risk:
             lines += _flagged_table(tools, n)
 
-        actions = _actions(exfil_c, write_c, ac, heavy, tools, cost)
+        actions = nar["actions"]
         if actions:
             lines += ["", "    Worth doing"]
             for i, a in enumerate(actions, 1):
@@ -348,11 +397,9 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         # The reassurance is HEDGED and conditional, always. We only ever looked at the tools the
         # server chose to show us, and we only pattern-match — so this may never read as a clean
         # bill of health, and it disappears entirely if anything was actually found.
-        if not injections and not has_dispatch:
+        if nar["reassurance"]:
             lines.append("")
-            lines += _wrap(f"Nothing here looks malicious in the {n} visible tool"
-                           f"{'s' if n != 1 else ''} — this is exposure, not evidence of an attack.",
-                           "    ")
+            lines += _wrap(nar["reassurance"], "    ")
 
     # Tool detail: verbose shows every tool; default surfaces only the ones that can bite,
     # scariest first (can both change data AND send it out), capped.
@@ -370,7 +417,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     for s in (x.get("bounded_signals") or []):
         kind = s.get("kind", "")
         family = kind.split(":", 1)[0]
-        lead = _SIGNAL_LEAD.get(family, "review signal in")
+        lead = _SIGNAL_LEAD_BY_KIND.get(kind) or _SIGNAL_LEAD.get(family, "review signal in")
         evidence = s.get("evidence")
         detail = f" — review: {evidence!r}" if evidence else ""
         lines.append(f"    ⚠  {lead} {s.get('tool', '?')} ({kind}){detail}")

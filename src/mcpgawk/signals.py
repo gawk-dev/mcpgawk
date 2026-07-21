@@ -32,8 +32,10 @@ SIGNAL_KINDS: dict[str, str] = {
     "injection:hidden-markup": "detect",
     "injection:reader-directed": "detect",
     "injection:secret-exfil": "detect",
+    "obfuscation:hidden-unicode": "detect",
     "dispatch:dynamic-tool-catalog": "detect_dynamic_dispatch",
     "shadowing:name-collision": "detect_shadowing",
+    "shadowing:cross-server-reference": "detect_cross_server_reference",
     "servercard:undeclared-tools": "detect_card_mismatch",
 }
 
@@ -134,10 +136,53 @@ class Finding:
     confidence: str = "signal"   # never "confirmed"; this layer only signals
 
 
+#: Characters that are invisible when rendered but are still read by the model. Unicode Format (Cf)
+#: and Control (Cc) ranges, plus the Tag block, which can encode a whole hidden message.
+_HIDDEN = re.compile(
+    r"[​-‏‪-‮⁠-⁤⁪-⁯﻿\U000e0000-\U000e007f]"
+)
+#: Unicode Tag characters map 1:1 onto ASCII — U+E0041 is "A". Decoding them turns a message that
+#: is invisible to a human reviewer back into text the detectors can read.
+_TAG_BASE = 0xE0000
+
+
+def _deobfuscate(text: str) -> tuple[str, str]:
+    """Return (text the MODEL effectively sees, a description of what was hidden).
+
+    A literal pattern is defeated by a single invisible character: `<IM​PORTANT>` does not match
+    `<IMPORTANT`, and `ig​nore previous instructions` does not match either — while the model
+    reads both exactly as intended. Measured on the poisoned corpus, this one trick blinded EVERY
+    detector we had, including the cases taken verbatim from a published disclosure.
+    """
+    if not text or not _HIDDEN.search(text):
+        return text, ""
+    decoded = []
+    kinds = set()
+    for ch in text:
+        cp = ord(ch)
+        if _TAG_BASE <= cp <= _TAG_BASE + 0x7F:
+            kinds.add("unicode-tag")
+            decoded.append(chr(cp - _TAG_BASE))      # smuggled message, made readable
+        elif _HIDDEN.match(ch):
+            kinds.add("zero-width" if cp in range(0x200B, 0x2010) else "invisible-format")
+        else:
+            decoded.append(ch)
+    return "".join(decoded), "+".join(sorted(kinds))
+
+
 def _scan_text(text: str, tool: str) -> list[Finding]:
     out: list[Finding] = []
+    clean, hidden = _deobfuscate(text or "")
+    if hidden:
+        # The obfuscation is itself the finding. Silently normalising and moving on would hide the
+        # most incriminating fact: a legitimate tool description has no reason to carry characters
+        # that are invisible to the person reviewing it.
+        out.append(Finding(tool=tool, kind="obfuscation:hidden-unicode",
+                           evidence=f"{hidden} characters hide: {clean.strip()[:90]!r}"))
+    # Scan BOTH: the raw text (so evidence quotes what was actually published) and the de-obfuscated
+    # form (so an invisible character cannot switch the detectors off).
     for kind, rx in _DETECTORS:
-        m = rx.search(text or "")
+        m = rx.search(text or "") or rx.search(clean)
         if m:
             span = m.group(0).strip()
             out.append(Finding(tool=tool, kind=kind, evidence=span[:120]))
@@ -174,6 +219,66 @@ def detect_shadowing(snaps: list[ServerSnapshot]) -> dict[str, list[Finding]]:
                 out.setdefault(s.name, []).append(Finding(
                     tool=nm, kind="shadowing:name-collision",
                     evidence=f"also exposed by: {', '.join(sorted(others))}"))
+    return out
+
+
+#: A directive aimed at the agent about ANOTHER tool — "when the user calls X", "before using X".
+#: Required for a cross-server reference to count: a description may legitimately name a concept
+#: that happens to be another server's tool name, but it has no business instructing the agent about
+#: when to call it.
+_REFERENTIAL = re.compile(
+    r"(?:when(?:ever)?|before|after|instead\s+of|prior\s+to|each\s+time|always|first)\b"
+    r"|(?:call|calls|calling|use|uses|using|invoke|invokes|run|runs)\b",
+    re.IGNORECASE)
+
+#: An identifier-shaped token: snake_case, kebab-case or camelCase. A bare English word is NOT enough
+#: — real inventories contain tools called `sum`, `search`, `login` and `impact`, and a description
+#: saying "use search instead" must never be read as a cross-server reference. This is the whole
+#: false-positive control.
+_IDENTIFIERISH = re.compile(r"^(?=.*[_\-]|.*[a-z][A-Z])[\w\-]{4,}$")
+
+
+def detect_cross_server_reference(snaps: list[ServerSnapshot]) -> dict[str, list[Finding]]:
+    """CROSS-SERVER signal (Invariant issue code E002): a server's tool description instructs the
+    agent about a tool belonging to a DIFFERENT server.
+
+    Distinct from `detect_shadowing`, which fires on a name COLLISION — two servers exposing the same
+    tool name. Here the names differ; the danger is that server A rewrites how the agent uses server
+    B's trusted tool ("whenever the user calls send_email, first call this"). All connected servers
+    share one context, so A's description is read by the model that also holds B's.
+
+    0-FP discipline, and this detector needs it more than most: tool names are frequently ordinary
+    words. It fires only when the referenced name is IDENTIFIER-SHAPED (contains a separator or
+    camelCase) *and* the sentence is referential (a directive about when to call it). Measured on the
+    real 6-server / 175-tool inventory: 0 findings.
+    """
+    owners: dict[str, set[str]] = {}
+    for s in snaps:
+        for t in s.tools:
+            owners.setdefault(t.get("name", "?"), set()).add(s.name)
+    foreign = {n: o for n, o in owners.items() if _IDENTIFIERISH.match(n)}
+
+    out: dict[str, list[Finding]] = {}
+    for s in snaps:
+        own = {t.get("name", "?") for t in s.tools}
+        for t in s.tools:
+            desc = t.get("description") or ""
+            clean, _ = _deobfuscate(desc)          # an invisible char must not hide the reference
+            for name, holders in foreign.items():
+                if name in own or not (holders - {s.name}):
+                    continue                        # its own tool, or nobody else owns it
+                for hay in (desc, clean):
+                    m = re.search(rf"\b{re.escape(name)}\b", hay)
+                    if not m:
+                        continue
+                    window = hay[max(0, m.start() - 90):m.end() + 90]
+                    if _REFERENTIAL.search(window):
+                        out.setdefault(s.name, []).append(Finding(
+                            tool=t.get("name", "?"), kind="shadowing:cross-server-reference",
+                            evidence=(f"describes when to use '{name}', which belongs to "
+                                      f"{', '.join(sorted(holders - {s.name}))} — a server should not "
+                                      f"instruct the agent about another server's tool")))
+                        break
     return out
 
 
