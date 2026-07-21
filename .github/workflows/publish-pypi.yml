@@ -8,7 +8,34 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # THE RELEASE GATE. Until 2026-07-21 this workflow published straight from the push: ci.yml ran
+  # alongside it as an independent workflow, so a commit that broke the suite and touched
+  # pyproject.toml shipped to PyPI anyway and merely turned CI red next to it. PyPI has no unpublish
+  # — a bad version is permanent — so the tests must be a precondition of upload, not a parallel
+  # opinion about it. This repo cannot use branch protection to express that (it is enforced on the
+  # private repo's plan, and protection would not cover a workflow-dispatch run in any case), so the
+  # dependency is expressed here, where it holds for every trigger.
+  #
+  # Same matrix as ci.yml on purpose: the engine claims >=3.10, so "the tests passed" must mean
+  # passed on the oldest version we promise, not just on the newest.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Tests must pass before anything is uploaded
+        run: pytest -q
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
