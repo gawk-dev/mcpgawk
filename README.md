@@ -57,7 +57,7 @@ pip install mcpgawk        # or: uv tool install mcpgawk
 mcpgawk scan mcp.json
 ```
 
-**Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline.
+**Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
 
 **CI** (GitHub Action): gate every PR on token budget / drift ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
 ```yaml

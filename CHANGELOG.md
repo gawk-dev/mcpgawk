@@ -2,6 +2,15 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.5] — 2026-07-21
+
+A version realignment. **No engine changes** — 0.1.5 is byte-for-byte 0.1.4 plus this note.
+
+The VS Code extension and this CLI ship under one version. Open VSX 0.1.4 was spent on a stale
+bundle published by accident, so the extension had to re-ship its real 0.1.4 content as 0.1.5,
+leaving the CLI a number behind. The CLI moves up to meet it. If you are on 0.1.4, there is nothing
+here to upgrade for.
+
 ## [0.1.4] — 2026-07-20
 
 ### Added
