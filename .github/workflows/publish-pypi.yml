@@ -75,4 +75,16 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           python -m pip install twine
-          twine upload dist/*
+          # --skip-existing + retry: on 2026-07-23 (0.1.7) upload.pypi.org connect-timeouts made
+          # twine exit 1 AFTER both artefacts had already landed — a RED run over a SUCCESSFUL
+          # publish, and a plain re-run would then fail with "file already exists". --skip-existing
+          # makes a retry idempotent (already-uploaded files are skipped, not errored); the loop
+          # rides out a transient network blip instead of failing the whole release on it.
+          for attempt in 1 2 3; do
+            if twine upload --non-interactive --skip-existing dist/*; then
+              echo "upload ok (attempt $attempt)"; exit 0
+            fi
+            echo "::warning::twine upload attempt $attempt failed (likely a transient upload.pypi.org timeout) — retrying"
+            sleep 20
+          done
+          echo "::error::twine upload failed after 3 attempts"; exit 1
