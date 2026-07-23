@@ -240,6 +240,21 @@ def legacy_key_for(snap: ServerSnapshot) -> str:
     return f"{snap.transport}:{snap.name}"
 
 
+#: Every transport a legacy `{transport}:{name}` key could have used.
+_TRANSPORTS = ("stdio", "http", "sse")
+
+
+def transport_variant_keys(snap: ServerSnapshot) -> tuple[str, ...]:
+    """Every legacy `{transport}:{name}` key this server could already be recorded under (B3).
+
+    A NAMELESS server (no `serverInfo.name`) is keyed by its transport, so switching stdio→http would
+    silently orphan its baseline and start a fresh one — a config edit erasing history, the exact
+    class of silent reset ADR-0012 exists to stop. Migrating from every transport variant lets the new
+    key adopt the old baseline instead. Harmless for a NAMED server: its `mcp:name` key already exists
+    (transport-independent), so `_migrate` no-ops rather than adopting anything."""
+    return tuple(f"{t}:{snap.name}" for t in _TRANSPORTS)
+
+
 def last(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     hist = store.get("servers", {}).get(key, {}).get("history", [])
     return hist[-1] if hist else None

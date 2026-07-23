@@ -11,12 +11,12 @@ No network. No LLM. Scanning the inventory is pure computation.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .fingerprint import surface_pin
 from .probe import ServerSnapshot
 
 TOKENIZER_NAME = "cl100k_base (approx index; not Claude-exact)"
@@ -153,10 +153,10 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
             write=_is_write(t, ann), exfil_capable=_exfil_capable(t), annotations=ann,
             param_count=len(props),
             description_words=len((t.get("description") or "").split())))
-    # Integrity pin = stable hash of the (name, description) pairs the server presents.
-    pin_src = json.dumps(sorted((t.get("name"), t.get("description")) for t in snap.tools),
-                         sort_keys=True).encode()
-    pin = hashlib.sha256(pin_src).hexdigest()[:16]
+    # Integrity pin over the WHOLE tool surface — name + description + canonical input schema +
+    # annotations (audit B2). A rug-pull that only widens a schema or flips readOnlyHint keeps the
+    # name+description identical, so the old name+description-only pin missed it; this does not.
+    pin = surface_pin(snap.tools)
     m = Measurement(
         tokenizer=tokenizer_name, total_tokens=total, tool_count=len(tools), tools=tools,
         integrity_pin=pin, prompt_count=len(snap.prompts), resource_count=len(snap.resources))

@@ -126,6 +126,8 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
         "cost_index": m.total_tokens,
         "tokenizer": m.tokenizer,          # so token_delta isn't compared across tokenizers
         "protocol_version": snap.protocol_version,
+        "transport": snap.transport,       # B3 — so a transport switch is visible, not silent
+
         "tools": _tool_hashes(snap),      # legacy shape, kept for older readers (see _tool_hashes)
         "items": _item_hashes(snap),      # the real fingerprint: tools + prompts + resources
         "texts": _item_texts(snap),       # redacted prose, so a diff can be SHOWN (ADR-0012)
@@ -167,6 +169,12 @@ class DriftReport:
     props: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
     #: `{kind}.{name}` -> (before, after) annotation dicts.
     annos: dict[str, tuple[dict, dict]] = field(default_factory=dict)
+    #: B3 — (before, after) transport, when a server moved between stdio/http/sse. Local→remote is a
+    #: real trust-posture change (a network endpoint now), so it surfaces for acknowledgement rather
+    #: than re-baselining in silence. None on older records that never stored transport.
+    transport_changed: tuple[str, str] | None = None
+    #: B3 — (before, after) MCP protocol version, when it changed. None if either side didn't store it.
+    protocol_changed: tuple[str, str] | None = None
 
     def insertion(self, key: str) -> str | None:
         """What the new description GAINED, if the change was purely additive.
@@ -210,8 +218,9 @@ class DriftReport:
 
     @property
     def any(self) -> bool:
-        return self.pin_changed or bool(self.added or self.removed or self.changed
-                                        or self.schema_changed or self.annotation_changed)
+        return (self.pin_changed or bool(self.added or self.removed or self.changed
+                                         or self.schema_changed or self.annotation_changed)
+                or self.transport_changed is not None or self.protocol_changed is not None)
 
     def gained_params(self, key: str) -> list[str]:
         before, after = self.props.get(key, ([], []))
@@ -299,6 +308,13 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     props = {k: (pp.get(k, []), cp.get(k, [])) for k in schema_changed}
     annos = {k: ((pan or {}).get(k, {}), (can or {}).get(k, {})) for k in anno_changed}
 
+    # B3. Guarded like the C1 maps: a record predating transport/protocol storage compares as None,
+    # so the first run after this ships never false-alarms a switch that didn't happen.
+    pv_t, cv_t = prev.get("transport"), curr.get("transport")
+    transport_changed = (pv_t, cv_t) if pv_t and cv_t and pv_t != cv_t else None
+    pv_p, cv_p = prev.get("protocol_version"), curr.get("protocol_version")
+    protocol_changed = (pv_p, cv_p) if pv_p and cv_p and pv_p != cv_p else None
+
     return _with_severity(DriftReport(
         pin_changed=prev.get("pin") != curr.get("pin"),
         added=added, removed=removed, changed=changed,
@@ -310,6 +326,8 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
         annotation_changed=anno_changed,
         props=props,
         annos=annos,
+        transport_changed=transport_changed,
+        protocol_changed=protocol_changed,
     ))
 
 
@@ -442,6 +460,14 @@ def render(name: str, r: DriftReport) -> str:
             lines.append(f"        + {_KIND_LABEL[kind]} added: {', '.join(split['added'])}")
         if split["removed"]:
             lines.append(f"        - {_KIND_LABEL[kind]} removed: {', '.join(split['removed'])}")
+    if r.transport_changed:
+        before, after = r.transport_changed
+        note = (" — a LOCAL server is now a REMOTE endpoint; its trust posture changed"
+                if before == "stdio" and after in ("http", "sse") else "")
+        lines.append(f"        ! TRANSPORT changed: {before} → {after}{note}")
+    if r.protocol_changed:
+        before, after = r.protocol_changed
+        lines.append(f"        ! MCP protocol changed: {before} → {after}")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
     if r.baseline_extended:

@@ -1,7 +1,6 @@
 """Supply-chain opt-in check — deterministic, no live network calls (fetch is injected)."""
 from __future__ import annotations
 
-import pytest
 
 from mcpgawk.supplychain import check, check_npm, check_pypi, extract_package
 

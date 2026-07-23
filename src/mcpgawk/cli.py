@@ -157,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fleet-json", action="store_true",
                    help="emit the FLEET STATUS as JSON (one row per server, grouped by the tool it "
                         "lives in) — what the IDE extension renders, so state is computed once here")
+    s.add_argument("--with-spec", action="store_true",
+                   help="with --fleet-json, include each server's launch spec (command/args/env or "
+                        "url) so a local front-end can verify it by click — MAY carry secrets from "
+                        "your config; kept off by default and never printed without this flag")
     s.add_argument("--verbose", action="store_true", help="show the full per-tool table, not just flagged tools")
     s.add_argument("--detail", action="store_true",
                    help="print the full narrative report for EVERY server instead of the fleet "
@@ -266,9 +270,10 @@ def main(argv: list[str] | None = None) -> int:
             # a load()/save() pair, two concurrent scans each diff against a baseline the other has
             # already replaced, and one server's drift history is silently lost.
             #
-            # `migrate_from` carries the pre-ADR-0012 `transport:name` key so switching to the
-            # server-asserted identity adopts an existing baseline instead of orphaning it — the
-            # fix for silent baseline resets must not itself cause one.
+            # `migrate_from` carries every legacy `transport:name` key (B3), so both switching to the
+            # server-asserted identity AND switching transport on a nameless server adopt an existing
+            # baseline instead of orphaning it — the fix for silent baseline resets must not itself
+            # cause one, in either direction.
             current = drift.build_record(sn, m, measured_at=now)
             asserted = history.key_for(sn)
             key = history.legacy_key_for(sn) if asserted in collided else asserted
@@ -279,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             if was:
                 reidentified[sn.name] = was
             previous = history.record(key, current,
-                                      migrate_from=(history.legacy_key_for(sn),),
+                                      migrate_from=history.transport_variant_keys(sn),
                                       alias=sn.name)
             if previous is None:
                 new_baselines.append(sn.name)
@@ -317,7 +322,8 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "fleet_json", False):
         # Front-ends get the SAME rows the terminal view renders — never raw labels to re-interpret.
         unscannable = detect_unscannable() if not (args.stdio or args.http or args.sse) else []
-        payload = fleet.to_json(fleet.build_rows(labels, entries, skipped, unscannable))
+        payload = fleet.to_json(fleet.build_rows(labels, entries, skipped, unscannable,
+                                                 with_spec=getattr(args, "with_spec", False)))
         print(json.dumps(payload, indent=2))
         return 1 if failed else 0
 

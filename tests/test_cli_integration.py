@@ -5,9 +5,21 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mcpgawk import cli
 from mcpgawk.probe import ServerSnapshot
 from mcpgawk.supplychain import SupplyChainFinding
+
+
+@pytest.fixture(autouse=True)
+def _isolated_history(monkeypatch, tmp_path):
+    """scan persists baselines to ~/.mcpgawk/history.json (the ONLY state mcpgawk keeps) and the
+    exit code counts drift/re-identification against them. Unisolated, these tests collide with
+    the REAL history on a developer machine — the fake 'request'/'example.com' snapshots read as
+    a rug-pull against genuine baselines and rc flips to 1. That is a correct exit code fed by
+    leaked state: these two failed for WEEKS on the founder's machine while passing on fresh CI."""
+    monkeypatch.setenv("MCPGAWK_HISTORY", str(tmp_path / "history.json"))
 
 
 def _fake_snapshot(name, transport):

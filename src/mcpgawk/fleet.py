@@ -14,11 +14,44 @@ here is a function of the labels, so the states a user sees are directly testabl
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .ambient import detect_ambient, summarize
 from .probe import _missing_program
+
+#: Query-param names whose VALUE is a credential — masked before a URL is ever displayed. A security
+#: tool that renders a live API key in its own fleet view (screenshots, screen-shares) is the wrong
+#: look; the real URL still lives in the server's launch spec (server-side) for verify/auth.
+_SECRET_PARAM = re.compile(r"(key|token|secret|pass|pwd|auth|sig|credential)", re.I)
+
+
+def redact_url(url: str | None) -> str | None:
+    """Mask secret-looking query-string values and any userinfo in a URL, for DISPLAY only. Returns
+    the URL unchanged when there is nothing sensitive. The un-redacted URL is kept on `FleetRow.url`
+    (for the in-process auth flow) and in the launch `spec` (server-side, for verify)."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:  # user:pass@host
+        creds, host = netloc.rsplit("@", 1)
+        user = creds.split(":", 1)[0]
+        netloc = f"{user}:***@{host}" if ":" in creds else f"***@{host}"
+        changed = True
+    query = parts.query
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if pairs:
+        masked = [(k, "***" if (v and _SECRET_PARAM.search(k)) else v) for k, v in pairs]
+        if masked != pairs:
+            query, changed = urlencode(masked, safe="*"), True
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url
 
 #: The states a server can be in, in the order a human should deal with them. Ordering is a product
 #: decision, not cosmetics: the things that BLOCK a scan (needs credentials, unreachable) come before
@@ -38,10 +71,24 @@ class FleetRow:
     detail: str
     url: str | None = None          # set for remote servers, so the auth step knows where to go
     clients: tuple[str, ...] = ()   # which IDE / AI tool(s) this server is configured in
+    # The launch spec (command/args/env, or url/headers) a front-end needs to VERIFY this server by
+    # click. Populated ONLY when the caller asks (build_rows(with_spec=True)); it can carry secrets
+    # from the user's own config (an `env` API key), so it is never in the default fleet-json — see
+    # `--with-spec`, which only the local web UI requests, in-process, over loopback.
+    spec: dict[str, Any] | None = None
 
     @property
     def needs_auth(self) -> bool:
         return self.state == "AUTH" and bool(self.url)
+
+
+def _spec_of(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The launch spec a front-end needs to verify this server by click — command/args/env for a
+    local stdio server, url/headers for a remote one. Internal bookkeeping keys (anything starting
+    with `_`, e.g. `_clients`) are stripped. None when the entry can launch nothing."""
+    if not (entry.get("command") or entry.get("url")):
+        return None
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
 
 
 def state_of(label: dict[str, Any]) -> tuple[str, str]:
@@ -119,18 +166,27 @@ def unscannable_row(item: dict[str, str]) -> FleetRow:
 
 def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] | None = None,
                skipped: list[tuple[str, dict[str, Any]]] | None = None,
-               unscannable: list[dict[str, str]] | None = None) -> list[FleetRow]:
+               unscannable: list[dict[str, str]] | None = None,
+               with_spec: bool = False) -> list[FleetRow]:
     """`entries` carries the config each server came from — the auth step needs the URL and the row
     needs the client attribution; the label holds neither (it's a measurement, not a connection
-    record)."""
+    record). `with_spec` additionally attaches each server's launch spec (a front-end verifies by
+    click) — off by default because the spec can carry secrets; see `_spec_of` / `--with-spec`."""
     entries = entries or {}
     rows = []
     for lab in labels:
         state, detail = state_of(lab)
         entry = entries.get(lab["name"]) or {}
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
-                             clients=tuple(entry.get("_clients") or ())))
-    rows += [skipped_row(n, e) for n, e in (skipped or [])]
+                             clients=tuple(entry.get("_clients") or ()),
+                             spec=_spec_of(entry) if with_spec else None))
+    for n, e in (skipped or []):
+        row = skipped_row(n, e)
+        if with_spec:
+            # A SKIPPED local server is the prime click-to-verify target — it was found but not
+            # launched. Carry its spec so the front-end can run it on the user's explicit click.
+            row.spec = _spec_of(e)
+        rows.append(row)
     rows += [unscannable_row(u) for u in (unscannable or [])]
     return sort_rows(rows)
 
@@ -254,8 +310,11 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
     return {
         "schema": FLEET_SCHEMA,
         "servers": [
-            {"name": r.name, "state": r.state, "detail": r.detail, "url": r.url,
-             "clients": list(r.clients), "can_authenticate": r.needs_auth}
+            {"name": r.name, "state": r.state, "detail": r.detail, "url": redact_url(r.url),
+             "clients": list(r.clients), "can_authenticate": r.needs_auth,
+             # `spec` present only under --with-spec; `scannable` is the safe, secret-free signal a
+             # front-end uses to decide whether to offer a "verify by click" action.
+             **({"spec": r.spec, "scannable": True} if r.spec else {})}
             for r in sort_rows(rows)
         ],
         "groups": [{"client": c, "title": _CLIENT_TITLE.get(c, c.upper()),
