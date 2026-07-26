@@ -127,7 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     Whether tracking defaults on is a product invariant (ADR-0012 N2), not a detail — asserting it
     needs a parser you can build without running a scan."""
-    p = argparse.ArgumentParser(prog="mcpgawk", description="gawk at an MCP server before you trust it")
+    p = argparse.ArgumentParser(
+        prog="mcpgawk",
+        description="gawk at an MCP server before you trust it",
+        epilog=(
+            "gawk Platform capabilities (£29/month — https://mcp.gawk.dev/pricing.html):\n"
+            + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
+            + "Run `mcpgawk <capability>` once subscribed; scan stays free and open-source."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan", help="measure MCP server(s) locally")
     s.add_argument("config", nargs="?", help="path to an mcp.json config")
@@ -175,6 +184,18 @@ def build_parser() -> argparse.ArgumentParser:
     # The other half of a sticky alarm. Drift now re-reports on every scan until acknowledged
     # (ADR-0012 N1), so there MUST be an obvious way to acknowledge it — an alarm a user cannot
     # clear is one they will silence with --no-track, which costs them the baseline entirely.
+    b = sub.add_parser(
+        "baseline",
+        help="print the approved baseline — what you have agreed to trust, per server",
+        description=(
+            "The shared baseline every pillar compares against. `verify` and `monitor` read this "
+            "so that approving a server once is approving it everywhere, instead of each keeping "
+            "its own memory and contradicting the others."
+        ),
+    )
+    b.add_argument("--json", action="store_true", help="machine-readable (the cross-runtime shape)")
+    b.add_argument("--server", metavar="NAME", help="one server (name or alias) instead of all")
+
     a = sub.add_parser("approve",
                        help="accept a server's current tools as the trusted baseline (clears DRIFT)")
     a.add_argument("server", nargs="?",
@@ -183,6 +204,48 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--list", action="store_true",
                    help="show which servers have changes you have not approved, and change nothing")
     return p
+
+
+def _baseline(args) -> int:
+    """Print what the operator has agreed to trust — the spine other pillars read.
+
+    Only approved state is exported. A sighting is not a baseline: printing the last thing seen
+    would hand verify and monitor the poisoned surface as though it were trusted, which is the
+    exact failure ADR-0012 exists to prevent.
+    """
+    from . import baseline as _baseline_mod
+
+    data = _baseline_mod.export(getattr(args, "history", None))
+    servers = data["servers"]
+
+    if args.server:
+        key = _baseline_mod.resolve(args.server, getattr(args, "history", None))
+        if key is None or key not in servers:
+            print(f"mcpgawk: nothing approved for '{args.server}'. "
+                  f"Run `mcpgawk scan`, then `mcpgawk approve {args.server}`.", file=sys.stderr)
+            return 2
+        servers = {key: servers[key]}
+        data = {**data, "servers": servers}
+
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+
+    if not servers:
+        print("Nothing approved yet. Run `mcpgawk scan`, then `mcpgawk approve <server>` to set "
+              "the baseline that verify and monitor will compare against.")
+        return 0
+
+    print(f"Approved baseline — {len(servers)} server(s). "
+          f"verify and monitor compare against exactly this.\n")
+    for key in sorted(servers):
+        rec = servers[key]
+        alias = f" ({', '.join(rec['aliases'])})" if rec.get("aliases") else ""
+        print(f"  {key}{alias}")
+        print(f"    pin        {rec.get('pin') or '—'}")
+        print(f"    tools      {len(rec.get('tools') or {})}")
+        print(f"    approved   {rec.get('approved_at') or '—'}")
+    return 0
 
 
 def _approve(args) -> int:
@@ -222,9 +285,69 @@ def _approve(args) -> int:
     return 0
 
 
+# The paid capabilities, reachable as `mcpgawk <capability>` when gawk Platform is installed.
+#
+# ONE BINARY, on purpose (2026-07-26). Two reasons, both load-bearing:
+#   1. `gawk` cannot be an executable name. It is GNU AWK — it owns /usr/bin/gawk across the
+#      Debian family and supplies /usr/bin/awk there through the alternatives system, so our own
+#      `gawk` on PATH risks breaking a machine's `awk`. Debian Policy §10.1 requires one of two
+#      colliding programs to be renamed; Homebrew's `gawk` formula is GNU awk, so the name is
+#      simply unavailable. Everyone who tried this retreated: ast-grep deprecated `sg`, fd ships
+#      as `fdfind`, bat as `batcat`.
+#   2. A second binary for the paid tier is against convention anyway. Semgrep, Snyk, GitLab and
+#      Terraform all keep ONE command and unlock with a licence/login. A separate binary is only
+#      conventional when the paid thing is a different artefact (Docker Desktop). Ours isn't — it
+#      is more analysis on the same inputs.
+#
+# They are listed in `--help` even when unavailable: a free user should be able to SEE what the
+# subscription adds without installing anything, and get one honest line if they try it.
+PLATFORM_CAPABILITIES = {
+    "verify": "run a server in a no-egress sandbox and reproduce misbehaviour",
+    "enforce": "guard a live server, call by call",
+    "monitor": "watch a server for drift after you approved it",
+    "build": "generate a server from an OpenAPI spec (in development)",
+}
+
+_PLATFORM_UNAVAILABLE = (
+    "mcpgawk {cap}: {desc}.\n"
+    "This is a gawk Platform capability and it isn't installed in this environment.\n"
+    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "  Already subscribed? Your purchase email has the install instructions.\n"
+    "The free scanner (`mcpgawk scan`) stays free and open-source either way."
+)
+
+
+def _run_platform_capability(capability: str, rest: list[str]) -> int:
+    """Delegate to gawk Platform if it is installed, else say so honestly and exit 3.
+
+    The import is deliberately OPTIONAL and local: the free scanner is published to PyPI on its
+    own and must never depend on, or ship, the paid engine. A paid install supersedes the free
+    distribution in place (same distribution name), which is the GitLab CE→EE shape.
+    """
+    try:
+        from gawk_platform.cli import run_pillar
+    except ImportError:
+        print(
+            _PLATFORM_UNAVAILABLE.format(capability=capability, cap=capability,
+                                         desc=PLATFORM_CAPABILITIES[capability]),
+            file=sys.stderr,
+        )
+        return 3  # the same "not licensed / not available" code every paid entry point returns
+    return run_pillar(capability, rest)
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Intercept the paid capabilities BEFORE argparse: their arguments are the pillar's own, and
+    # the free parser must not try to validate them.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] in PLATFORM_CAPABILITIES:
+        return _run_platform_capability(raw[0], raw[1:])
+
     p = build_parser()
     args = p.parse_args(argv)
+
+    if args.cmd == "baseline":
+        return _baseline(args)
 
     if args.cmd == "approve":
         return _approve(args)

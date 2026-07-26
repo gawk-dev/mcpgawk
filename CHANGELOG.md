@@ -2,6 +2,48 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.8] — 2026-07-26
+
+One command. The paid capabilities are now subcommands of `mcpgawk`, not a separate binary.
+
+### Changed
+
+- **`mcpgawk --help` now lists the gawk Platform capabilities** (`verify`, `enforce`, `monitor`,
+  `build`) so you can see what a subscription adds without installing anything. Running one on a
+  free install prints a single line explaining what it is and where to get it, and exits 3 — no
+  Python traceback, and never a silent success.
+- **The free scanner is unchanged and stays free.** `mcpgawk scan` needs no licence, no account and
+  no network beyond the servers you point it at. Nothing in this release adds a paid dependency:
+  the paid engine is not in this package and the import that reaches for it is optional.
+
+### Why one command
+
+The paid tier used to install a second executable named `gawk`. That name belongs to **GNU AWK** —
+it owns `/usr/bin/gawk` across the Debian family and supplies `/usr/bin/awk` there through the
+alternatives system, so shipping our own `gawk` could break a machine's `awk`. Debian Policy §10.1
+requires a rename when two packages claim one path, and Homebrew's `gawk` formula *is* GNU awk.
+Projects that hit this before us all retreated: ast-grep deprecated its colliding `sg`, `fd` ships
+as `fdfind`, `bat` as `batcat`.
+
+One command plus a licence unlock is also the ordinary shape for this kind of tool — Semgrep, Snyk,
+GitLab and Terraform all do it. "gawk" remains the brand (gawk.dev); `mcpgawk` is the command.
+
+## [0.1.7] — 2026-07-23
+
+Engine sync release. Dispatch-aware drift, credential-safe fleet URLs, sturdier baselines.
+
+### Added
+
+- `fingerprint.py` — one shared surface-fingerprint used by both drift and the fleet view, so the
+  two can no longer disagree about whether a server changed.
+
+### Changed
+
+- **Fleet URLs are redacted for display.** A secret-named query parameter (`apiKey=`, `token=`) or
+  userinfo in a server URL no longer renders in the fleet listing. The real URL is untouched for
+  connecting — only what gets shown is masked.
+- Drift and history handling hardened around dispatch-style servers and baseline recording.
+
 ## [0.1.6] — 2026-07-22
 
 The drift release. Everything here is about one question a fresh look at your machine can never
