@@ -28,6 +28,12 @@ LABEL_SCHEMA = "mcpgawk/label@0.1"
 #: thing.
 _SIGNAL_LEAD_BY_KIND = {
     "shadowing:cross-server-reference": "cross-server tool reference from",
+    "skill:download-url": "suspicious download URL in",
+    "skill:piped-exec": "fetch-and-execute pattern in",
+    "skill:runtime-fetch": "runtime instruction fetch in",
+    "skill:credential-emission": "credential-emission instruction in",
+    "skill:secret-hardcoded": "hardcoded secret in",
+    "skill:malformed": "unreviewable skill structure in",
 }
 
 _SIGNAL_LEAD = {
@@ -38,6 +44,8 @@ _SIGNAL_LEAD = {
     # Obfuscation is its OWN class, not a flavour of injection (Invariant separates them too: W021
     # vs E001). Hiding text is evidence of intent; what it hides is reported by its own detector.
     "obfuscation": "text hidden with invisible characters in",
+    # Agent-skill findings (SKILL.md trees) — surfaced by `mcpgawk skills`, not the server scan.
+    "skill": "risky skill content in",
 }
 
 

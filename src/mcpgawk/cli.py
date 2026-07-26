@@ -203,7 +203,74 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--all", action="store_true", help="approve every server with pending drift")
     a.add_argument("--list", action="store_true",
                    help="show which servers have changes you have not approved, and change nothing")
+
+    k = sub.add_parser(
+        "skills",
+        help="scan agent SKILLS (SKILL.md trees) for injection, hidden text and risky content",
+        description=(
+            "Discovers agent skills across every supported host (Claude Code, Codex, Cursor, "
+            "Copilot, Windsurf, Antigravity, Kiro, Gemini, opencode, Amp) and scans their content "
+            "locally — nothing is uploaded anywhere. Give paths to scan a specific skill dir, a "
+            "skills root, or a project instead of the whole machine."
+        ),
+    )
+    k.add_argument("paths", nargs="*",
+                   help="skill dir / skills root / project root (default: discover all hosts)")
+    k.add_argument("--json", action="store_true", help="machine-readable output")
+    k.add_argument("--fail-on-findings", action="store_true",
+                   help="exit 1 if any finding fires (CI gate) — default reports and exits 0, "
+                        "because a signal is a signal, not a verdict")
     return p
+
+
+_SKILLS_NOT_CHECKED = (
+    "not checked (needs semantic analysis, not attempted): intent vs stated purpose, "
+    "financial-capability, third-party-content-exposure, system-service classification"
+)
+
+
+def _skills(args) -> int:
+    """Scan agent skills. Local-only by construction: skills.py has no network imports at all —
+    the differentiator against agent-scan, whose client uploads raw skill content for analysis."""
+    from pathlib import Path
+
+    from .signals import as_dicts
+    from .skills import discover_skills
+
+    snaps = discover_skills(explicit_paths=[Path(p) for p in args.paths] or None)
+    total_findings = sum(len(s.findings) for s in snaps)
+
+    if args.json:
+        print(json.dumps({
+            "skills": [{
+                "name": s.name, "root": s.root, "hosts": s.hosts,
+                "description": s.description,
+                "files_scanned": len(s.files), "files_seen": s.files_seen, "capped": s.capped,
+                "findings": as_dicts(s.findings),
+            } for s in snaps],
+            "not_checked": _SKILLS_NOT_CHECKED,
+        }, indent=2))
+    else:
+        if not snaps:
+            where = "the given path(s)" if args.paths else "any supported host on this machine"
+            print(f"mcpgawk skills: no skills found under {where}.")
+        for s in snaps:
+            hosts = ", ".join(s.hosts)
+            print(f"\n  {s.name}  ({s.root}; loaded by: {hosts})")
+            scope = f"    {len(s.files)} file(s) scanned"
+            if s.capped:
+                scope += f" of {s.files_seen} seen — CAPPED, the remainder was not examined"
+            print(scope)
+            if not s.findings:
+                print("    clean under the local detectors")
+            for f in s.findings:
+                print(f"    ⚠ [{f.kind}] {f.tool}: {f.evidence}")
+        if snaps:
+            print(f"\n  {len(snaps)} skill(s), {total_findings} finding(s). "
+                  f"All analysis LOCAL — no skill content left this machine.")
+            print(f"  {_SKILLS_NOT_CHECKED}.")
+
+    return 1 if (args.fail_on_findings and total_findings) else 0
 
 
 def _baseline(args) -> int:
@@ -351,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "approve":
         return _approve(args)
+
+    if args.cmd == "skills":
+        return _skills(args)
 
     # No args at all is VALID: it means "discover and scan everything on this machine". _run handles
     # the nothing-found message and default-deny consent before launching any discovered stdio server.

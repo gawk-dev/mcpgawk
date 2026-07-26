@@ -69,7 +69,16 @@ def test_every_registered_signal_kind_is_about_language_not_capability():
     # split, W021 vs E001) because hiding text and instructing the model are different findings: the
     # concealment is evidence of intent regardless of what is concealed, and the instruction it hides
     # is reported by its own detector.
-    allowed_families = {"injection", "dispatch", "shadowing", "servercard", "obfuscation"}
+    # "skill" added 2026-07-27, deliberately: a SKILL.md tree is model-facing language in its
+    # purest form — the entire artefact is text loaded into the agent's context, and every skill:*
+    # detector fires on language IN that text (a URL the text sends the agent to, an instruction
+    # to emit credentials, a fetch-and-execute command, a secret pasted into the prose, or text
+    # structured so its stated identity cannot be reviewed). None of them keys on what a tool CAN
+    # DO — there are no tools; there is only language. Capability-flavoured skill checks
+    # (financial execution, system-service modification — Invariant's W009/W013) are exactly why
+    # this family is signal-grade-only: those need semantics, and skills.py declares them
+    # not-checked rather than faking them here.
+    allowed_families = {"injection", "dispatch", "shadowing", "servercard", "obfuscation", "skill"}
     families = {k.split(":", 1)[0] for k in signals_mod.SIGNAL_KINDS}
     unexpected = families - allowed_families
     assert not unexpected, (

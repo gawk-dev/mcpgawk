@@ -12,11 +12,14 @@ A signal is a SIGNAL, never a verdict. We never say "server X is insecure".
 """
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
 from typing import Any
 
 from .probe import ServerSnapshot
+from .redact import _SECRETS as _ALL_SECRET_SHAPES
+from .redact import redact
 
 # THE catalog of every bounded-signal `kind` this module can emit, mapped to the detector that
 # emits it. Single source of truth for the anti-drift canary (tests/test_canary_signals.py), which
@@ -37,6 +40,12 @@ SIGNAL_KINDS: dict[str, str] = {
     "shadowing:name-collision": "detect_shadowing",
     "shadowing:cross-server-reference": "detect_cross_server_reference",
     "servercard:undeclared-tools": "detect_card_mismatch",
+    "skill:download-url": "detect_skill_content",
+    "skill:piped-exec": "detect_skill_content",
+    "skill:runtime-fetch": "detect_skill_content",
+    "skill:credential-emission": "detect_skill_content",
+    "skill:secret-hardcoded": "detect_skill_content",
+    "skill:malformed": "detect_skill_malformed",
 }
 
 # --- Detector 1: hidden markup in a description (HTML comments / pseudo-system tags). ---
@@ -170,7 +179,26 @@ def _deobfuscate(text: str) -> tuple[str, str]:
     return "".join(decoded), "+".join(sorted(kinds))
 
 
-def _scan_text(text: str, tool: str) -> list[Finding]:
+#: In a TOOL DESCRIPTION an HTML comment has no legitimate purpose — it is the classic poisoning
+#: carrier, and _HIDDEN_MARKUP flags its mere presence. In a MARKDOWN document (a skill file) an
+#: HTML comment is ordinary authoring: the live 63-skill corpus produced 15 findings, every one of
+#: them a `<!-- Bootstrap -->`-style section marker. So on prose the carrier alone is not the
+#: signal — what it HIDES is. A comment is flagged only when its body is reader-directed or smuggles
+#: a pseudo-system tag, which is precisely the attack the description-side rule exists to catch.
+_HTML_COMMENT_RX = re.compile(r"<!--(.*?)-->", re.DOTALL)
+_PSEUDO_TAG_RX = re.compile(r"<\s*/?\s*(important|system|secret|admin|instruction|tool_call)\b",
+                            re.IGNORECASE)
+
+
+def _markdown_comment_is_benign(text: str) -> bool:
+    """True when every HTML comment in `text` is an ordinary authoring comment."""
+    for body in _HTML_COMMENT_RX.findall(text):
+        if _READER_DIRECTED.search(body) or _PSEUDO_TAG_RX.search(body) or _EXFIL_DIRECTIVE.search(body):
+            return False
+    return True
+
+
+def _scan_text(text: str, tool: str, prose_markdown: bool = False) -> list[Finding]:
     out: list[Finding] = []
     clean, hidden = _deobfuscate(text or "")
     if hidden:
@@ -183,9 +211,15 @@ def _scan_text(text: str, tool: str) -> list[Finding]:
     # form (so an invisible character cannot switch the detectors off).
     for kind, rx in _DETECTORS:
         m = rx.search(text or "") or rx.search(clean)
-        if m:
-            span = m.group(0).strip()
-            out.append(Finding(tool=tool, kind=kind, evidence=span[:120]))
+        if not m:
+            continue
+        if (kind == "injection:hidden-markup" and prose_markdown
+                and not _PSEUDO_TAG_RX.search(text or "")
+                and _markdown_comment_is_benign(text or "")
+                and _markdown_comment_is_benign(clean)):
+            continue  # ordinary Markdown section comment, hiding nothing — see above
+        span = m.group(0).strip()
+        out.append(Finding(tool=tool, kind=kind, evidence=span[:120]))
     return out
 
 
@@ -198,6 +232,220 @@ def detect(snap: ServerSnapshot) -> list[Finding]:
     for pr in snap.prompts:
         findings.extend(_scan_text(pr.get("description") or "", f"prompt:{pr.get('name', '?')}"))
     return findings
+
+
+# --- Skill-content detectors (agent skills: SKILL.md trees, command files) ----------------------
+# Invariant/Snyk's agent-scan treats skills as half its product (issue codes E004–E006, W007–W014)
+# — but every one of those determinations happens SERVER-SIDE behind their API; the client uploads
+# raw skill content and copies verdicts back. There is nothing to port, only a taxonomy to cover.
+# These are OUR detectors, fully local, no content ever leaves the machine — the same bounded,
+# signal-grade discipline as every detector above: a match is "worth a human's eyes", never a
+# verdict. The SEMANTIC checks in their taxonomy (full intent analysis, financial-capability or
+# third-party-content classification — their E004/W009/W011/W013) are deliberately NOT imitated
+# with regexes here; skills.py surfaces that coverage honestly instead of pretending.
+
+_URL_RX = re.compile(r"https?://[^\s)\"'`<>\]]+", re.IGNORECASE)
+
+#: URL shorteners obscure the destination — a skill has no legitimate reason to hide where it
+#: sends an agent (their E005 class c).
+_SHORTENER_HOSTS = {
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "ow.ly", "buff.ly", "cutt.ly",
+    "rb.gy", "tiny.cc", "shorturl.at", "rebrand.ly", "s.id", "v.gd",
+}
+#: Personal file-hosting / paste services — content there is unversioned, unreviewable and
+#: swappable after review (their E005 class d).
+_FILEHOST_HOSTS = {
+    "pastebin.com", "paste.ee", "transfer.sh", "anonfiles.com", "file.io", "mega.nz",
+    "mediafire.com", "gofile.io", "catbox.moe", "litter.catbox.moe", "cdn.discordapp.com",
+    "0x0.st", "bashupload.com", "temp.sh",
+}
+#: Direct executable/installer downloads (their E005 class a). Deliberately NOT .sh/.py/.zip —
+#: those are everywhere in benign skills; the risky *execution* of fetched scripts is the
+#: piped-exec detector's job.
+_EXECUTABLE_EXT_RX = re.compile(r"\.(exe|msi|scr|bat|cmd|ps1|apk|dmg|pkg)(?:[?#]|$)", re.IGNORECASE)
+_RAW_IP_HOST_RX = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _is_public_ip(host: str) -> bool:
+    """Only a PUBLIC raw IP is a 'downloading from an unnamed host' signal. Loopback, private and
+    link-local addresses are the opposite — they are local-only, and a skill that documents
+    127.0.0.1 or the 169.254.169.254 metadata endpoint is describing an environment, not hiding a
+    download host. Measured on a real 63-skill corpus: this alone accounted for most of one
+    security skill's 57 URL findings, all of them wrong."""
+    try:
+        octets = [int(o) for o in host.split(".")]
+    except ValueError:
+        return False
+    if len(octets) != 4 or any(o > 255 for o in octets):
+        return False
+    a, b = octets[0], octets[1]
+    if a in (0, 10, 127):                       # this-network, private, loopback
+        return False
+    if a == 172 and 16 <= b <= 31:              # private
+        return False
+    if a == 192 and b == 168:                   # private
+        return False
+    if a == 169 and b == 254:                   # link-local incl. the cloud metadata endpoint
+        return False
+    if a == 100 and 64 <= b <= 127:             # CGNAT/shared — Alibaba's metadata endpoint lives here
+        return False
+    if a >= 224:                                # multicast / reserved
+        return False
+    return True
+
+
+def _suspicious_url_reason(url: str) -> str | None:
+    host = re.sub(r"^https?://", "", url, flags=re.IGNORECASE).split("/", 1)[0]
+    host = host.split("@")[-1].split(":", 1)[0].lower()
+    if _RAW_IP_HOST_RX.match(host):
+        if not _is_public_ip(host):
+            return None
+        return "raw-IP host — no name to review, no certificate identity worth anything"
+    if host in _SHORTENER_HOSTS:
+        return "URL shortener — the real destination is hidden from review"
+    if host in _FILEHOST_HOSTS:
+        return "personal file-hosting/paste service — unversioned, swappable after review"
+    if _EXECUTABLE_EXT_RX.search(url):
+        return "direct executable/installer download"
+    return None
+
+
+#: Fetch-and-execute: content pulled from the network flows straight into a shell/interpreter.
+_PIPED_EXEC_RX = re.compile(
+    r"\b(?:curl|wget)\b[^\n|;&]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b"
+    r"|\b(?:curl|wget)\b[^\n|;&]{0,200}\|\s*(?:sudo\s+)?(?:python3?|node|perl|ruby)\b"
+    r"|\bbase64\b[^\n|;&]{0,120}\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b"
+    r"|\bInvoke-Expression\b|\biex\s*\(|\bDownloadString\s*\(",
+    re.IGNORECASE)
+
+#: Instructions/code fetched from a URL at RUNTIME steering the agent (their W012): defeats any
+#: review or pinning — what was reviewed is not what runs tomorrow.
+_RUNTIME_FETCH_RX = re.compile(
+    r"\b(?:fetch|download|retrieve|load|get|pull|read)\b[^.\n]{0,60}"
+    r"\b(?:latest\s+)?(?:instructions?|prompts?|commands?|rules|directives)\b[^.\n]{0,60}"
+    r"\bfrom\b[^.\n]{0,80}https?://"
+    r"|\bfollow\s+(?:the\s+)?instructions?\s+(?:at|from|in)\s+https?://"
+    r"|\bcheck\b[^.\n]{0,60}\bfor\s+(?:updated|new)\s+instructions?\b",
+    re.IGNORECASE)
+
+#: A skill instructing the agent to EMIT secret values into its output/conversation (their W007) —
+#: context windows and chat history are not a secret store.
+_CREDENTIAL_EMISSION_RX = re.compile(
+    r"\b(?:print|echo|output|display|show|paste|include|insert|write)\b[^.\n]{0,60}"
+    r"\b(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret[ _-]?key|password|credential)s?\b",
+    re.IGNORECASE)
+#: ...unless the surrounding text is telling the agent NOT to. ("never print the API key")
+_NEGATION_RX = re.compile(r"\b(?:never|not|don'?t|do\s+not|avoid|without|refuse)\b[^.\n]{0,40}$",
+                          re.IGNORECASE)
+
+#: A documentation placeholder is not a leaked credential. redact.py deliberately OVER-matches —
+#: it is a redactor, where a false positive costs nothing — but a finding emitter that cries wolf
+#: on `API_KEY="your-api-key-here"` trains the reader to ignore it. Measured on a real 63-skill
+#: corpus: every one of 64 secret findings was a placeholder or an example in install docs.
+_PLACEHOLDER_VALUE_RX = re.compile(
+    r"(?ix)(?: your[_\-. ]? | my[_\-. ]? | the[_\-. ]? | some[_\-. ]? | example[_\-. ]? "
+    r"| placeholder | dummy | sample | insert[_\-. ] | replace[_\-. ] | changeme | xxx+ | \.\.\. "
+    r"| <[^>]{1,40}> | \$\{[^}]{1,40}\} | \$[A-Z_]{3,} | \{\{[^}]{1,40}\}\} )"
+    r"| (?:[_\-]?(?:here|key|token|secret|password|value|goes[_\-]?here)\b)\s*$")
+
+
+def _looks_like_placeholder(line: str) -> bool:
+    m = re.search(r"[:=]\s*[\"']?([^\"'\n]{0,80})", line)
+    value = m.group(1).strip() if m else line
+    return bool(_PLACEHOLDER_VALUE_RX.search(value))
+
+
+#: Vendor-shaped literals: the string ITSELF is recognisably a credential, so it is a finding
+#: wherever it appears. (redact._SECRETS[0:5] — private-key blocks, AWS, GitHub, sk-/pk-/rk-, Slack.)
+_LITERAL_CREDENTIAL_SHAPES = tuple(_ALL_SECRET_SHAPES[:5])
+
+#: `name = value` assignments. redact.py accepts ANY 8+ non-space value here — correct for a
+#: redactor, badly wrong for a finding emitter reading prose: "Scan for leaked secrets: on JS
+#: repos" and "dict with 'decision' key: 'block'" both matched on the live corpus. A real
+#: credential value is a single opaque token, so require: no whitespace, ≥16 chars, and either a
+#: digit or real length — which prose after a colon essentially never satisfies.
+_ASSIGNMENT_RX = re.compile(
+    r"(?i)\b(?:[\w.-]+[_.\-])?(?:api[_-]?key|access[_-]?key|secret[_-]?key|key|secret|token|"
+    r"password|passwd|bearer|credential)s?[\"']?\s*[:=]\s*[\"']?(\S+)")
+
+
+def _assignment_value_looks_like_a_credential(line: str) -> bool:
+    m = _ASSIGNMENT_RX.search(line)
+    if not m:
+        return False
+    value = m.group(1).strip("\"'`,;)")
+    if len(value) < 16 or any(c.isspace() for c in value):
+        return False
+    return any(c.isdigit() for c in value) or len(value) >= 24
+
+
+def _credential_line(line: str) -> bool:
+    if _looks_like_placeholder(line):
+        return False
+    if any(rx.search(line) for rx in _LITERAL_CREDENTIAL_SHAPES):
+        return True
+    return _assignment_value_looks_like_a_credential(line)
+
+
+#: Long base64 runs get decoded and re-scanned — the classic carrier for a hidden curl|bash
+#: (Snyk's own adversarial skill fixture hides exactly that behind base64).
+_BASE64_BLOB_RX = re.compile(r"[A-Za-z0-9+/=]{40,}")
+
+
+def _decoded_blobs(text: str) -> list[str]:
+    out = []
+    for blob in _BASE64_BLOB_RX.findall(text or ""):
+        try:
+            decoded = base64.b64decode(blob, validate=True).decode("utf-8", errors="strict")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if decoded.isprintable() or "\n" in decoded:
+            out.append(decoded)
+    return out
+
+
+def detect_skill_content(text: str, origin: str) -> list[Finding]:
+    """Skill-specific detectors over ONE file's text. `origin` labels the finding (skill:file).
+    Runs on the raw text AND on any base64-decodable blobs inside it — an encoded payload is
+    still a payload. Fully local; the text never leaves the process."""
+    out: list[Finding] = []
+    layers = [("", text or "")] + [("base64-decoded: ", d) for d in _decoded_blobs(text or "")]
+    for prefix, layer in layers:
+        for url in _URL_RX.findall(layer):
+            reason = _suspicious_url_reason(url)
+            if reason:
+                out.append(Finding(tool=origin, kind="skill:download-url",
+                                   evidence=f"{prefix}{url[:100]} — {reason}"))
+        m = _PIPED_EXEC_RX.search(layer)
+        if m:
+            out.append(Finding(tool=origin, kind="skill:piped-exec",
+                               evidence=f"{prefix}{m.group(0).strip()[:120]}"))
+        m = _RUNTIME_FETCH_RX.search(layer)
+        if m:
+            out.append(Finding(tool=origin, kind="skill:runtime-fetch",
+                               evidence=f"{prefix}{m.group(0).strip()[:120]}"))
+        for m in _CREDENTIAL_EMISSION_RX.finditer(layer):
+            if _NEGATION_RX.search(layer[max(0, m.start() - 45):m.start()]):
+                continue  # "never print the API key" is guidance, not an instruction to leak
+            out.append(Finding(tool=origin, kind="skill:credential-emission",
+                               evidence=f"{prefix}{m.group(0).strip()[:120]}"))
+            break  # one per layer is signal enough
+        for line in layer.splitlines():
+            # CREDENTIAL shapes only — contains_secret() also covers PII (an email address is not
+            # a hardcoded secret and would be filed under the wrong kind) — and never on an
+            # obvious documentation placeholder or a prose line that merely says "token:".
+            if _credential_line(line):
+                out.append(Finding(tool=origin, kind="skill:secret-hardcoded",
+                                   evidence=f"{prefix}{(redact(line) or '').strip()[:120]}"))
+                break  # evidence is REDACTED and one line is enough — never republish a secret
+    return out
+
+
+def detect_skill_malformed(reason: str, origin: str) -> list[Finding]:
+    """Structural finding for a skill that cannot be parsed as it claims to be (their W014/X002
+    territory): a missing or frontmatter-less SKILL.md means the skill's stated identity cannot
+    be reviewed at all — that is a finding, not an error to swallow."""
+    return [Finding(tool=origin, kind="skill:malformed", evidence=reason[:160])]
 
 
 def detect_shadowing(snaps: list[ServerSnapshot]) -> dict[str, list[Finding]]:
