@@ -204,6 +204,21 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--list", action="store_true",
                    help="show which servers have changes you have not approved, and change nothing")
 
+    g = sub.add_parser(
+        "guard",
+        help="install a Claude Code hook that checks MCP tool calls against your approved baseline",
+        description=(
+            "Puts the approved baseline in your agent's loop. A single PreToolUse hook, installed "
+            "once, checks every MCP tool call — no per-server rewiring and no proxy. The decision "
+            "is made locally in ~10ms; nothing is uploaded and there is nothing to sign in to."
+        ),
+    )
+    g.add_argument("action", nargs="?", default="status",
+                   choices=["status", "install", "uninstall"],
+                   help="default: status")
+    g.add_argument("--settings", metavar="PATH",
+                   help="settings file to edit (default: ~/.claude/settings.json)")
+
     k = sub.add_parser(
         "skills",
         help="scan agent SKILLS (SKILL.md trees) for injection, hidden text and risky content",
@@ -421,6 +436,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "skills":
         return _skills(args)
+
+    if args.cmd == "guard":
+        from .guard import main as guard_main
+
+        rest = [args.action]
+        if args.settings:
+            rest += ["--settings", args.settings]
+        return guard_main(rest)
 
     # No args at all is VALID: it means "discover and scan everything on this machine". _run handles
     # the nothing-found message and default-deny consent before launching any discovered stdio server.

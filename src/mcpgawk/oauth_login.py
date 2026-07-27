@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -23,7 +24,12 @@ from urllib.parse import parse_qs, urlparse
 from mcp.client.auth import OAuthClientProvider
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
-_STORE_DIR = Path.home() / ".gawk" / "oauth"
+#: Where per-server tokens live. Overridable with GAWK_OAUTH_STORE, the same escape hatch
+#: GAWK_LICENSE_CACHE provides for the licence cache — it lets CI, a self-host deployment or a
+#: test point at an isolated store instead of ~/.gawk. Redirecting HOME is NOT an alternative:
+#: the licence cache is deliberately machine-bound to hostname + home directory, so moving HOME
+#: invalidates it (which is the anti-copy protection doing its job).
+_STORE_DIR = Path(os.environ.get("GAWK_OAUTH_STORE") or (Path.home() / ".gawk" / "oauth"))
 
 
 class FileTokenStorage:
