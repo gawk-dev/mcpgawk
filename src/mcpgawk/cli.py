@@ -17,7 +17,7 @@ import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from . import drift, fleet, history
+from . import drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_servers
@@ -235,6 +235,22 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--fail-on-findings", action="store_true",
                    help="exit 1 if any finding fires (CI gate) — default reports and exits 0, "
                         "because a signal is a signal, not a verdict")
+
+    r = sub.add_parser(
+        "runs",
+        help="what has run on this machine, and how it went",
+        description=(
+            "Your local run history — scans, and (with gawk Platform) verify, enforce and monitor "
+            "runs, newest first. Read from ~/.mcpgawk/runs.db; nothing is uploaded anywhere. "
+            "A run that never closed shows as RUNNING, and as INCOMPLETE once its process is gone "
+            "— it is never reported as success."
+        ),
+    )
+    r.add_argument("--kind", choices=runlog.KINDS, help="only this kind of run")
+    r.add_argument("--limit", type=int, default=20, help="how many to show (default 20)")
+    r.add_argument("--json", action="store_true", help="machine-readable output")
+    r.add_argument("--prune", action="store_true",
+                   help="drop finished runs older than 90 days, then report what is left")
     return p
 
 
@@ -242,6 +258,51 @@ _SKILLS_NOT_CHECKED = (
     "not checked (needs semantic analysis, not attempted): intent vs stated purpose, "
     "financial-capability, third-party-content-exposure, system-service classification"
 )
+
+
+#: How each status reads in the terminal. RUNNING/INCOMPLETE deliberately do NOT look like success:
+#: the whole point of the run log is that an unfinished run is visibly unfinished.
+_RUN_MARK = {
+    runlog.OK: "ok      ",
+    runlog.FINDINGS: "findings",
+    runlog.ERROR: "ERROR   ",
+    runlog.RUNNING: "running…",
+    runlog.INCOMPLETE: "INCOMPL.",
+}
+
+
+def _runs(args) -> int:
+    """Local run history. Reconciles first, so a crashed run is shown as incomplete rather than
+    eternally in progress."""
+    runlog.reconcile_stale()
+    if args.prune:
+        dropped = runlog.prune()
+        print(f"pruned {dropped} finished run(s) older than 90 days")
+
+    runs = runlog.list_runs(kind=args.kind, limit=args.limit)
+
+    if args.json:
+        print(json.dumps([{
+            "run_id": r.run_id, "kind": r.kind, "target": r.target,
+            "started_at": r.started_at, "ended_at": r.ended_at,
+            "status": r.status, "summary": r.summary,
+        } for r in runs], indent=2))
+        return 0
+
+    if not runs:
+        print("No runs recorded yet. Run `mcpgawk scan` and it will appear here.")
+        return 0
+
+    for r in runs:
+        when = r.started_at[:19].replace("T", " ")
+        target = r.target or "(fleet)"
+        print(f"{when}  {_RUN_MARK.get(r.status, r.status):8}  {r.kind:8}  {target}")
+
+    unfinished = [r for r in runs if not r.finished]
+    if unfinished:
+        print(f"\n{len(unfinished)} run(s) still open. They are not results — a run only counts "
+              f"once it closes.")
+    return 0
 
 
 def _skills(args) -> int:
@@ -418,7 +479,47 @@ def _run_platform_capability(capability: str, rest: list[str]) -> int:
     return run_pillar(capability, rest)
 
 
+def _scan_target(raw: list[str]) -> str | None:
+    """What this scan was pointed at, for the run log's `target` column. A fleet scan (no explicit
+    transport flag) legitimately has no single target and records None rather than inventing one."""
+    for flag in ("--stdio", "--http", "--sse"):
+        if flag in raw:
+            i = raw.index(flag)
+            if i + 1 < len(raw):
+                return f"{flag.lstrip('-')}:{raw[i + 1]}"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Entry point. Wraps the real dispatch in a run-log record so `mcpgawk runs` can answer "what
+    did I scan, when, and how did it go" — see runlog.py for why that record has to exist here in
+    the free layer rather than in the paid pillars.
+
+    Wrapping at the boundary rather than at each `return` is deliberate: the scan path has four
+    exit points plus exceptions, and threading a close call through all of them is exactly how a
+    history ends up with runs that silently never closed.
+    """
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if not raw or raw[0] != "scan":
+        return _dispatch(argv)
+
+    # Cheap, and it keeps the timeline honest: a scan killed by Ctrl-C last week should not still
+    # read as "in progress" today.
+    runlog.reconcile_stale()
+    run_id = runlog.start_run("scan", _scan_target(raw))
+    try:
+        code = _dispatch(argv)
+    except BaseException as exc:                       # noqa: BLE001 - recorded, then re-raised
+        runlog.finish_run(run_id, runlog.ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+    # Non-zero here means the scan RAN and something wants attention (findings, a caveat, drift) —
+    # a crash would have raised. Calling that `error` would make every drift detection look like a
+    # tool failure in the timeline.
+    runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK, {"exit_code": code})
+    return code
+
+
+def _dispatch(argv: list[str] | None = None) -> int:
     # Intercept the paid capabilities BEFORE argparse: their arguments are the pillar's own, and
     # the free parser must not try to validate them.
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -436,6 +537,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "skills":
         return _skills(args)
+
+    if args.cmd == "runs":
+        return _runs(args)
 
     if args.cmd == "guard":
         from .guard import main as guard_main

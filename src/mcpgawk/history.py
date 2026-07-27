@@ -10,6 +10,7 @@ import os
 from contextlib import contextmanager
 from typing import Any
 
+from . import state
 from .probe import ServerSnapshot
 
 
@@ -19,6 +20,10 @@ def default_path() -> str:
 
 def load(path: str | None = None) -> dict[str, Any]:
     path = path or default_path()
+    # Tighten on READ as well as write. A file created by an older version stays world-readable
+    # until something rewrites it, and a user who only ever reads (a `runs` or `baseline` call)
+    # would keep the exposure indefinitely. Cheap, and it converges every install on first touch.
+    state.harden(path)
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
@@ -28,7 +33,9 @@ def load(path: str | None = None) -> dict[str, Any]:
 
 def save(store: dict[str, Any], path: str | None = None) -> None:
     path = path or default_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Owner-only: this file is a complete inventory of the user's MCP servers and their tool
+    # descriptions. It was world-readable until 2026-07-27 — see state.py.
+    state.secure_dir(os.path.dirname(path))
     # Unique temp name per process: a FIXED `path + ".tmp"` meant two concurrent scans wrote the
     # same temp file and one produced a truncated/interleaved JSON before renaming it over the real
     # history — losing the whole store, not just one record.
@@ -39,6 +46,7 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
             f.flush()
             os.fsync(f.fileno())   # the rename is atomic; without fsync its CONTENT need not be
         os.replace(tmp, path)      # atomic
+        state.secure_file(path)
     finally:
         if os.path.exists(tmp):    # a failed write must not litter the user's ~/.mcpgawk
             try:

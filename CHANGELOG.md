@@ -2,6 +2,43 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.11] — 2026-07-27
+
+The local run timeline — what ran on this machine, and how it went.
+
+### Added
+
+- **`mcpgawk runs`** — a local run registry (`~/.mcpgawk/runs.db`, SQLite, never leaves the
+  machine). Every scan and baseline operation records when it started, how it ended and how long
+  it took, so "what did my sessions actually do" finally has an answer. Honesty rules built in: a
+  run that never finished is never reported as a success — it stays `running` until the process is
+  provably gone, then becomes `incomplete`, never `ok`. And `ok` is distinct from `findings`: a
+  scan that ran perfectly and found six problems is both.
+- **Owner-only state files.** Everything mcpgawk writes locally — drift history, run registry —
+  is an inventory of your MCP servers, which is not something the next account on a shared
+  workstation or CI runner should be able to read. All local state now goes through one boundary:
+  directories `0700`, files `0600`. Existing files are tightened on next write.
+
+## [0.1.10] — 2026-07-27
+
+`mcpgawk guard` — the baseline in your agent's loop.
+
+### Added
+
+- **`mcpgawk guard install`** adds a Claude Code PreToolUse hook that checks every MCP tool call
+  against the baseline you approved. One hook, installed once — a call to a server or tool outside
+  the approved baseline is denied by name, with the remedy in the message.
+
+## [0.1.9] — 2026-07-27
+
+Agent-skills scanning, done locally.
+
+### Added
+
+- **`mcpgawk skills`** scans agent SKILL.md trees across 10 hosts (Claude Code among them) for the
+  injection and exfiltration patterns that ride in skill files. The analysis runs on your machine —
+  skill content is never uploaded to anyone for a verdict. Tuned against 63 real skills.
+
 ## [0.1.8] — 2026-07-26
 
 One command. The paid capabilities are now subcommands of `mcpgawk`, not a separate binary.
