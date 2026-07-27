@@ -272,3 +272,127 @@ def main(argv: list[str] | None = None) -> int:
     print(f"mcpgawk guard: unknown action {action!r} "
           f"(expected status, install or uninstall)", file=sys.stderr)
     return 2
+
+
+# ------------------------------------------------------------------------------------------- #
+# MULTI-AGENT. `status` reported six agents on this machine as "no hook point" — true of our
+# implementation, not of the agents. Cursor and Codex both expose a pre-execution hook; their
+# schemas were read from the vendor docs rather than inferred, because writing a guessed shape
+# into someone's agent config is how you break their whole toolchain.
+# ------------------------------------------------------------------------------------------- #
+
+def hook_command_for(adapter, python: str | None = None) -> str:
+    """The command written into an agent's config. Carries --format so ONE hook script serves
+    every agent: the decision is shared, only the payload and verdict shapes differ."""
+    interpreter = python or sys.executable
+    return f'"{interpreter}" "{hook_script_path()}" --format {adapter.fmt}  # {MARKER}'
+
+
+def _cursor_install(adapter, python: str | None) -> tuple[dict, int]:
+    """Cursor: {"version": 1, "hooks": {"beforeMCPExecution": [ {command, timeout, failClosed} ]}}
+
+    failClosed is NOT optional for us. Cursor ALLOWS the call when a hook errors unless it is set,
+    so omitting it would install something that looks like protection and silently isn't — the
+    precise failure mode the rest of this product exists to make impossible.
+    """
+    settings = _load_settings(adapter.config)
+    settings["version"] = 1
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise GuardError(f'{adapter.config}: "hooks" is not an object — refusing to overwrite it.')
+    existing = hooks.get("beforeMCPExecution")
+    kept = [h for h in existing if not (isinstance(h, dict) and _is_ours(h))] \
+        if isinstance(existing, list) else []
+    kept.append({"command": hook_command_for(adapter, python),
+                 "timeout": HOOK_TIMEOUT_S, "failClosed": True})
+    hooks["beforeMCPExecution"] = kept
+    return settings, len(kept) - 1
+
+
+def _nested_install(adapter, python: str | None) -> tuple[dict, int]:
+    """Claude Code and Codex share a schema: hooks -> PreToolUse -> matcher groups -> hooks[].
+    Confirmed against both vendors' docs, so one writer serves both."""
+    settings = _load_settings(adapter.config)
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise GuardError(f'{adapter.config}: "hooks" is not an object — refusing to overwrite it.')
+    groups = hooks.get("PreToolUse")
+    groups = groups if isinstance(groups, list) else []
+    cleaned: list = []
+    preserved = 0
+    for group in groups:
+        if not isinstance(group, dict):
+            cleaned.append(group)
+            continue
+        entries = [h for h in (group.get("hooks") or [])
+                   if not (isinstance(h, dict) and _is_ours(h))]
+        removed = len(group.get("hooks") or []) - len(entries)
+        if entries or not removed:
+            preserved += len(entries)
+            cleaned.append({**group, "hooks": entries} if removed else group)
+    cleaned.append({"matcher": MCP_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": hook_command_for(adapter, python),
+                               "timeout": HOOK_TIMEOUT_S}]})
+    hooks["PreToolUse"] = cleaned
+    return settings, preserved
+
+
+_WRITERS = {"cursor": _cursor_install, "claude": _nested_install, "codex": _nested_install}
+
+
+def is_installed_for(adapter) -> bool:
+    try:
+        settings = _load_settings(adapter.config)
+    except GuardError:
+        return False
+    return MARKER in json.dumps(settings)
+
+
+def install_for(adapter, *, python: str | None = None) -> str:
+    """Install into ONE agent. Same guarantees as the Claude Code path: other vendors' hooks are
+    preserved, the previous config is backed up, and the write is atomic — a half-written agent
+    config leaves the user unable to start anything."""
+    already = is_installed_for(adapter)
+    settings, preserved = _WRITERS[adapter.fmt](adapter, python)
+    backup = _backup(adapter.config)
+    adapter.config.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(adapter.config, settings)
+    note = f"  {adapter.label}: {'updated' if already else 'installed'} → {adapter.config}"
+    if preserved:
+        note += f" ({preserved} other hook(s) left untouched)"
+    if backup:
+        note += f"\n      previous config backed up to {backup}"
+    return note
+
+
+def uninstall_for(adapter) -> str:
+    """Remove ONLY our entries from one agent."""
+    if not adapter.config.is_file():
+        return f"  {adapter.label}: nothing installed"
+    settings = _load_settings(adapter.config)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return f"  {adapter.label}: nothing installed"
+    removed = 0
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        out = []
+        for item in groups:
+            if isinstance(item, dict) and _is_ours(item):
+                removed += 1
+                continue
+            if isinstance(item, dict) and isinstance(item.get("hooks"), list):
+                inner = [h for h in item["hooks"] if not (isinstance(h, dict) and _is_ours(h))]
+                removed += len(item["hooks"]) - len(inner)
+                if inner:
+                    out.append({**item, "hooks": inner})
+                continue
+            out.append(item)
+        hooks[event] = out
+    if not removed:
+        return f"  {adapter.label}: nothing installed"
+    _backup(adapter.config)
+    _atomic_write(adapter.config, settings)
+    return f"  {adapter.label}: removed → {adapter.config}"

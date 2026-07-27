@@ -182,6 +182,39 @@ def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str |
     return None
 
 
+def display_name(store: dict[str, Any], key: str) -> str:
+    """What the USER calls this server — the name in their own config, not our internal key.
+
+    The store is keyed by the identity the SERVER asserts, so a rename cannot orphan a baseline.
+    That key (`mcp:notes-pro`) is the wrong thing to show a person: they know the name they typed
+    in mcp.json. Two surfaces got this wrong in different ways — `status` printed the raw key, and
+    the protect report joined every alias with a comma so ONE server read as two ("cli-stdio,
+    mcpgawk"). One helper, so they cannot disagree again.
+
+    Where a server genuinely has several names (the same binary configured twice, under different
+    names, in different agents), the extras are shown as an aside rather than as equals — that is
+    real information, but it is not two servers.
+    """
+    servers = store.get("servers") or {}
+    entry = servers.get(key) or {}
+    aliases = [a for a in (entry.get("aliases") or []) if a]
+    if not aliases:
+        return key
+    primary = aliases[0]
+
+    # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias — every
+    # `--stdio` scan is labelled `cli-stdio`, so a fleet can show two rows reading identically.
+    # A user then cannot tell which one changed, and `mcpgawk approve cli-stdio` is a coin flip.
+    # Where the name does not identify one server, say which one.
+    sharing = [k for k, v in servers.items()
+               if k != key and primary in ((v or {}).get("aliases") or [])]
+    if sharing:
+        return f"{primary} [{key}]"
+    if len(aliases) == 1:
+        return primary
+    return f"{primary} (also configured as {', '.join(aliases[1:])})"
+
+
 def pending(store: dict[str, Any]) -> list[str]:
     """Keys whose newest sighting differs from the approved baseline — i.e. unacknowledged drift."""
     out = []

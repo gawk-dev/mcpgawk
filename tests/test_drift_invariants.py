@@ -219,6 +219,11 @@ def test_the_approve_verb_exists_and_resolves_a_config_name(tmp_path, monkeypatc
     Also pins the name resolution: the store is keyed by the identity the SERVER asserts, but the
     user only knows the name in their own mcp.json.
     """
+    # Approving is gated on a human being present (baseline.approval_blocked_reason). This test
+    # exercises the approve MECHANICS, not that gate, and pytest itself runs inside an agent
+    # session — so opt out explicitly. Stated here rather than hidden in conftest: a test that
+    # silently disables a security control should have to say so.
+    monkeypatch.setenv("MCPGAWK_APPROVE_NONINTERACTIVE", "1")
     from mcpgawk import cli
 
     path = str(tmp_path / "history.json")
@@ -255,6 +260,11 @@ def test_approve_reports_nothing_to_do_when_clean(tmp_path, monkeypatch, capsys)
 
 def test_approving_an_unknown_server_fails_loudly(tmp_path, monkeypatch):
     """Silently succeeding on a typo would leave the user believing they had approved something."""
+    # Approving is gated on a human being present (baseline.approval_blocked_reason). This test
+    # exercises the approve MECHANICS, not that gate, and pytest itself runs inside an agent
+    # session — so opt out explicitly. Stated here rather than hidden in conftest: a test that
+    # silently disables a security control should have to say so.
+    monkeypatch.setenv("MCPGAWK_APPROVE_NONINTERACTIVE", "1")
     from mcpgawk import cli
     monkeypatch.setenv("MCPGAWK_HISTORY", str(tmp_path / "history.json"))
     assert cli.main(["approve", "no-such-server"]) == 2

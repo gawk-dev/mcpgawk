@@ -60,7 +60,12 @@ def test_unapproved_tool_on_an_approved_server_is_denied(tmp_path):
     assert decision["permissionDecision"] == "deny"
     assert decision["hookEventName"] == "PreToolUse"
     assert "delete_everything" in decision["permissionDecisionReason"]
-    assert "mcpgawk approve" in decision["permissionDecisionReason"]  # names the remedy
+    # This assertion USED to require `mcpgawk approve` in the reason — "names the remedy". That was
+    # encoding the vulnerability: the reason goes into the AGENT'S context, and an agent given that
+    # command runs it and then retries the blocked tool (demonstrated end to end 2026-07-27). The
+    # remedy is now addressed to the human and names no command the model can execute.
+    assert "mcpgawk approve" not in decision["permissionDecisionReason"]
+    assert "tell the user" in decision["permissionDecisionReason"].lower()
 
 
 def test_approved_tool_defers(tmp_path):

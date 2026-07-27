@@ -21,7 +21,17 @@ from typing import Any
 #: Agents whose MCP calls the guard hook can currently intercept. Claude Code exposes PreToolUse
 #: hooks; the others have no equivalent interception point wired yet, so they are covered only by
 #: the enforce proxy (which routes the server itself, not the agent).
-HOOK_CAPABLE = {"claude-code"}
+def _hook_capable() -> set[str]:
+    """Sourced from the adapter registry, never a hand-kept list — adding an agent must not
+    require remembering to update the thing that reports coverage."""
+    try:
+        from .agents import ADAPTERS
+        return set(ADAPTERS)
+    except Exception:                              # noqa: BLE001
+        return {"claude-code"}
+
+
+HOOK_CAPABLE = _hook_capable()
 
 #: Display names for the client ids `discover` attributes servers to.
 CLIENT_LABELS = {
@@ -93,8 +103,8 @@ def render(*, guard_installed: bool, guard_path: Path | None,
         out.append("")
         out.append(f"      {len(pending)} server(s) changed since you approved them — blocked until")
         out.append("      you decide:")
-        for key in pending[:10]:
-            out.append(f"          {key}")
+        for name in pending[:10]:
+            out.append(f"          {name}")
         out.append("      Review: mcpgawk scan     Accept: mcpgawk approve <name>")
 
     out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, tamper-evident log)"]
@@ -144,8 +154,10 @@ def collect_and_render() -> str:
     try:
         store = history.load(history.default_path())
         servers = store.get("servers") or {}
-        pending = history.pending(store)
-        baseline_total = len([k for k in servers if k not in pending])
+        pending_keys = history.pending(store)
+        baseline_total = len([k for k in servers if k not in pending_keys])
+        # Resolve to what the USER calls each server, not our internal identity key.
+        pending = [history.display_name(store, k) for k in pending_keys]
     except Exception:                              # noqa: BLE001
         pending, baseline_total = [], 0
 

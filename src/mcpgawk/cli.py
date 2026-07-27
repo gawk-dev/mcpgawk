@@ -407,6 +407,13 @@ def _baseline(args) -> int:
 
 def _approve(args) -> int:
     """`mcpgawk approve` — move the trusted baseline forward, deliberately."""
+    # THE HUMAN GATE. Approval is the moment trust moves, and a blocked call is precisely when an
+    # agent would be asked to approve its way past one. See baseline.approval_blocked_reason.
+    from .baseline import approval_blocked_reason
+    blocked = approval_blocked_reason()
+    if blocked and not (args.list or (not args.server and not args.all)):
+        print(f"mcpgawk approve: refusing — {blocked}", file=sys.stderr)
+        return 4
     path = history.default_path()
     store = history.load(path)
     waiting = history.pending(store)
@@ -584,12 +591,22 @@ def _protect() -> int:
 
     # Runtime checking on. `guard.install` is idempotent and preserves foreign hooks, so re-running
     # `mcpgawk` is safe — which is the point of a front door you are meant to type again.
+    # Every agent on this machine that HAS an interception point, not just Claude Code. status
+    # reported six agents uncovered; five of them were only uncovered by our implementation.
+    lines: list[str] = []
     try:
-        from .guard import install
-        guard_line = install()
-    except Exception as exc:                       # noqa: BLE001 - never lose the scan result
-        guard_line = (f"Runtime checking NOT enabled ({type(exc).__name__}: {exc}) — "
-                      f"run `mcpgawk guard install` to see the full error.")
+        from . import agents as agent_mod
+        from .guard import install_for
+        for adapter in agent_mod.ADAPTERS.values():
+            if not adapter.config.parent.is_dir():
+                continue                            # that agent is not on this machine
+            try:
+                lines.append(install_for(adapter))
+            except Exception as exc:                # noqa: BLE001 - one agent must not stop the rest
+                lines.append(f"  {adapter.label}: NOT enabled ({type(exc).__name__}: {exc})")
+    except Exception as exc:                        # noqa: BLE001 - never lose the scan result
+        lines.append(f"  Runtime checking NOT enabled ({type(exc).__name__}: {exc})")
+    guard_line = "\n".join(lines) if lines else "  No agent with a hook point found."
 
     store = history.load(history.default_path())
     print(protect.protection_report(store, guard_line, unchecked=[]))

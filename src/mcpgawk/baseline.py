@@ -24,12 +24,52 @@ Shape (stable, and the contract other runtimes read through `mcpgawk baseline --
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
 
 from . import history
 
 #: Bumped only when the exported shape changes incompatibly. Readers check it rather than guessing.
 SCHEMA = "gawk.baseline/1"
+
+
+#: Environment markers set by coding agents. Their presence means the process was started by an
+#: agent, so whoever is "typing" is a model — not the human whose trust decision this is.
+AGENT_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AI_AGENT", "CURSOR_TRACE_ID")
+
+#: The deliberate escape hatch for CI, which legitimately has no TTY and no human. Deliberately NOT
+#: mentioned in any blocked-call message: the whole point is that an agent reading a denial cannot
+#: learn the bypass from it.
+APPROVE_OVERRIDE_ENV = "MCPGAWK_APPROVE_NONINTERACTIVE"
+
+
+def approval_blocked_reason() -> str | None:
+    """Why this process must not be allowed to move the trusted baseline, or None if it may.
+
+    THE HOLE THIS CLOSES (found 2026-07-27 by running the product as an agent would): the guard
+    blocked a malicious tool, and the denial text told the agent to run `mcpgawk approve <server>`
+    to accept the change. The agent has a shell. It ran it, and the malicious tool was allowed on
+    the retry — the control handed its own bypass to the audience most likely to be acting on an
+    injected instruction.
+
+    Approval is the one operation that must come from the human. It is the moment trust moves, so
+    it is gated on evidence a human is present: an interactive terminal, and no agent-session
+    marker in the environment. Both, because either alone is weak — an agent can run without a TTY
+    marker set, and a human can be inside an agent's terminal.
+    """
+    agent = [m for m in AGENT_ENV_MARKERS if os.environ.get(m)]
+    if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
+        return None
+    if agent:
+        return (f"this looks like an agent session ({', '.join(agent)} set). Moving the trusted "
+                f"baseline is a decision for the person at the keyboard, not for the assistant — "
+                f"a blocked tool call is exactly when an agent would be asked to approve its way "
+                f"past one. Run this yourself in your own terminal.")
+    if not sys.stdin.isatty():
+        return ("no interactive terminal. Approving a changed server is a trust decision and needs "
+                "a human present; refusing rather than assuming consent.")
+    return None
 
 
 def approved_record(key: str, path: str | None = None) -> dict[str, Any] | None:

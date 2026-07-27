@@ -137,8 +137,7 @@ def protection_report(store: dict[str, Any], guard_line: str,
         out.append(f"  {len(waiting)} server(s) changed since you approved them — your agents are")
         out.append("  blocked from calling them until you decide:")
         for key in waiting:
-            names = ", ".join((servers.get(key) or {}).get("aliases", [])) or key
-            out.append(f"      {names}")
+            out.append(f"      {history.display_name(store, key)}")
         out.append("    See what moved:  mcpgawk scan")
         out.append("    Accept it:       mcpgawk approve <name>")
         out.append("")

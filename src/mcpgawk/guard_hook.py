@@ -42,7 +42,7 @@ from pathlib import Path
 DEFAULT_HISTORY = Path.home() / ".mcpgawk" / "history.json"
 
 
-def _load_spool():
+def _load_sibling(name: str):
     """Import the spool WITHOUT a package context.
 
     This module is invoked by absolute file path (see guard.hook_command) precisely so that
@@ -57,17 +57,29 @@ def _load_spool():
     """
     try:
         import importlib.util
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spool.py")
-        spec = importlib.util.spec_from_file_location("_mcpgawk_spool", path)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.py")
+        spec = importlib.util.spec_from_file_location(f"_mcpgawk_{name}", path)
         if spec is None or spec.loader is None:
             return None
         module = importlib.util.module_from_spec(spec)
+        # REGISTER BEFORE EXEC. A @dataclass resolves its annotations through
+        # sys.modules[cls.__module__]; if the module is not registered that lookup returns None and
+        # exec_module dies with a bare AttributeError. The spool loader survived without this only
+        # because it declares no dataclass — so the omission was invisible until agents.py did.
+        # Caught by running the real hook per format, not by importing the package in a test.
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
     except Exception:                              # noqa: BLE001 - never break the hot path
         return None
 
 EXIT_OK = 0
+#: Agents where a non-zero exit MEANS deny. Deliberately NOT Claude Code: there a non-zero exit is
+#: an ERROR condition, and this hook's founding rule is that our own failure must never be read as
+#: a verdict. Cursor is the opposite case — it ALLOWS the call when a hook errors (unless
+#: failClosed), so for Cursor a hard exit-2 alongside the JSON is the safer belt-and-braces.
+EXIT_DENY = 2
+DENY_BY_EXIT = {"cursor", "codex"}
 
 
 def history_path() -> Path:
@@ -123,10 +135,11 @@ def approved_for(server: str, store_path: Path) -> dict[str, str] | None:
     return dict(tools) if isinstance(tools, dict) else None
 
 
-def decide(event: dict, store_path: Path | None = None) -> tuple[dict | None, str | None]:
+def decide(event: dict, store_path: Path | None = None,
+           fmt: str = "claude") -> tuple[dict | None, str | None]:
     """(hook output or None to defer, stderr note or None). Pure — no I/O beyond the store read,
     so the whole decision table is directly testable."""
-    tool_name = event.get("tool_name")
+    tool_name, _args = _read_event(fmt, event)
     if not isinstance(tool_name, str):
         return None, None
 
@@ -142,10 +155,17 @@ def decide(event: dict, store_path: Path | None = None) -> tuple[dict | None, st
         return None, None
 
     if tool not in approved:
-        return _deny(
-            f"'{tool}' is not in the approved baseline for MCP server '{server}'. A tool that "
-            f"appeared after you approved this server is how a malicious update arrives. Review "
-            f"it with `mcpgawk scan`, and run `mcpgawk approve {server}` if you accept the change."
+        return _deny(fmt,
+            f"SECURITY BLOCK (mcpgawk). '{tool}' is not in the approved baseline for MCP server "
+            f"'{server}'. A tool that appeared after this server was approved is how a malicious "
+            f"update arrives.\n"
+            f"This decision is final for this session. Do not retry it, do not call a different "
+            f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+            f"baseline — approval requires the person at the keyboard, and attempting it from "
+            f"inside an agent session is itself treated as a red flag.\n"
+            f"Tell the user exactly this: the MCP server '{server}' added a tool called '{tool}' "
+            f"since they approved it, mcpgawk blocked the call, and they should run `mcpgawk scan` "
+            f"themselves to see what changed before deciding whether to trust it."
         ), None
 
     # The tool exists and was approved. Whether its CONTENT still matches is the rug-pull check,
@@ -155,14 +175,28 @@ def decide(event: dict, store_path: Path | None = None) -> tuple[dict | None, st
     return None, None
 
 
-def _deny(reason: str) -> dict:
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": f"[mcpgawk guard] {reason}",
-        }
-    }
+def _read_event(fmt: str, event: dict) -> tuple[str | None, dict]:
+    """Pull (tool name, arguments) out of whichever agent's payload this is. Loaded the same
+    package-free way as the spool: this file runs by absolute path with no parent package."""
+    mod = _load_sibling("agents")
+    if mod is None:
+        name = event.get("tool_name")
+        return (name if isinstance(name, str) else None), {}
+    return mod.parse_event(fmt, event)
+
+
+def _deny(fmt: str, reason: str) -> dict:
+    """This agent's own deny shape. Claude Code and Codex take `permissionDecision`; Cursor takes
+    `{"permission": "deny"}` with snake_case messages. Emitting the wrong one reads as a
+    MALFORMED hook, and on Cursor a malformed hook ALLOWS the call unless failClosed is set — so
+    getting this right per agent is a security property, not formatting."""
+    text = f"[mcpgawk guard] {reason}"
+    mod = _load_sibling("agents")
+    if mod is None:
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "permissionDecision": "deny",
+                                       "permissionDecisionReason": text}}
+    return mod.deny_payload(fmt, text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,8 +220,17 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(event, dict):
         return EXIT_OK
 
+    # Which agent are we speaking to? Passed by the installed command, defaulting to Claude Code
+    # so an older config that predates --format keeps working unchanged.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    fmt = "claude"
+    if "--format" in argv:
+        i = argv.index("--format")
+        if i + 1 < len(argv):
+            fmt = argv[i + 1]
+
     try:
-        output, note = decide(event)
+        output, note = decide(event, fmt=fmt)
     except Exception as exc:  # noqa: BLE001 — our bug must never brick the agent session
         print(f"[mcpgawk guard] internal error, deferring (NOT a clean verdict): "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
@@ -199,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[mcpgawk guard] {note}", file=sys.stderr)
     if output is not None:
         sys.stdout.write(json.dumps(output))
+        return EXIT_DENY if fmt in DENY_BY_EXIT else EXIT_OK
     return EXIT_OK
 
 
@@ -220,7 +264,7 @@ def _record(event: dict, output: dict | None) -> None:
         if parsed is None:
             return                                  # not an MCP call — not ours to log
         server, tool = parsed
-        spool = _load_spool()
+        spool = _load_sibling("spool")
         if spool is None:
             return
         decision = "deny" if output else "defer"
