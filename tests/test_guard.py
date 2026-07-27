@@ -141,11 +141,30 @@ def test_hook_exits_zero_and_stays_silent_on_garbage_input(tmp_path):
 
 def test_hook_imports_no_heavy_dependencies():
     """The hot path runs on EVERY MCP tool call. Importing the package pulls the MCP SDK in
-    through __init__ (measured ~190ms); running the file by path is ~10ms. This asserts the
-    module's imports stay stdlib-only so that stays true."""
-    source = HOOK_SCRIPT.read_text()
-    for banned in ("import mcp", "from mcp", "import httpx", "import tiktoken", "from ."):
-        assert banned not in source, f"guard_hook.py must stay stdlib-only, found {banned!r}"
+    through __init__ (measured ~190ms); running the file by path is ~10ms, and a RELATIVE import
+    cannot resolve at all without a parent package. This asserts the module's imports stay
+    stdlib-only so both stay true.
+
+    Parsed with `ast`, not grepped. The substring version failed on a DOCSTRING that explained why
+    `from . import spool` would raise — prose describing the rule tripped the rule. A detector that
+    cannot tell code from commentary produces false positives, and a false positive costs the same
+    trust as a real finding.
+    """
+    import ast
+
+    tree = ast.parse(HOOK_SCRIPT.read_text())
+    heavy = {"mcp", "httpx", "tiktoken", "lark", "termcolor"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert node.level == 0, (
+                f"guard_hook.py uses a relative import at line {node.lineno}; it is loaded by file "
+                f"path with no parent package, so that raises at runtime on every tool call.")
+            root = (node.module or "").split(".")[0]
+            assert root not in heavy, f"heavy import {node.module!r} at line {node.lineno}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                assert root not in heavy, f"heavy import {alias.name!r} at line {node.lineno}"
 
 
 # --------------------------------------------------------------------------- baseline contract

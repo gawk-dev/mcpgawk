@@ -41,6 +41,32 @@ from pathlib import Path
 #: Same file the scanner writes; `baseline.py` is a narrow view over it, not a separate store.
 DEFAULT_HISTORY = Path.home() / ".mcpgawk" / "history.json"
 
+
+def _load_spool():
+    """Import the spool WITHOUT a package context.
+
+    This module is invoked by absolute file path (see guard.hook_command) precisely so that
+    `mcpgawk/__init__` — and the ~200ms MCP SDK import behind it — never runs. That also means
+    there is no parent package, so `from . import spool` would raise. Loading the sibling by path
+    keeps ONE definition of the record shape (the writer here and every reader in the package use
+    the same module) without paying for the package. `runlog` cannot be used this way: it does a
+    relative import of `state`, which is what kept the hook silent in the first place.
+
+    Returns None if anything goes wrong. Logging is a duty, not a precondition: failing to record
+    must never cost a verdict.
+    """
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spool.py")
+        spec = importlib.util.spec_from_file_location("_mcpgawk_spool", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:                              # noqa: BLE001 - never break the hot path
+        return None
+
 EXIT_OK = 0
 
 
@@ -167,11 +193,43 @@ def main(argv: list[str] | None = None) -> int:
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_OK
 
+    _record(event, output)
+
     if note:
         print(f"[mcpgawk guard] {note}", file=sys.stderr)
     if output is not None:
         sys.stdout.write(json.dumps(output))
     return EXIT_OK
+
+
+def _record(event: dict, output: dict | None) -> None:
+    """Append this decision to the runtime spool.
+
+    EVERY checked call is recorded, including the ones we defer on — that is the whole point.
+    Recording only denials would make "nothing was blocked" and "nothing was watching" produce an
+    identical, empty log, which is the exact ambiguity this exists to remove.
+
+    Arguments are deliberately NOT recorded: they carry the secrets and file contents this product
+    redacts everywhere else. See spool.py.
+    """
+    try:
+        tool_name = event.get("tool_name")
+        if not isinstance(tool_name, str):
+            return
+        parsed = parse_mcp_tool_name(tool_name)
+        if parsed is None:
+            return                                  # not an MCP call — not ours to log
+        server, tool = parsed
+        spool = _load_spool()
+        if spool is None:
+            return
+        decision = "deny" if output else "defer"
+        spool.record_decision(
+            server=server, tool=tool, decision=decision, adapter="claude-code-hook",
+            session=event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+        )
+    except Exception:                              # noqa: BLE001 - a lost record is not a verdict
+        return
 
 
 if __name__ == "__main__":

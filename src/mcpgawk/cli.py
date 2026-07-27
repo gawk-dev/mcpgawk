@@ -133,10 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "gawk Platform capabilities (£29/month — https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
-            + "Run `mcpgawk <capability>` once subscribed; scan stays free and open-source."
+            + "Run `mcpgawk <capability>` once subscribed; scan stays free and open-source.\n\n"
+            + "Your subscription:\n"
+            + "".join(f"  {c:<9} {d}\n" for c, d in ACCOUNT_COMMANDS.items())
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # `--version` is the first thing anyone types when something is wrong, and its ABSENCE is not
+    # cosmetic: this CLI shipped without it, so a seven-release-stale install stayed invisible for
+    # six days while every "verified live" claim was checked against the repo instead of the
+    # binary. A tool that cannot state its own version cannot be supported.
+    p.add_argument("--version", action="version", version=f"mcpgawk {_installed_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan", help="measure MCP server(s) locally")
     s.add_argument("config", nargs="?", help="path to an mcp.json config")
@@ -236,6 +243,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="exit 1 if any finding fires (CI gate) — default reports and exits 0, "
                         "because a signal is a signal, not a verdict")
 
+    sub.add_parser(
+        "status",
+        help="is anything watching, against what, and when did it last see something",
+        description="One answer to 'am I protected'. Read-only — opens nothing, starts nothing. "
+                    "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
+                    "Claude Code only, so a single cheerful tick would tell a Cursor user they "
+                    "are covered when they are not.")
     r = sub.add_parser(
         "runs",
         help="what has run on this machine, and how it went",
@@ -444,6 +458,56 @@ def _approve(args) -> int:
 #
 # They are listed in `--help` even when unavailable: a free user should be able to SEE what the
 # subscription adds without installing anything, and get one honest line if they try it.
+def _installed_version() -> str:
+    """The version of the DISTRIBUTION actually installed — read from package metadata, never a
+    hand-maintained constant. A literal here drifted from pyproject before and reported 0.1.0 on a
+    0.1.3 install; metadata cannot disagree with what pip resolved."""
+    try:
+        from importlib.metadata import version
+        return version("mcpgawk")
+    except Exception:                              # noqa: BLE001 - a source checkout, not an error
+        return "0+unknown (not installed as a distribution)"
+
+
+#: ACCOUNT commands — about the subscription, not about a server. Separate from the capabilities
+#: because they are never licence-gated: `login` is how a customer obtains a working licence, so
+#: gating it behind one would be a locked door with the key inside.
+#:
+#: These shipped BROKEN. When `gawk` was retired (GNU-awk collision) and the paid capabilities
+#: became subcommands of `mcpgawk`, the pillars were carried over and these were not — while
+#: activate.html, the page every paying customer is sent to, instructed them to run
+#: `mcpgawk login <key>`. It exited 2 with `invalid choice` on every install. Nobody could activate.
+ACCOUNT_COMMANDS = {
+    "login": "save your licence key so the paid capabilities unlock",
+    "logout": "remove the saved licence key from this machine",
+}
+
+#: What a FREE install says for an account command. Deliberately not the capability message: the
+#: user has (probably) just paid and is following instructions from their purchase email, so the
+#: reply must confirm they are in the right place and name the ONE missing step — never read as
+#: "you typed something wrong".
+_ACCOUNT_NEEDS_PLATFORM = (
+    "mcpgawk {cmd}: the gawk Platform isn't installed in this environment yet.\n"
+    "Your licence unlocks it, and your purchase email has the one-line install command.\n"
+    "Lost it? https://mcp.gawk.dev/activate.html — or reply to the receipt and we'll resend.\n"
+    "The free scanner (`mcpgawk scan`) keeps working either way."
+)
+
+
+def _run_account_command(command: str, rest: list[str]) -> int:
+    """Delegate an account command to gawk Platform, or explain honestly that it isn't here.
+
+    Same optional-local-import shape as the capabilities: the free scanner is published to PyPI on
+    its own and must never depend on, or ship, the paid engine.
+    """
+    try:
+        from gawk_platform.cli import run_account
+    except ImportError:
+        print(_ACCOUNT_NEEDS_PLATFORM.format(cmd=command), file=sys.stderr)
+        return 3
+    return run_account(command, rest)
+
+
 PLATFORM_CAPABILITIES = {
     "verify": "run a server in a no-egress sandbox and reproduce misbehaviour",
     "enforce": "guard a live server, call by call",
@@ -477,6 +541,59 @@ def _run_platform_capability(capability: str, rest: list[str]) -> int:
         )
         return 3  # the same "not licensed / not available" code every paid entry point returns
     return run_pillar(capability, rest)
+
+
+def _protect() -> int:
+    """Bare `mcpgawk` — find the fleet, ask once, scan, turn runtime checking on, report.
+
+    Deliberately an ORCHESTRATOR, not a second scanner: it drives the existing scan path (so there
+    is exactly one scan implementation) and reads its result out of the history store, which is
+    already the shared expectation store every other consumer reads. Adding a parallel scan here is
+    how this codebase has previously grown two of something that later disagreed.
+    """
+    from . import history, protect
+
+    print("mcpgawk — checking what your agents can call, and turning protection on.\n")
+
+    choice = protect.load_consent()
+    scan_args = ["scan", "--track"]
+    if choice is None:
+        # Count local servers first so the question can be specific about what it is asking for.
+        try:
+            from .discover import discover_servers
+            found = discover_servers()
+            entries = found[0] if isinstance(found, tuple) else found
+            local = sum(1 for e in (entries or {}).values()
+                        if isinstance(e, dict) and e.get("command"))
+            agents = sorted({str(e.get("_client") or "").strip()
+                             for e in (entries or {}).values() if isinstance(e, dict)} - {""})
+        except Exception:                          # noqa: BLE001 - discovery is best-effort here
+            local, agents = 0, []
+        if local:
+            choice = protect.ask_consent(local, agents)
+            if choice is None:
+                print("  Not asking in a non-interactive run — checking remote servers only.\n"
+                      "  Run this in a terminal to include local servers.\n", file=sys.stderr)
+                choice = protect.REMOTE_ONLY
+            else:
+                protect.save_consent(choice)
+    if choice == protect.LAUNCH_ALL:
+        scan_args.append("--yes")
+
+    rc = _dispatch(scan_args)
+
+    # Runtime checking on. `guard.install` is idempotent and preserves foreign hooks, so re-running
+    # `mcpgawk` is safe — which is the point of a front door you are meant to type again.
+    try:
+        from .guard import install
+        guard_line = install()
+    except Exception as exc:                       # noqa: BLE001 - never lose the scan result
+        guard_line = (f"Runtime checking NOT enabled ({type(exc).__name__}: {exc}) — "
+                      f"run `mcpgawk guard install` to see the full error.")
+
+    store = history.load(history.default_path())
+    print(protect.protection_report(store, guard_line, unchecked=[]))
+    return rc
 
 
 def _scan_target(raw: list[str]) -> str | None:
@@ -525,6 +642,13 @@ def _dispatch(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] in PLATFORM_CAPABILITIES:
         return _run_platform_capability(raw[0], raw[1:])
+    if raw and raw[0] in ACCOUNT_COMMANDS:
+        return _run_account_command(raw[0], raw[1:])
+    # THE FRONT DOOR. Typing the tool's own name used to print a usage block and exit 2 — an error
+    # message as the first thing a new user sees. A usage block is what you print when you cannot
+    # tell what someone wants; here we can: they want to be protected. See protect.py.
+    if not raw:
+        return _protect()
 
     p = build_parser()
     args = p.parse_args(argv)
@@ -537,6 +661,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if args.cmd == "skills":
         return _skills(args)
+
+    if args.cmd == "status":
+        from .status import collect_and_render
+        print(collect_and_render())
+        return 0
 
     if args.cmd == "runs":
         return _runs(args)
@@ -723,7 +852,21 @@ def _dispatch(argv: list[str] | None = None) -> int:
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
                      + sum(1 for _, e in skipped if e.get("command")))
     print("\n" + render_summary(labels, local_servers=local_servers) + "\n")
+    # Scanning is not protection. A report with no next step is how the author finished a scan on
+    # his own machine and stayed unprotected — the hook existed, worked, and was never installed
+    # because nothing ever mentioned it. Only shown when it is actually actionable.
+    if not _guard_is_installed():
+        print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
     return 1 if (any_error or failed) else 0
+
+
+def _guard_is_installed() -> bool:
+    """Best-effort: never let a status probe break a completed scan."""
+    try:
+        from .guard import status
+        return "NOT installed" not in status()
+    except Exception:                              # noqa: BLE001 - advisory only
+        return True                                # stay quiet rather than nag wrongly
 
 
 def _offer_batched_auth(rows: list, args, entries: dict) -> dict:

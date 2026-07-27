@@ -2,6 +2,36 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+## [0.1.12] — 2026-07-27
+
+One command, and it keeps a record.
+
+### Added
+
+- **Just run `mcpgawk`.** No subcommand. It finds every MCP server across your agents, asks one
+  question, checks them, and turns on runtime checking — then tells you what is covered and what
+  is not. Scanning and being protected are now the same act; previously you had to know three
+  commands, and most people ran the first one and stopped.
+- **Every MCP call your agent makes is now recorded.** The guard hook already checked each call
+  against your approved baseline and then forgot it, so "nothing was blocked" and "nothing was
+  watching" looked identical. Decisions are now appended to a local log (`~/.mcpgawk/calls.jsonl`).
+  **Tool arguments are never written to it** — they carry the tokens and file contents this tool
+  redacts everywhere else, and a security log that becomes the best place to find your secrets has
+  failed at its own job. Costs about 2ms per call.
+- **`mcpgawk status`** — one answer to "is anything watching, against what, and when did it last
+  see something". Coverage is reported **per agent**, never as a single tick: the hook installs
+  into Claude Code, so if you also run Cursor or Codex it says plainly that those are not covered.
+- **`mcpgawk --version`.** Its absence is why a seven-release-old install could sit unnoticed.
+- **`mcpgawk login`** now exists on every install. It previously did not exist anywhere, while the
+  activation page told subscribers to run it.
+
+### Changed
+
+- A scan that finishes while runtime checking is off now says so, instead of leaving you with a
+  report and no next step.
+- Messages that told you to run `gawk ...` now say `mcpgawk ...`. `gawk` is GNU AWK and was never
+  a command this tool installed.
+
 ## [0.1.11] — 2026-07-27
 
 The local run timeline — what ran on this machine, and how it went.
