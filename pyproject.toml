@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.15"
+version = "0.1.16"
 description = "A local-first CLI that measures what an MCP server costs and what it can do. Nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,11 @@ mcpgawk-mcp = "mcpgawk.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcpgawk"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# The wheel ships a derived Apache-2.0 module (adapters/pulled/invariant_redact.py), so it
+# must ship the licence rollup too — pinned by the published-wheel attribution journey test.
+"THIRD_PARTY_LICENSES.md" = "mcpgawk/THIRD_PARTY_LICENSES.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
