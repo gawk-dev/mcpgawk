@@ -37,3 +37,9 @@ tests/test_platform_smoke.py
 tests/test_forge_smoke.py
 # third-party study clones (Apache-2.0) — never vendored/published
 reference/
+
+# The bundled verify engine's compiled dist IS the product — the generic dist/ ignore above must
+# not swallow it. 0.1.16 shipped engine-less because it did: the wheel carried node_modules but
+# no cli.js, and `mcpgawk verify` reported the engine missing on a fresh install.
+!src/mcpgawk/_bundled/verify/dist/
+!src/mcpgawk/_bundled/verify/dist/**
