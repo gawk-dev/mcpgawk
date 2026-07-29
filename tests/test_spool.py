@@ -36,9 +36,9 @@ def _event(tool: str = "mcp__vault-rag__vault_search", secret: str = "TOP-SECRET
     })
 
 
-def _run_hook(spool_path: Path, event: str) -> subprocess.CompletedProcess:
+def _run_hook(spool_path: Path, event: str, *args: str) -> subprocess.CompletedProcess:
     env = {**os.environ, "MCPGAWK_SPOOL": str(spool_path)}
-    return subprocess.run([sys.executable, str(HOOK)], input=event, capture_output=True,
+    return subprocess.run([sys.executable, str(HOOK), *args], input=event, capture_output=True,
                           text=True, timeout=60, env=env)
 
 
@@ -86,6 +86,48 @@ def test_every_checked_call_is_recorded_not_only_denials(tmp_path):
     assert all(r["decision"] in ("defer", "deny", "allow") for r in rows)
     assert {r["server"] for r in rows} == {"vault-rag"}
     assert {r["session"] for r in rows} == {"sess-1"}
+
+
+def test_a_cursor_event_is_recorded_as_cursor_not_claude_code(tmp_path):
+    """The log is the product; a mislabelled log is a wrong log. A Cursor event — with Cursor's
+    documented JSON-STRING `tool_input` — must be recorded under its own adapter with the right
+    tool name, not silently attributed to Claude Code."""
+    path = tmp_path / "calls.jsonl"
+    event = json.dumps({
+        "hook_event_name": "beforeMCPExecution",
+        "session_id": "sess-cursor",
+        "tool_name": "mcp__vault-rag__vault_search",
+        "tool_input": json.dumps({"query": "CURSOR-SECRET-VALUE"}),
+    })
+    r = _run_hook(path, event, "--format", "cursor")
+    assert r.returncode == 0
+    written = path.read_text(encoding="utf-8")
+    assert "CURSOR-SECRET-VALUE" not in written, "arguments leaked into the spool"
+    row = json.loads(written.splitlines()[0])
+    assert row["adapter"] == "cursor"
+    assert row["server"] == "vault-rag"
+    assert row["tool"] == "vault_search"
+    assert row["session"] == "sess-cursor"
+
+
+def test_a_codex_event_is_recorded_as_codex(tmp_path):
+    """Same mislabelling class as Cursor: each agent's decisions must carry its own name."""
+    path = tmp_path / "calls.jsonl"
+    r = _run_hook(path, _event(), "--format", "codex")
+    assert r.returncode == 0
+    row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["adapter"] == "codex"
+    assert row["tool"] == "vault_search"
+
+
+def test_a_claude_event_is_recorded_under_the_registry_key(tmp_path):
+    """The default format records the adapter registry key, so spool rows line up with the same
+    ids `status` and `discover` use — never a hand-invented label."""
+    path = tmp_path / "calls.jsonl"
+    r = _run_hook(path, _event())
+    assert r.returncode == 0
+    row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["adapter"] == "claude-code"
 
 
 def test_non_mcp_tool_calls_are_not_recorded(tmp_path):
@@ -148,3 +190,28 @@ def test_summarise_counts_what_a_human_asks_for(tmp_path):
 def test_a_missing_spool_reads_as_empty_not_an_error(tmp_path):
     assert spool.read(path=str(tmp_path / "absent.jsonl")) == []
     assert spool.summarise(path=str(tmp_path / "absent.jsonl"))["calls"] == 0
+
+
+# --- the latency budget ------------------------------------------------------------------------ #
+
+def test_appends_stay_inside_the_hot_path_budget(tmp_path):
+    """The 17 ms hook budget and the 0.027 ms measured append
+    (docs/architecture-runtime-monitoring-2026-07-27.md §2) were measurements, not gates — nothing
+    failed if the append quietly grew a database, a lock, or an import. This is the gate: 500
+    appends, generously bounded (CI machines vary wildly; the bound is ~75x the measured cost, so
+    only a CLASS change — sqlite, locking, an O(n) re-read — can trip it, not a noisy runner)."""
+    import time
+
+    path = tmp_path / "calls.jsonl"
+    n = 500
+    start = time.perf_counter()
+    for i in range(n):
+        spool.record_decision(server="s", tool=f"t{i}", decision="defer",
+                              adapter="budget", session="sess", path=str(path))
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    per_append_ms = elapsed_ms / n
+    assert per_append_ms < 2.0, (
+        f"spool append cost {per_append_ms:.3f} ms — the measured baseline is 0.027 ms, so "
+        f"something structural changed on the hot path (this runs on EVERY MCP tool call)."
+    )
+    assert len(spool.read(path=str(path))) == n, "the timed appends must actually have landed"

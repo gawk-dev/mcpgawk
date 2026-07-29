@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from contextlib import contextmanager
 from typing import Any
 
@@ -53,6 +54,65 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
                 os.remove(tmp)
             except OSError:
                 pass
+    # EVERY save regenerates the hot-path projection. This is what lets the agent hook consume an
+    # artefact the canonical writer produced instead of re-deriving the approved surface itself —
+    # drift between the two readers stops being possible instead of being test-detected
+    # (docs/architecture-runtime-monitoring-2026-07-27.md §4).
+    _write_projection(store, path)
+
+
+#: The flat, stdlib-parsable file the agent hook reads instead of this store. Always a sibling of
+#: the history file it projects, so an MCPGAWK_HISTORY override relocates both together.
+PROJECTION_NAME = "guard-baseline.json"
+PROJECTION_SCHEMA = "gawk.guard-projection/1"
+
+
+def projection_path(path: str | None = None) -> str:
+    return os.path.join(os.path.dirname(path or default_path()), PROJECTION_NAME)
+
+
+def _write_projection(store: dict[str, Any], path: str) -> None:
+    """Project the APPROVED surface (tools + aliases per server, nothing else) into a small flat
+    file, stamped with the stat of the history file it was derived from. The hook compares that
+    stamp before trusting the projection: a mismatch means someone wrote the store without coming
+    through here, and the hook must defer rather than enforce yesterday's baseline.
+
+    Best-effort but never silent: a failure here means the hook will (loudly) defer until the next
+    successful save, which is the safe direction — it must not fail the scan/approve that called us.
+    """
+    try:
+        st = os.stat(path)
+        servers: dict[str, Any] = {}
+        for key, entry in (store.get("servers") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            rec = entry.get("approved")
+            if not isinstance(rec, dict) or not isinstance(rec.get("tools"), dict):
+                continue
+            servers[key] = {"tools": dict(rec["tools"]),
+                            "aliases": list(entry.get("aliases") or [])}
+        projection = {"schema": PROJECTION_SCHEMA,
+                      "source": {"mtime_ns": st.st_mtime_ns, "size": st.st_size},
+                      "servers": servers}
+        proj = projection_path(path)
+        tmp = f"{proj}.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(projection, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, proj)
+            state.secure_file(proj)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    except Exception as exc:  # noqa: BLE001 — the projection is derived state; the store write stood
+        print(f"mcpgawk: could not regenerate the guard projection ({type(exc).__name__}: {exc}). "
+              f"The agent hook will defer (not enforce) until the next successful scan/approve.",
+              file=sys.stderr)
 
 
 @contextmanager
@@ -144,6 +204,51 @@ def approve(key: str, path: str | None = None) -> dict[str, Any] | None:
         store.setdefault("servers", {}).setdefault(key, {})["approved"] = latest
         save(store, path)
     return latest
+
+
+def mute_finding(name: str, finding_id: str, path: str | None = None,
+                 undo: bool = False) -> str | None:
+    """Record (or withdraw) a human's "this finding is wrong" for one server.
+
+    Design-contract item 4: the false-positive affordance. A muted finding is NEVER dropped from
+    any surface — it renders as "muted by you", because absence-is-not-safety applies to our own
+    mistakes too: a wrong mute must stay reviewable, and a report that silently omits what the
+    user silenced is indistinguishable from a report that never found it.
+
+    `finding_id` is `<tool>/<kind>` exactly as the report prints it. Returns the resolved store
+    key, or None when no tracked server matches `name` (nothing is written in that case)."""
+    from datetime import datetime, timezone
+
+    path = path or default_path()
+    with locked(path):
+        store = load(path)
+        key = resolve(store, name)
+        if key is None:
+            return None
+        entry = store.setdefault("servers", {}).setdefault(key, {})
+        muted_ids = entry.setdefault("muted", {})
+        if undo:
+            muted_ids.pop(finding_id, None)
+        else:
+            muted_ids[finding_id] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        save(store, path)
+    return key
+
+
+def muted(store: dict[str, Any], key: str | None) -> dict[str, Any]:
+    """`{finding_id: {"at": ...}}` the human has marked wrong for this server. Empty when none."""
+    if key is None:
+        return {}
+    entry = (store.get("servers") or {}).get(key)
+    raw = entry.get("muted") if isinstance(entry, dict) else None
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def muted_total(store: dict[str, Any]) -> int:
+    """How many findings the human has muted, fleet-wide — surfaced by `status` so suppression
+    stays a visible, countable decision rather than quiet forgetting."""
+    return sum(len(entry.get("muted") or {})
+               for entry in (store.get("servers") or {}).values() if isinstance(entry, dict))
 
 
 def resolve(store: dict[str, Any], wanted: str) -> str | None:

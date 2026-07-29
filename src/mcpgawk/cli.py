@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shlex
 import sys
 from dataclasses import asdict
@@ -131,9 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mcpgawk",
         description="gawk at an MCP server before you trust it",
         epilog=(
-            "gawk Platform capabilities (£29/month — https://mcp.gawk.dev/pricing.html):\n"
+            "Free, and included here:\n"
+            "  verify    run a server in a sandbox and watch what it actually does\n"
+            "  decide    review and approve servers that changed since you trusted them\n\n"
+            "gawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
-            + "Run `mcpgawk <capability>` once subscribed; scan stays free and open-source.\n\n"
+            + "Run `mcpgawk <capability>` once subscribed. Scanning, behavioural verification\n"
+            + "and the runtime guard stay free and open-source.\n\n"
             + "Your subscription:\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in ACCOUNT_COMMANDS.items())
         ),
@@ -178,6 +183,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "url) so a local front-end can verify it by click — MAY carry secrets from "
                         "your config; kept off by default and never printed without this flag")
     s.add_argument("--verbose", action="store_true", help="show the full per-tool table, not just flagged tools")
+    s.add_argument("--full", action="store_true",
+                   help="print the full per-server surface even when a baseline makes "
+                        "what-changed the default view")
     s.add_argument("--detail", action="store_true",
                    help="print the full narrative report for EVERY server instead of the fleet "
                         "status list (the list is the default when more than one server is scanned)")
@@ -211,6 +219,20 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--list", action="store_true",
                    help="show which servers have changes you have not approved, and change nothing")
 
+    w = sub.add_parser(
+        "wrong",
+        help="mark a finding as a false positive — it stays listed as 'muted by you', never hidden",
+        description=(
+            "The false-positive affordance. `mcpgawk wrong <server> <tool>/<kind>` records that "
+            "YOU judged that finding wrong. It keeps appearing, labelled 'muted by you', because "
+            "a mistake you silenced must stay reviewable — absence of a finding is never safety, "
+            "including absence you asked for."))
+    w.add_argument("server", help="the server name as it appears in your config")
+    w.add_argument("finding_id", metavar="finding-id",
+                   help="the finding as the report prints it: <tool>/<kind>, "
+                        "e.g. read_note/injection:reader-directed")
+    w.add_argument("--undo", action="store_true", help="withdraw the mute")
+
     g = sub.add_parser(
         "guard",
         help="install a Claude Code hook that checks MCP tool calls against your approved baseline",
@@ -242,6 +264,25 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--fail-on-findings", action="store_true",
                    help="exit 1 if any finding fires (CI gate) — default reports and exits 0, "
                         "because a signal is a signal, not a verdict")
+
+    pn = sub.add_parser(
+        "panel",
+        help="the control panel — every agent, server, call and decision on this machine",
+        description="One window over the whole machine: which agents are covered, every MCP "
+                    "server and its state, what the runtime guard has actually seen, and anything "
+                    "waiting on you. Read-only — every action lives in `mcpgawk decide`.")
+    pn.add_argument("--port", type=int, default=7718, help="local port (default: 7718)")
+    pn.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
+
+    d = sub.add_parser(
+        "decide",
+        help="review and decide on servers that changed after you approved them (opens locally)",
+        description="The one screen a human is required for. Opens a LOCAL page showing each "
+                    "server that changed since you trusted it, what changed, and lets you approve "
+                    "or keep blocking. Read-only over your state until you click; approval needs "
+                    "the token printed here, so an agent cannot drive it.")
+    d.add_argument("--port", type=int, default=7717, help="local port (default: 7717)")
+    d.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
     sub.add_parser(
         "status",
@@ -449,6 +490,32 @@ def _approve(args) -> int:
     return 0
 
 
+def _wrong(args) -> int:
+    """`mcpgawk wrong` — design-contract item 4, the false-positive affordance.
+
+    Same human gate as `approve`: silencing a security finding is a trust decision, and a blocked
+    or flagged call is exactly when an agent would be asked to mute its way past one."""
+    from .baseline import approval_blocked_reason
+
+    blocked = approval_blocked_reason()
+    if blocked:
+        print(f"mcpgawk wrong: refusing — {blocked}", file=sys.stderr)
+        return 4
+    key = history.mute_finding(args.server, args.finding_id, undo=args.undo)
+    if key is None:
+        print(f"No tracked server matches {args.server!r}. Scan it first: mcpgawk scan",
+              file=sys.stderr)
+        return 2
+    if args.undo:
+        print(f"✓ unmuted {args.finding_id} on {args.server} — it reports normally again.")
+    else:
+        print(f"✓ muted {args.finding_id} on {args.server} as a false positive, on your judgement.")
+        print("  It stays LISTED as 'muted by you' — never hidden — so a wrong mute stays "
+              "reviewable. Undo: mcpgawk wrong "
+              f"{args.server} {args.finding_id} --undo")
+    return 0
+
+
 # The paid capabilities, reachable as `mcpgawk <capability>` when gawk Platform is installed.
 #
 # ONE BINARY, on purpose (2026-07-26). Two reasons, both load-bearing:
@@ -515,8 +582,10 @@ def _run_account_command(command: str, rest: list[str]) -> int:
     return run_account(command, rest)
 
 
+#: `verify` is NOT here any more. Task 0 (2026-07-28) made behavioural verification free, and
+#: leaving it on this list meant the engine shipped in the wheel behind a paywall the copy still
+#: advertised — the code moved and the gate did not.
 PLATFORM_CAPABILITIES = {
-    "verify": "run a server in a no-egress sandbox and reproduce misbehaviour",
     "enforce": "guard a live server, call by call",
     "monitor": "watch a server for drift after you approved it",
     "build": "generate a server from an OpenAPI spec (in development)",
@@ -586,6 +655,9 @@ def _protect() -> int:
                 protect.save_consent(choice)
     if choice == protect.LAUNCH_ALL:
         scan_args.append("--yes")
+        # We just asked, with more detail than the scan's own gate gives. Tell it not to ask again.
+        from .consent import CONSENT_GIVEN_ENV
+        os.environ[CONSENT_GIVEN_ENV] = "1"
 
     rc = _dispatch(scan_args)
 
@@ -608,9 +680,83 @@ def _protect() -> int:
         lines.append(f"  Runtime checking NOT enabled ({type(exc).__name__}: {exc})")
     guard_line = "\n".join(lines) if lines else "  No agent with a hook point found."
 
+    _front_door_verify(choice)
+
     store = history.load(history.default_path())
     print(protect.protection_report(store, guard_line, unchecked=[]))
     return rc
+
+
+def _front_door_verify(choice: str) -> None:
+    """Behavioural verification as part of the default flow — the free tier's promise is what
+    servers DO, and that must not require a second command (the product sentence says "on by
+    default"). Never blocks protection: every failure here degrades to the name-only posture
+    that `status` already reports honestly, and an incomplete run is recorded as INCOMPLETE,
+    never as clean.
+
+    Consent is the front door's own answer: local (stdio) servers are launched in the sandbox
+    only under LAUNCH_ALL — the same yes that let the scan launch them. REMOTE_ONLY verifies
+    remote servers only, which runs no code on this machine.
+    """
+    if os.environ.get("MCPGAWK_NO_VERIFY") == "1":
+        return
+    from . import verify as verify_mod
+    reason = verify_mod.unavailable_reason()
+    if reason is not None:
+        print(f"\n  Behavioural verification skipped: {reason}")
+        return
+    try:
+        import json as _json
+        import tempfile
+
+        from . import discover, protect, runlog
+        entries = discover.discover_servers()
+        allowed: dict[str, dict[str, Any]] = {}
+        for name, e in (entries or {}).items():
+            if not isinstance(e, dict):
+                continue
+            if e.get("command"):
+                if choice == protect.LAUNCH_ALL:
+                    allowed[name] = {k: e[k] for k in ("command", "args", "env") if k in e}
+            elif e.get("url"):
+                allowed[name] = {k: e[k] for k in ("url", "headers") if k in e}
+        if not allowed:
+            print("\n  Behavioural verification: nothing verifiable under the current consent —"
+                  "\n  local servers are only launched after your yes. Re-run `mcpgawk` in a"
+                  "\n  terminal to include them.")
+            return
+        print(f"\n  Verifying what {len(allowed)} server(s) actually DO, in the sandbox"
+              f"\n  (observed behaviour, not declared — a few minutes; Ctrl-C skips)…")
+        run_id = runlog.start_run("verify", target="fleet")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         prefix="mcpgawk-frontdoor-") as fh:
+            _json.dump({"mcpServers": allowed}, fh)
+            cfg = fh.name
+        try:
+            timeout = float(os.environ.get("MCPGAWK_VERIFY_TIMEOUT", "600"))
+            rc = verify_mod.run([cfg], timeout=timeout)
+        finally:
+            try:
+                os.unlink(cfg)
+            except OSError:
+                pass
+        if rc in (0, 1):
+            runlog.finish_run(run_id, runlog.FINDINGS if rc == 1 else runlog.OK,
+                              {"servers": len(allowed), "front_door": True})
+            print("  Observed behaviour recorded — decisions now rest on what servers DO."
+                  "\n  See `mcpgawk status`.")
+        elif rc in (4, 130):
+            runlog.finish_run(run_id, runlog.INCOMPLETE, {"rc": rc, "front_door": True})
+            why = "skipped by you" if rc == 130 else "timed out"
+            print(f"  Behavioural verification {why} — INCOMPLETE, so checks stay name-only"
+                  "\n  until `mcpgawk verify` finishes a run. `mcpgawk status` says so honestly.")
+        else:
+            runlog.finish_run(run_id, runlog.ERROR, {"rc": rc, "front_door": True})
+            print("  Behavioural verification did NOT complete — checks stay name-only."
+                  "\n  That posture is reported honestly in `mcpgawk status`.")
+    except Exception as exc:  # noqa: BLE001 — verification must never break protection
+        print(f"\n  Behavioural verification errored ({type(exc).__name__}) — checks stay"
+              "\n  name-only; protection is unaffected.")
 
 
 def _scan_target(raw: list[str]) -> str | None:
@@ -635,7 +781,9 @@ def main(argv: list[str] | None = None) -> int:
     """
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw or raw[0] != "scan":
-        return _dispatch(argv)
+        code = _dispatch(argv)
+        _staleness_advisory()
+        return code
 
     # Cheap, and it keeps the timeline honest: a scan killed by Ctrl-C last week should not still
     # read as "in progress" today.
@@ -650,13 +798,33 @@ def main(argv: list[str] | None = None) -> int:
     # a crash would have raised. Calling that `error` would make every drift detection look like a
     # tool failure in the timeline.
     runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK, {"exit_code": code})
+    _staleness_advisory()
     return code
+
+
+def _staleness_advisory() -> None:
+    """One stderr line when this install is stale (journey plan: every run, cached, never
+    load-bearing). Belt and braces around a module that already swallows everything: the hint
+    must never cost the run it rides on."""
+    try:
+        from . import staleness
+
+        line = staleness.advisory()
+        if line:
+            print(line, file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _dispatch(argv: list[str] | None = None) -> int:
     # Intercept the paid capabilities BEFORE argparse: their arguments are the pillar's own, and
     # the free parser must not try to validate them.
     raw = list(sys.argv[1:] if argv is None else argv)
+    # FREE, and dispatched before argparse for the same reason the paid capabilities are: the
+    # engine owns its own flags and the free parser must not try to validate them.
+    if raw and raw[0] == "verify":
+        from .verify import run as run_verify
+        return run_verify(raw[1:])
     if raw and raw[0] in PLATFORM_CAPABILITIES:
         return _run_platform_capability(raw[0], raw[1:])
     if raw and raw[0] in ACCOUNT_COMMANDS:
@@ -676,8 +844,19 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if args.cmd == "approve":
         return _approve(args)
 
+    if args.cmd == "wrong":
+        return _wrong(args)
+
     if args.cmd == "skills":
         return _skills(args)
+
+    if args.cmd == "panel":
+        from .panel import serve as panel_serve
+        return panel_serve(port=args.port, open_browser=not args.no_open)
+
+    if args.cmd == "decide":
+        from .decide import serve
+        return serve(port=args.port, open_browser=not args.no_open)
 
     if args.cmd == "status":
         from .status import collect_and_render
@@ -712,6 +891,13 @@ def _dispatch(argv: list[str] | None = None) -> int:
             shadow.setdefault(srv, []).extend(fs)
     labels = [_label_for(sn, m, entries.get(sn.name) or {}, args, shadow)
               for sn, m in zip(snaps, measurements)]
+
+    # Findings the human marked wrong (`mcpgawk wrong`): mark them muted — NEVER remove them —
+    # so every renderer, JSON included, shows them as 'muted by you' rather than absent.
+    try:
+        _mark_muted_findings(labels)
+    except Exception:                               # noqa: BLE001 — display state, never costs a scan
+        pass
 
     # --track: record locally and diff against the last sighting (rug-pull detection).
     drift_reports: dict[str, drift.DriftReport] = {}
@@ -855,26 +1041,89 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # count towards the exit code exactly as if the first pass had seen them.
             any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE")
                                          for r in refreshed.values())
+        _behavioural_capability_note()
         return 1 if (any_error or failed) else 0
 
     any_error = False
+    # DRIFT LEADS — design-contract item 2 (drift over inventory: the noise control). Once a
+    # baseline exists, the FIRST content of a tracked report is what changed since it — or one
+    # line saying nothing did — and the full surface sits behind --full. Errors, first sightings
+    # and re-identifications always render in full: "not shown" must never read as "checked clean".
+    lead_view = args.track and not (args.full or args.verbose or args.detail)
     for lab in labels:
-        print("\n" + render_cli(lab, verbose=args.verbose))
-        rep = drift_reports.get(lab["name"])
-        if rep:
-            print(drift.render(lab["name"], rep))
-        any_error = any_error or bool(lab["x-mcpgawk"].get("caveats"))
+        name = lab["name"]
+        caveats = bool(lab["x-mcpgawk"].get("caveats"))
+        any_error = any_error or caveats
+        rep = drift_reports.get(name)
+        if not lead_view:
+            print("\n" + render_cli(lab, verbose=args.verbose))
+            if rep:
+                print(drift.render(name, rep))
+            continue
+        if name in reidentified:
+            print(f"\n  ⛔ {name} now identifies itself as a DIFFERENT server "
+                  f"(was {reidentified[name]}). Its baseline does not carry over — treat it "
+                  f"as unreviewed.")
+            print("\n" + render_cli(lab, verbose=False))
+        elif rep:
+            # The change IS the report. What it gained/lost is quoted in the drift block; the
+            # rest of the surface — unchanged since approval — stays behind --full.
+            print("\n" + drift.render(name, rep))
+        elif name in new_baselines:
+            print(f"\n  ✓ {name}: baseline recorded — first sighting, nothing to diff yet. "
+                  f"What you are trusting:")
+            print("\n" + render_cli(lab, verbose=False))
+        elif caveats:
+            print("\n" + render_cli(lab, verbose=False))   # a failure is never summarised away
+        else:
+            n = lab["x-mcpgawk"]["tool_count"]
+            muted_n = sum(1 for s in (lab["x-mcpgawk"].get("bounded_signals") or [])
+                          if s.get("muted"))
+            muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
+                if muted_n else ""
+            print(f"\n  ✓ {name}: no change since your baseline "
+                  f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
     # Local (stdio) servers — launched this run or merely configured. Both inherit the same
     # ambient credentials the moment anything starts them, so both count towards that warning.
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
                      + sum(1 for _, e in skipped if e.get("command")))
-    print("\n" + render_summary(labels, local_servers=local_servers) + "\n")
+    if not lead_view or any(drift_reports) or any_error:
+        print("\n" + render_summary(labels, local_servers=local_servers) + "\n")
+    else:
+        print()
     # Scanning is not protection. A report with no next step is how the author finished a scan on
     # his own machine and stayed unprotected — the hook existed, worked, and was never installed
     # because nothing ever mentioned it. Only shown when it is actually actionable.
     if not _guard_is_installed():
         print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
+    _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
+
+
+def _behavioural_capability_note() -> None:
+    """B5 — never a silent fallback: a scan on a machine that cannot run behavioural checking
+    says so, in the same words `status` uses. Advisory only; it never fails the scan."""
+    try:
+        from .capability import unavailable_line
+
+        line = unavailable_line()
+        if line:
+            print(f"  ⚠ {line}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mark_muted_findings(labels: list[dict]) -> None:
+    """Stamp `muted: True` onto every bounded signal the human has recorded as wrong for that
+    server (matched by `<tool>/<kind>`, resolved through the server's aliases)."""
+    store = history.load()
+    for lab in labels:
+        muted_ids = history.muted(store, history.resolve(store, lab["name"]))
+        if not muted_ids:
+            continue
+        for s in (lab["x-mcpgawk"].get("bounded_signals") or []):
+            if f"{s.get('tool')}/{s.get('kind')}" in muted_ids:
+                s["muted"] = True
 
 
 def _guard_is_installed() -> bool:

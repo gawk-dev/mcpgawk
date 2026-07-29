@@ -84,8 +84,54 @@ def append(record: dict, path: str | None = None) -> bool:
         finally:
             os.close(fd)
         return True
-    except Exception:                              # noqa: BLE001 - see docstring: never raise
+    except Exception as exc:                       # noqa: BLE001 - see docstring: never raise
+        # Recorder self-evidence: a spool that drops records silently makes an internal-error
+        # storm indistinguishable from an idle machine — the exact confusion this file's own
+        # docstring exists to prevent, applied to the recorder itself. Best-effort by nature:
+        # if even the sidecar cannot be written, the failure really is environmental.
+        note_failure(f"{type(exc).__name__}: {exc}", path=target)
         return False
+
+
+#: Sidecar beside the spool: the recorder's own last failure. One line, overwritten — this is a
+#: health signal ("the row count may be incomplete since <ts>"), not a second log to rotate.
+ERR_SUFFIX = ".err"
+
+
+def note_failure(reason: str, path: str | None = None) -> None:
+    """Record that the recorder itself failed. NEVER raises; overwrites (last failure wins)."""
+    target = (path or spool_path()) + ERR_SUFFIX
+    try:
+        directory = os.path.dirname(target)
+        if directory:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+        line = json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            "reason": str(reason)[:300],
+        }, separators=(",", ":")) + "\n"
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:                              # noqa: BLE001 - best-effort by design
+        pass
+
+
+def recorder_health(path: str | None = None) -> dict | None:
+    """The last recorded recorder failure, or None when none is recorded.
+
+    None means "no failure NOTED", not "no failure happened" — the same absence-is-not-evidence
+    rule as everywhere else, which is why callers should render a returned failure loudly and
+    render None as nothing at all.
+    """
+    target = (path or spool_path()) + ERR_SUFFIX
+    try:
+        with open(target, encoding="utf-8", errors="replace") as fh:
+            item = json.loads(fh.readline().strip() or "null")
+        return item if isinstance(item, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def record_decision(*, server: str, tool: str, decision: str, adapter: str,
@@ -137,6 +183,41 @@ def read(limit: int = 500, path: str | None = None) -> list[dict]:
     return out
 
 
+def read_session(session: str, limit: int = 500, scan: int = 8000,
+                 path: str | None = None) -> list[dict]:
+    """Rows for ONE session, most recent first. Session memory must be read session-scoped:
+    a global row budget lets a busy PARALLEL session evict this one's earlier calls, and the
+    sequence check silently stops firing — the worst failure mode for a control is fading out
+    under load. Bounded by `scan` lines total, and the previous rotation generation (`.1`) is
+    consulted when the live file does not exhaust the budget, so rotating mid-session no longer
+    wipes the session's memory."""
+    target = path or spool_path()
+    out: list[dict] = []
+    budget = scan
+    for candidate in (target, target + ".1"):
+        if len(out) >= limit or budget <= 0:
+            break
+        try:
+            with open(candidate, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            if len(out) >= limit or budget <= 0:
+                break
+            budget -= 1
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("session") == session:
+                out.append(item)
+    return out
+
+
 def summarise(limit: int = 5000, path: str | None = None) -> dict:
     """Counts a human actually wants: how many calls were checked, how many denied, over how many
     sessions, and when we last saw anything. Used by `mcpgawk status` so 'is anything watching'
@@ -151,4 +232,7 @@ def summarise(limit: int = 5000, path: str | None = None) -> dict:
         "sessions": len(sessions),
         "servers": len(servers),
         "last_seen": rows[0].get("ts") if rows else None,
+        # Calls that arrived with no session identity: the sequence check cannot protect those,
+        # and that gap must be countable rather than a silent null in each row.
+        "no_session": sum(1 for r in rows if not r.get("session")),
     }

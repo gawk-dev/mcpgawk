@@ -422,13 +422,24 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     # be named as itself: filing dynamic-dispatch, tool-shadowing and server-card-mismatch under
     # "possible prompt-injection" (the old bug) is precisely the kind of report deviation that erodes
     # trust in a security tool. Lead phrase is chosen from the kind's family prefix.
+    live_signals = False
     for s in (x.get("bounded_signals") or []):
         kind = s.get("kind", "")
         family = kind.split(":", 1)[0]
         lead = _SIGNAL_LEAD_BY_KIND.get(kind) or _SIGNAL_LEAD.get(family, "review signal in")
+        if s.get("muted"):
+            # A muted finding is a HUMAN's judgement recorded via `mcpgawk wrong`. It stays on the
+            # report — absence-is-not-safety applies to our own mistakes too — but stops shouting.
+            lines.append(f"    ∙  muted by you: {lead} {s.get('tool', '?')} ({kind})")
+            continue
+        live_signals = True
         evidence = s.get("evidence")
         detail = f" — review: {evidence!r}" if evidence else ""
         lines.append(f"    ⚠  {lead} {s.get('tool', '?')} ({kind}){detail}")
+    if live_signals:
+        # Design-contract item 4: the false-positive affordance is discoverable at the moment of
+        # the false positive, not buried in --help.
+        lines.append(f"       wrong? keep it visible but muted:  mcpgawk wrong {label['name']} <tool>/<kind>")
 
     if verbose:
         lines.append(f"    coverage: {x['tool_count']} tools, {x['prompt_count']} prompts, {x['resource_count']} resources")

@@ -35,7 +35,7 @@ _SHAPE_DXT_MANIFEST = "dxt_manifest"      # {"name": ..., "server": {"mcp_config
 #: it up — or wiring one up without naming it here — fails the build in the same PR.
 SUPPORTED_CLIENTS: tuple[str, ...] = (
     "antigravity", "claude-code", "claude-desktop", "claude-desktop-extension", "codex", "cursor",
-    "gemini-cli", "kiro", "vscode", "windsurf",
+    "gemini-cli", "kimi", "kiro", "vscode", "windsurf",
 )
 
 #: The config SHAPES we know how to read. Same lock: a new shape needs a live test that proves
@@ -75,6 +75,9 @@ def _locations(platform: str) -> list[tuple[str, str, str]]:
     # Long tail — all the plain-`mcpServers` shape, pure data:
     add("gemini-cli", ".gemini/settings.json", ".gemini/settings.json", ".gemini/settings.json", _SHAPE_MCPSERVERS)
     add("kiro", ".kiro/settings/mcp.json", ".kiro/settings/mcp.json", ".kiro/settings/mcp.json", _SHAPE_MCPSERVERS)
+    # Kimi CLI: servers in ~/.kimi/mcp.json (Claude Desktop-compatible shape); its HOOKS live
+    # separately in ~/.kimi/config.toml — see agents.py.
+    add("kimi", ".kimi/mcp.json", ".kimi/mcp.json", ".kimi/mcp.json", _SHAPE_MCPSERVERS)
     add("antigravity",
         ".gemini/antigravity/mcp_config.json", ".gemini/antigravity/mcp_config.json",
         ".gemini/antigravity/mcp_config.json", _SHAPE_MCPSERVERS)

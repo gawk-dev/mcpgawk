@@ -41,7 +41,10 @@ def test_paid_capabilities_are_advertised_in_free_help():
     assert "pricing" in help_text
 
 
-@pytest.mark.parametrize("capability", ["verify", "enforce", "monitor", "build"])
+# `verify` left the paid set on 2026-07-28 (BUILD_PLAN Task 0): behavioural
+# verification is FREE. Kept out of this list deliberately — it used to be here, and a
+# stale entry would re-assert a paywall the product no longer has.
+@pytest.mark.parametrize("capability", ["enforce", "monitor", "build"])
 def test_paid_capability_on_a_free_install_exits_3_with_one_actionable_line(
     capability, no_platform, capsys
 ):

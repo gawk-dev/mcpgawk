@@ -24,8 +24,13 @@ HOOK_SCRIPT = Path(guard.hook_script_path())
 
 
 def _store(tmp_path: Path, servers: dict) -> Path:
+    """Written through the CANONICAL writer (history.save), which also regenerates the hot-path
+    projection the hook actually reads — a hand-written history.json alone is a store the hook
+    must refuse to enforce from."""
+    from mcpgawk import history
+
     p = tmp_path / "history.json"
-    p.write_text(json.dumps({"servers": servers}))
+    history.save({"servers": servers}, str(p))
     return p
 
 
@@ -89,10 +94,14 @@ def test_non_mcp_tools_are_not_our_business(tmp_path):
 
 
 def test_missing_or_corrupt_store_defers(tmp_path):
+    # A machine with NO store at all is simply a fresh machine: defer, and stay quiet.
     assert decide({"tool_name": "mcp__x__y"}, tmp_path / "absent.json") == (None, None)
+    # A store that exists but has no valid projection beside it: defer — loudly, not silently.
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
-    assert decide({"tool_name": "mcp__x__y"}, bad) == (None, None)
+    out, note = decide({"tool_name": "mcp__x__y"}, bad)
+    assert out is None
+    assert note is not None
 
 
 def test_alias_keyed_approval_is_found(tmp_path):
@@ -112,6 +121,68 @@ def test_the_guard_never_returns_allow(tmp_path):
         out, _ = decide({"tool_name": tool}, store)
         if out is not None:
             assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# --------------------------------------------------------------------------- the projection
+
+
+def test_a_deleted_projection_defers_never_allows(tmp_path):
+    """The hook enforces ONLY from the projection the canonical writer produced. If it is gone,
+    the hook must not fall back to re-reading history.json (that is the duplicated reader this
+    design retires) and must not enforce — defer, loudly."""
+    from mcpgawk.guard_hook import projection_path
+
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    denied, _ = decide({"tool_name": "mcp__figma__evil"}, store)
+    assert denied is not None, "sanity: with a fresh projection this call is denied"
+
+    projection_path(store).unlink()
+    out, note = decide({"tool_name": "mcp__figma__evil"}, store)
+    assert out is None, "a missing projection must defer, never enforce"
+    assert note is not None and "mcpgawk scan" in note, "the degraded state must be loud"
+
+
+def test_a_stale_projection_defers_never_allows(tmp_path):
+    """The projection is stamped with the stat of the store it was derived from. A store written
+    WITHOUT regenerating the projection (hand edit, an older version) makes the stamp mismatch —
+    and enforcing yesterday's surface would be worse than deferring."""
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    # Rewrite the store BEHIND the canonical writer's back: content, size and mtime all move,
+    # the projection's source stamp does not.
+    store.write_text(json.dumps({"servers": {"figma": _approved({"get_file": "h1", "evil": "h2"})}}))
+
+    out, note = decide({"tool_name": "mcp__figma__evil"}, store)
+    assert out is None, "a stale projection must defer, never enforce"
+    assert note is not None and "STALE" in note
+
+
+def test_the_canonical_writer_regenerates_the_projection(tmp_path):
+    """Every history.save — scan's record, approve, baseline.publish — refreshes the projection,
+    so the loud degraded state above heals on the next normal command."""
+    from mcpgawk import history
+
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    store_dict = json.loads(store.read_text())
+    store_dict["servers"]["figma"]["approved"]["tools"]["evil"] = "h2"
+    history.save(store_dict, str(store))            # the canonical writer runs again
+
+    out, note = decide({"tool_name": "mcp__figma__evil"}, store)
+    assert out is None, "the tool is approved in the regenerated projection"
+    assert note is None
+    denied, _ = decide({"tool_name": "mcp__figma__other"}, store)
+    assert denied is not None, "enforcement is live again after regeneration"
+
+
+def test_the_projection_name_matches_the_canonical_writer(tmp_path):
+    """guard_hook cannot import the package, so PROJECTION_NAME is repeated there. Pin the two
+    constants together — if they drift, the hook silently defers forever."""
+    from mcpgawk import history
+    from mcpgawk import guard_hook
+
+    assert guard_hook.PROJECTION_NAME == history.PROJECTION_NAME
+    store = _store(tmp_path, {"s": _approved({"t": "h"})})
+    assert Path(history.projection_path(str(store))) == guard_hook.projection_path(store)
+    assert guard_hook.projection_path(store).is_file()
 
 
 # --------------------------------------------------------------------------- the real process

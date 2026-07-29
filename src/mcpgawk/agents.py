@@ -80,6 +80,51 @@ def _parse_codex(event: dict) -> tuple[str | None, dict]:
     return _parse_claude(event)
 
 
+def _parse_kimi(event: dict) -> tuple[str | None, dict]:
+    """Kimi CLI hooks (Beta): 13 lifecycle events modelled on Claude Code's, including
+    `PreToolUse` with the same tool_name/tool_input payload for the fields we read
+    (docs/roadmap-agent-coverage-2026-07-28.md)."""
+    return _parse_claude(event)
+
+
+def _parse_windsurf(event: dict) -> tuple[str | None, dict]:
+    """Windsurf `pre_mcp_tool_use` — the only agent in this set that shares NO field with the
+    others. Its payload nests everything under `tool_info` and names the parts differently:
+
+        {"agent_action_name": "pre_mcp_tool_use",
+         "tool_info": {"mcp_server_name": "github",
+                       "mcp_tool_name": "create_issue",
+                       "mcp_tool_arguments": {...}}}
+
+    Verified against docs.devin.ai/desktop/cascade/hooks, not inferred. This adapter originally
+    reused the Claude parser, which reads a top-level `tool_name` that does not exist here — so
+    every Windsurf call parsed as "not an MCP tool", was never judged, was never even logged, and
+    the hook exited 0. It installed cleanly and `status` reported Windsurf as COVERED while
+    checking nothing, which is worse than having no adapter at all.
+
+    Windsurf also supplies the server SEPARATELY and the tool name BARE (`create_issue`, not
+    `mcp__github__create_issue`), so the canonical name is composed here. Composing is safe: both
+    halves come from the agent, and `parse_mcp_tool_name` splits on the first `__` after the
+    prefix, so a tool name containing `__` survives while a server name containing one would not —
+    the same constraint every other client's own joining convention already imposes.
+    """
+    info = event.get("tool_info")
+    if not isinstance(info, dict):
+        return None, {}
+    server, tool = info.get("mcp_server_name"), info.get("mcp_tool_name")
+    if not isinstance(server, str) or not isinstance(tool, str) or not server or not tool:
+        return None, {}
+    args = info.get("mcp_tool_arguments")
+    return f"mcp__{server}__{tool}", (args if isinstance(args, dict) else {})
+
+
+def _parse_gemini(event: dict) -> tuple[str | None, dict]:
+    """Gemini CLI `BeforeTool`: `tool_name` + `tool_input` (a real object, unlike Cursor's
+    string), alongside `mcp_context`/`original_request_name`/`session_id`/`cwd`, which we do not
+    need (docs/roadmap-agent-coverage-2026-07-28.md)."""
+    return _parse_claude(event)
+
+
 # --------------------------------------------------------------------------------------------- #
 # verdict writers
 # --------------------------------------------------------------------------------------------- #
@@ -103,6 +148,24 @@ def _deny_codex(reason: str) -> dict:
                                    "permissionDecisionReason": reason}}
 
 
+def _deny_kimi(reason: str) -> dict:
+    """Kimi blocks on EXIT CODE 2 (see guard_hook.DENY_BY_EXIT); the JSON is emitted alongside in
+    the Claude-compatible shape its hook system is modelled on, so the reason reaches any log."""
+    return _deny_claude(reason)
+
+
+def _deny_gemini(reason: str) -> dict:
+    """Gemini CLI's documented verdict: `{"decision": "deny", "reason": ...}` — its own shape, not
+    Claude's. Exit 2 also denies, and we emit both (belt and braces, like Cursor)."""
+    return {"decision": "deny", "reason": reason}
+
+
+def _deny_windsurf(reason: str) -> dict:
+    """Windsurf's only documented deny channel is EXIT CODE 2 (guard_hook.DENY_BY_EXIT); the JSON
+    is informational — the reason a human or log reads, not the verdict mechanism."""
+    return {"decision": "deny", "reason": reason}
+
+
 ADAPTERS: dict[str, AgentAdapter] = {
     "claude-code": AgentAdapter(
         key="claude-code", label="Claude Code",
@@ -116,6 +179,25 @@ ADAPTERS: dict[str, AgentAdapter] = {
         key="codex", label="Codex",
         config=Path.home() / ".codex" / "hooks.json",
         fmt="codex", parse=_parse_codex, deny=_deny_codex),
+    "kimi": AgentAdapter(
+        key="kimi", label="Kimi CLI",
+        # The only TOML hook config so far — [[hooks]] tables in the main config file, not a
+        # dedicated hooks.json. guard.py has a dedicated text-preserving writer for it.
+        config=Path.home() / ".kimi" / "config.toml",
+        fmt="kimi", parse=_parse_kimi, deny=_deny_kimi),
+    "gemini-cli": AgentAdapter(
+        key="gemini-cli", label="Gemini CLI",
+        # Hooks live in the same settings.json discover already reads servers from; the event is
+        # BeforeTool (not PreToolUse) — see guard._gemini_install.
+        config=Path.home() / ".gemini" / "settings.json",
+        fmt="gemini", parse=_parse_gemini, deny=_deny_gemini),
+    "windsurf": AgentAdapter(
+        key="windsurf", label="Windsurf",
+        # USER-level hooks only. The root-protected system level (/Library/... , /etc/windsurf)
+        # is deliberately out of v1 scope — an enterprise concern, sequenced after the solo
+        # journey (docs/enterprise-sso-rbac-2026-07-27.md).
+        config=Path.home() / ".codeium" / "windsurf" / "hooks.json",
+        fmt="windsurf", parse=_parse_windsurf, deny=_deny_windsurf),
 }
 
 #: Agents with MCP support but NO documented pre-execution interception point. Listed so `status`

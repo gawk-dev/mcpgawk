@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -216,7 +218,7 @@ def status(path: Path | None = None) -> str:
     if not target.is_file():
         return (f"mcpgawk guard: NOT installed (no {target}).\n"
                 f"  `mcpgawk guard install` adds a PreToolUse hook that checks every MCP tool "
-                f"call against your approved baseline.")
+                f"call against your approved baseline and the behaviour verify observed.")
     if not is_installed(settings):
         others = sum(len(g.get("hooks") or []) for g in _pretooluse_groups(settings)
                      if isinstance(g, dict))
@@ -231,7 +233,8 @@ def status(path: Path | None = None) -> str:
              f"  matcher: {MCP_MATCHER} (MCP tool calls only)",
              f"  timeout: {HOOK_TIMEOUT_S}s",
              f"  script:  {script}{'' if healthy else '  ← MISSING, the hook cannot run'}"]
-    lines.append("  decision: local — reads your approved baseline; nothing leaves this machine.")
+    lines.append("  decision: local — reads your approved baseline and the behavioural profile "
+                 "verify recorded; nothing leaves this machine.")
     return "\n".join(lines)
 
 
@@ -309,14 +312,15 @@ def _cursor_install(adapter, python: str | None) -> tuple[dict, int]:
     return settings, len(kept) - 1
 
 
-def _nested_install(adapter, python: str | None) -> tuple[dict, int]:
+def _nested_install(adapter, python: str | None, event: str = "PreToolUse") -> tuple[dict, int]:
     """Claude Code and Codex share a schema: hooks -> PreToolUse -> matcher groups -> hooks[].
-    Confirmed against both vendors' docs, so one writer serves both."""
+    Confirmed against both vendors' docs, so one writer serves both. Gemini CLI uses the same
+    nesting under its own event name, `BeforeTool` — same writer, different `event`."""
     settings = _load_settings(adapter.config)
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise GuardError(f'{adapter.config}: "hooks" is not an object — refusing to overwrite it.')
-    groups = hooks.get("PreToolUse")
+    groups = hooks.get(event)
     groups = groups if isinstance(groups, list) else []
     cleaned: list = []
     preserved = 0
@@ -334,14 +338,126 @@ def _nested_install(adapter, python: str | None) -> tuple[dict, int]:
                     "hooks": [{"type": "command",
                                "command": hook_command_for(adapter, python),
                                "timeout": HOOK_TIMEOUT_S}]})
-    hooks["PreToolUse"] = cleaned
+    hooks[event] = cleaned
     return settings, preserved
 
 
-_WRITERS = {"cursor": _cursor_install, "claude": _nested_install, "codex": _nested_install}
+def _gemini_install(adapter, python: str | None) -> tuple[dict, int]:
+    """Gemini CLI: the Claude-style nesting under its own event name, `BeforeTool` — inside the
+    same settings.json that holds the user's mcpServers, which must survive untouched."""
+    return _nested_install(adapter, python, event="BeforeTool")
+
+
+def _windsurf_install(adapter, python: str | None) -> tuple[dict, int]:
+    """Windsurf (user level): flat entries under hooks.pre_mcp_tool_use — the Cursor shape without
+    failClosed (Windsurf's deny channel is the hook's exit code, not a permission field)."""
+    settings = _load_settings(adapter.config)
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise GuardError(f'{adapter.config}: "hooks" is not an object — refusing to overwrite it.')
+    existing = hooks.get("pre_mcp_tool_use")
+    kept = [h for h in existing if not (isinstance(h, dict) and _is_ours(h))] \
+        if isinstance(existing, list) else []
+    kept.append({"command": hook_command_for(adapter, python), "timeout": HOOK_TIMEOUT_S})
+    hooks["pre_mcp_tool_use"] = kept
+    return settings, len(kept) - 1
+
+
+_WRITERS = {"cursor": _cursor_install, "claude": _nested_install, "codex": _nested_install,
+            "gemini": _gemini_install, "windsurf": _windsurf_install}
+
+# ------------------------------------------------------------------ Kimi CLI: the TOML config #
+# Kimi's hooks live as [[hooks]] tables inside its MAIN config (~/.kimi/config.toml) — the first
+# hook config that is not JSON, and one whose file also holds unrelated user settings. There is no
+# stdlib TOML *writer*, and a parse-and-re-emit would rewrite the user's formatting and comments —
+# for a file we do not own, that is unacceptable. So the writer is textual: our entries live in one
+# fenced, marker-delimited block appended to the file; install replaces/attaches exactly that
+# block, uninstall removes exactly that block, and everything outside it is preserved BYTE FOR
+# BYTE. Both operations validate the result parses (tomllib) before writing.
+
+_KIMI_BEGIN = f"# >>> {MARKER} >>>"
+_KIMI_END = f"# <<< {MARKER} <<<"
+
+
+def _kimi_block(adapter, python: str | None) -> str:
+    cmd = hook_command_for(adapter, python)
+    assert "'" not in cmd, "TOML literal string cannot carry a single quote"
+    return (f"{_KIMI_BEGIN}\n"
+            f"# Installed by mcpgawk guard; edits inside these markers are overwritten.\n"
+            f"# Blocks a tool call that deviates from your approved baseline (exit 2).\n"
+            f"[[hooks]]\n"
+            f'event = "PreToolUse"\n'
+            f'matcher = "{MCP_MATCHER}"\n'
+            f"command = '{cmd}'\n"
+            f"timeout = {HOOK_TIMEOUT_S}\n"
+            f"{_KIMI_END}\n")
+
+
+def _kimi_strip(text: str) -> str:
+    """Remove our fenced block and NOTHING else — the newline before the fence belongs to the
+    user's own last line and must survive, or uninstall would not be byte-identical."""
+    return re.sub(rf"{re.escape(_KIMI_BEGIN)}.*?{re.escape(_KIMI_END)}\n?", "", text,
+                  flags=re.DOTALL)
+
+
+def _kimi_read(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError as exc:
+        raise GuardError(f"{path} is not readable: {exc}") from exc
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise GuardError(f"{path} is not readable TOML — refusing to touch it: {exc}") from exc
+    return text
+
+
+def _kimi_write_text(path: Path, text: str) -> None:
+    try:
+        tomllib.loads(text)                          # never install a config that breaks the agent
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover — our own block is static
+        raise GuardError(f"internal error: generated TOML does not parse: {exc}") from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".mcpgawk-", suffix=".toml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _kimi_install(adapter, python: str | None) -> str:
+    already = is_installed_for(adapter)
+    text = _kimi_read(adapter.config)
+    kept = _kimi_strip(text)
+    joint = "" if (not kept or kept.endswith("\n")) else "\n"
+    _backup(adapter.config)
+    _kimi_write_text(adapter.config, kept + joint + _kimi_block(adapter, python))
+    return f"  {adapter.label}: {'updated' if already else 'installed'} → {adapter.config}"
+
+
+def _kimi_uninstall(adapter) -> str:
+    if not adapter.config.is_file():
+        return f"  {adapter.label}: nothing installed"
+    text = _kimi_read(adapter.config)
+    stripped = _kimi_strip(text)
+    if stripped == text:
+        return f"  {adapter.label}: nothing installed"
+    _backup(adapter.config)
+    _kimi_write_text(adapter.config, stripped)
+    return f"  {adapter.label}: removed → {adapter.config}"
 
 
 def is_installed_for(adapter) -> bool:
+    if adapter.fmt == "kimi":
+        try:
+            return adapter.config.is_file() and MARKER in adapter.config.read_text(encoding="utf-8")
+        except OSError:
+            return False
     try:
         settings = _load_settings(adapter.config)
     except GuardError:
@@ -353,6 +469,8 @@ def install_for(adapter, *, python: str | None = None) -> str:
     """Install into ONE agent. Same guarantees as the Claude Code path: other vendors' hooks are
     preserved, the previous config is backed up, and the write is atomic — a half-written agent
     config leaves the user unable to start anything."""
+    if adapter.fmt == "kimi":
+        return _kimi_install(adapter, python)
     already = is_installed_for(adapter)
     settings, preserved = _WRITERS[adapter.fmt](adapter, python)
     backup = _backup(adapter.config)
@@ -368,6 +486,8 @@ def install_for(adapter, *, python: str | None = None) -> str:
 
 def uninstall_for(adapter) -> str:
     """Remove ONLY our entries from one agent."""
+    if adapter.fmt == "kimi":
+        return _kimi_uninstall(adapter)
     if not adapter.config.is_file():
         return f"  {adapter.label}: nothing installed"
     settings = _load_settings(adapter.config)

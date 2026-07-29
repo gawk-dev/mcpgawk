@@ -1,0 +1,33 @@
+{
+  "name": "@gawk/verify",
+  "version": "0.0.1",
+  "description": "Behavioural MCP verifier: run every tool in a no-egress sandbox and convict data exfiltration with reproduced evidence.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "gawk-verify": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@gawk/oracle": "file:///Users/srinathprasannancs/devtools/mcpgawk/packages/oracle",
+    "@gawk/sandbox": "file:///Users/srinathprasannancs/devtools/mcpgawk/packages/sandbox",
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "private": true,
+  "devDependencies": {},
+  "optionalDependencies": {},
+  "pnpm": {}
+}

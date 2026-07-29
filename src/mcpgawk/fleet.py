@@ -110,6 +110,12 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             # so anything that later appears at that path is executed without being asked about
             # again. That is a standing invitation, not a dead link.
             return "UNREACHABLE", "its program no longer exists — still configured, so anything at that path would run"
+        # NOT YET: surfacing the server's own reason here is worth doing — a config pointing at a
+        # deleted file reads only as "no MCP endpoint found" while the server's stderr named the
+        # missing path. Attempted 2026-07-28 and backed out: redact() mangles ordinary paths
+        # (`python@3.14` -> `[REDACTED]`) and the useful clause sits at the END of a long
+        # interpreter path, so the row read worse than this. Needs a trimmer that keeps the
+        # message and a redactor that does not fire on paths. probe.py already CAPTURES it.
         return "UNREACHABLE", "no MCP endpoint found"
 
     flags = x.get("risk_flags") or {}

@@ -57,10 +57,13 @@ def test_the_denial_never_hands_the_agent_a_bypass(tmp_path):
     """The denial goes into the AGENT'S CONTEXT. It is a prompt to a model, so it must not contain
     an executable remedy — the previous wording ended '...run `mcpgawk approve <server>` if you
     accept the change', and an agent did exactly that."""
+    from mcpgawk import history
+
     store = tmp_path / "history.json"
-    store.write_text(
-        '{"servers": {"srv": {"approved": {"tools": {"safe_tool": "h1"}}, "aliases": ["srv"]}}}',
-        encoding="utf-8")
+    # Through the canonical writer, so the hot-path projection the hook enforces from exists.
+    history.save(
+        {"servers": {"srv": {"approved": {"tools": {"safe_tool": "h1"}}, "aliases": ["srv"]}}},
+        str(store))
     out, _ = guard_hook.decide(
         {"tool_name": "mcp__srv__brand_new_tool", "tool_input": {}}, store_path=store)
     assert out is not None, "an unapproved tool must be denied"

@@ -13,10 +13,17 @@ The plan and prompt go to STDERR so `--json` stdout stays clean; the reply is re
 """
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any, Callable
 
 Target = tuple[str, dict[str, Any]]
+
+
+#: Set by the front door once the user has answered the launch question, so the scan underneath
+#: does not ask it a second time. Never a way to SKIP consent — it is only honoured together with
+#: an explicit yes, and the front door sets it only after a real answer.
+CONSENT_GIVEN_ENV = "MCPGAWK_CONSENT_GIVEN"
 
 
 def _format(name: str, entry: dict[str, Any]) -> str:
@@ -49,6 +56,12 @@ def gate_stdio_consent(
         return list(targets)  # nothing to spawn — no consent needed
 
     err = sys.stderr if err is None else err  # resolved at CALL time (so capsys/redirection works)
+    # ALREADY ASKED. The front door (`mcpgawk`) puts this exact question to the user, with fuller
+    # disclosure, and remembers the answer. Re-announcing here made a first run ask, get an answer,
+    # and then immediately restate the warning — which reads as though the answer was ignored and
+    # quietly undermines the "asked once" promise the prompt makes.
+    if os.environ.get(CONSENT_GIVEN_ENV) == "1" and assume_yes:
+        return list(targets)
     isatty = sys.stdin.isatty() if stdin_isatty is None else stdin_isatty
     n = len(stdio)
     print(f"\n⚠  {n} local server{'s' if n != 1 else ''} would be LAUNCHED to scan "

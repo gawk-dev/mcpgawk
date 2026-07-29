@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from .servercard import fetch_card
 from .transport import Candidate as _Candidate
+
+#: Servers colour their output; a colour code inside an error message is noise, not information.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 @dataclass
@@ -172,13 +176,53 @@ def _kind_of(exc: BaseException) -> str:
 
 async def probe_stdio(name: str, command: str, args: list[str] | None = None,
                       env: dict[str, str] | None = None, timeout: float = DEFAULT_TIMEOUT) -> ServerSnapshot:
-    async def _do():
-        params = StdioServerParameters(command=command, args=args or [],
-                                       env={**os.environ, **(env or {})})
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                return await _snapshot(session, name, "stdio")
-    return await _bounded(_do, name, "stdio", timeout)
+    """Launch a local MCP server and read its surface.
+
+    The server's STDERR is captured rather than allowed through to the terminal. Two reasons, and
+    the second is the one that matters: a first run showed a user npm deprecation warnings and a
+    "new version of npm available" notice in the middle of a security report, which reads as a
+    broken tool — while the ONE genuinely useful line ("can't open file '/opt/notes/server.py'")
+    was discarded into the same noise and the failure was reported only as "no MCP endpoint found".
+    So we swallow it on success and USE it on failure.
+    """
+    import tempfile
+
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
+        async def _do():
+            params = StdioServerParameters(command=command, args=args or [],
+                                           env={**os.environ, **(env or {})})
+            async with stdio_client(params, errlog=errlog) as (read, write):
+                async with ClientSession(read, write) as session:
+                    return await _snapshot(session, name, "stdio")
+
+        snap = await _bounded(_do, name, "stdio", timeout)
+        if snap.error:
+            detail = _stderr_tail(errlog)
+            if detail:
+                snap = replace(snap, error=f"{snap.error} — the server said: {detail}")
+        return snap
+
+
+def _stderr_tail(errlog, limit: int = 200) -> str:
+    """The last line the server printed that looks like a real message.
+
+    Only consulted when the probe FAILED, so package-manager chatter on a healthy start is never
+    shown. Trailing blank lines and ANSI are stripped so the message reads as a sentence."""
+    try:
+        errlog.seek(0)
+        raw = errlog.read()
+    except (OSError, ValueError):
+        return ""
+    lines = [_ANSI.sub("", ln).strip() for ln in raw.splitlines()]
+    lines = [ln for ln in lines if ln and "npm notice" not in ln.lower()]
+    if not lines:
+        return ""
+    # REDACT AT CAPTURE. This is a failing server's stderr — untrusted, unbounded text that
+    # routinely carries connection strings and tokens, and it is about to travel into a label that
+    # can be exported as JSON and read by an agent. Redacting here means the raw text never
+    # propagates, rather than relying on every downstream consumer to remember.
+    from .redact import redact
+    return (redact(lines[-1]) or "")[:limit]
 
 
 def _no_redirect_http_client(headers=None, timeout=None, auth=None):
