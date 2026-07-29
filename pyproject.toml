@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.17"
+version = "0.1.18"
 description = "A local-first CLI that measures what an MCP server costs and what it can do. Nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,11 @@ packages = ["src/mcpgawk"]
 # hatchling honours .gitignore, and `dist/` is ignored repo-wide — which silently dropped
 # the compiled verify engine from the 0.1.16 wheel while shipping its node_modules. The
 # artifacts field exists precisely to include VCS-ignored build products in the wheel.
-artifacts = ["src/mcpgawk/_bundled/**"]
+artifacts = ["src/mcpgawk/_bundled/**", "!**/*.d.ts", "!**/*.map"]
+# TypeScript declaration and sourcemap files are development artefacts, not runtime: node
+# executes .js only. Excluding them also keeps compiled-away attribution headers (tsc strips
+# comments from generated .d.ts) from shipping as header-less derived members.
+exclude = ["src/mcpgawk/_bundled/**/*.d.ts", "src/mcpgawk/_bundled/**/*.map"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # The wheel ships a derived Apache-2.0 module (adapters/pulled/invariant_redact.py), so it
