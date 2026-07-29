@@ -33,7 +33,10 @@ import re
 import shutil
 import sys
 import tempfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:                     # Python 3.10: tomllib landed in 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Any
 
