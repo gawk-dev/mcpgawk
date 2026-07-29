@@ -178,6 +178,65 @@ def _spark(series: list[int], w: int = 120, h: int = 26) -> str:
             f'<polyline points="{pts}"/></svg>')
 
 
+def activity_rows(limit: int = 2000) -> list[dict]:
+    """Every logged event, newest first, with the five questions answered on each row:
+    WHEN (ts), WHERE (server), WHAT (tool), the decision and WHY (basis; full reason for a deny),
+    HOW/WHO (agent adapter + session). Reads the spool — the one record every path writes to.
+
+    The deny REASON is reconstructed from the shared decision core rather than stored, because the
+    free spool records metadata not prose (its own rule) — but the reason a declared-tier deny
+    fires is a pure function of (server, tool), so it can be shown without having been logged.
+    """
+    from . import spool
+    try:
+        rows = spool.read(limit=limit)
+    except Exception:                              # noqa: BLE001 — a view must not crash on its data
+        return []
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        decision = r.get("decision")
+        why = r.get("reason")
+        if not why and decision == "deny":
+            try:
+                from . import decision as _dec
+                why = _dec.deny_reason(str(r.get("server")), str(r.get("tool")))
+            except Exception:                      # noqa: BLE001
+                why = None
+        out.append({
+            "when": r.get("ts"), "server": r.get("server"), "tool": r.get("tool"),
+            "decision": decision, "basis": r.get("basis"),
+            "agent": r.get("adapter"), "session": r.get("session"), "why": why,
+        })
+    return out
+
+
+def export_log_jsonl(path: str | None = None) -> bytes:
+    """The raw append-only log, verbatim — the same bytes `cat ~/.mcpgawk/calls.jsonl` shows."""
+    from . import spool
+    target = path or spool.spool_path()
+    try:
+        with open(target, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+def export_log_csv(limit: int = 100000) -> bytes:
+    """The log as CSV — every row, every field, for a spreadsheet or an auditor."""
+    import csv
+    import io
+    rows = activity_rows(limit=limit)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["when", "server", "tool", "decision", "basis", "agent", "session", "why"])
+    for r in rows:
+        w.writerow([r.get(k) or "" for k in
+                    ("when", "server", "tool", "decision", "basis", "agent", "session", "why")])
+    return buf.getvalue().encode("utf-8")
+
+
 def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
     """Per-tool join of what a server DECLARES against what verify OBSERVED — task 4's view.
 
@@ -191,24 +250,35 @@ def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
     approved = set(detail.get("approved_tools") or [])
     raw_ann = detail.get("annotations")
     annotations = raw_ann if isinstance(raw_ann, dict) else {}
+
+    def bare(key: str) -> str:
+        # The measured store namespaces item keys by kind ("tool.vault_search"); the behaviour
+        # profile records the wire name ("vault_search"). Join on the wire name — without this,
+        # one real tool rendered as two rows: an approved-but-unobserved ghost and a
+        # gone-but-convicted twin. Found the first time real evidence flowed through this view.
+        return key[5:] if key.startswith("tool.") else key
+
     rows = []
+    joined: set[str] = set()
     for tool in current:
+        name = bare(tool)
+        joined.add(name)
         ann = annotations.get(tool) if isinstance(annotations.get(tool), dict) else {}
         ro = ann.get("readOnlyHint")
         declared = "read-only" if ro is True else ("writes" if ro is False else "undeclared")
-        sig = obs.get(tool) if isinstance(obs.get(tool), dict) else {}
+        sig = obs.get(name) if isinstance(obs.get(name), dict) else {}
         seen = [k for k in ("source", "sink") if sig.get(k) is True]
         rows.append({
-            "tool": tool,
+            "tool": name,
             "baseline": "approved" if tool in approved else "added",
             "declared": declared,
             "observed": "+".join(seen) if seen else None,
         })
     for tool, sig in obs.items():
-        if tool in current or not isinstance(sig, dict):
+        if bare(tool) in joined or not isinstance(sig, dict):
             continue
         seen = [k for k in ("source", "sink") if sig.get(k) is True]
-        rows.append({"tool": tool, "baseline": "gone", "declared": "no longer exposed",
+        rows.append({"tool": bare(tool), "baseline": "gone", "declared": "no longer exposed",
                      "observed": "+".join(seen) if seen else None})
     return rows
 
@@ -249,7 +319,34 @@ def sessions_summary(rows: list[dict]) -> list[dict]:
     return out
 
 
-def render(d: dict[str, Any]) -> str:
+def _action_bar(token: str, action: dict | None) -> str:
+    """The buttons that make this a control surface, not a report: run a scan, verify the fleet.
+    Pure POST forms (no script — the CSP forbids it), each carrying the session token so an agent
+    that opens this page cannot press them."""
+    if not token:
+        return ""                                # read-only mode (no token) shows no actions
+    action = action or {}
+    running = action.get("running")
+    banner = ""
+    if running:
+        banner = (f'<div class="abanner run">Running {_esc(action.get("label"))}… '
+                  'this can take a minute. Reload to see the result.</div>')
+    elif action.get("message"):
+        banner = f'<div class="abanner done">{_esc(action.get("message"))}</div>'
+    dis = " disabled" if running else ""
+    tok = _esc(token)
+    return f"""{banner}
+<form method="POST" action="/" style="display:inline">
+  <input type="hidden" name="token" value="{tok}">
+  <button class="act-btn" name="act" value="scan"{dis}>Re-scan</button>
+</form>
+<form method="POST" action="/" style="display:inline">
+  <input type="hidden" name="token" value="{tok}">
+  <button class="act-btn" name="act" value="verify"{dis}>Verify fleet (sandbox)</button>
+</form>"""
+
+
+def render(d: dict[str, Any], token: str = "", action: dict | None = None) -> str:
     """The panel.
 
     Built against how LiteLLM, OpenRouter, Snyk and Stainless actually present this, not invented:
@@ -440,10 +537,50 @@ def render(d: dict[str, Any]) -> str:
                    f'showing less than the whole picture.</div>'
                    for k, v in (d.get("errors") or {}).items())
 
+    # Activity, STRUCTURED — summary, then what needs your eyes, then the full record. A flat log
+    # buries the one deny that matters under a thousand identical allows; a security view leads
+    # with the exception.
+    all_acts = activity_rows(limit=2000)
+    notable = [a for a in all_acts if a.get("decision") == "deny"]
+
+    def _act_row(a: dict, expand_why: bool = False) -> str:
+        deny = a.get("decision") == "deny"
+        why = a.get("why") or ""
+        if deny and why:
+            why_cell = (f'<div class="whyfull">{_esc(why)}</div>' if expand_why else
+                        f'<details><summary class="whysum">show</summary>'
+                        f'<div class="whyfull">{_esc(why)}</div></details>')
+        else:
+            why_cell = _esc(why or "—")
+        return (f'<tr><td class="dim">{_esc(str(a.get("when") or "")[:19])}</td>'
+                f'<td class="dim">{_esc(a.get("agent") or "—")}</td>'
+                f'<td class="nm">{_esc(a.get("server") or "")}.{_esc(a.get("tool") or "")}</td>'
+                f'<td><span class="chip {"bad" if deny else "dim"}">'
+                f'{_esc(a.get("decision") or "")}</span></td>'
+                f'<td class="dim">{_esc(a.get("basis") or "")}</td><td>{why_cell}</td></tr>')
+
+    act_summary = act if isinstance(act, dict) else {}
+    span_first = all_acts[-1].get("when") if all_acts else None
+    span_last = all_acts[0].get("when") if all_acts else None
+    acts_notable = "".join(_act_row(a, expand_why=True) for a in notable) or \
+        '<tr><td colspan="6" class="dim">No calls have been blocked. Nothing has drifted or ' \
+        'overstepped its approved baseline.</td></tr>'
+    acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
+        '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
+
+    def _dec_action(k: str) -> str:
+        if not token:
+            return '<span class="dim">approve in your terminal</span>'
+        return (f'<form method="POST" action="/" style="display:inline">'
+                f'<input type="hidden" name="token" value="{_esc(token)}">'
+                f'<input type="hidden" name="key" value="{_esc(k)}">'
+                f'<button class="act-btn sm" name="act" value="approve">Trust this change</button>'
+                f'</form>')
     dec = "".join(f'<tr><td class="nm">{_esc(_h.display_name(store, k))}</td>'
-                  f'<td><span class="chip bad">blocked · waiting on you</span></td></tr>'
+                  f'<td><span class="chip bad">blocked · waiting on you</span></td>'
+                  f'<td>{_dec_action(k)}</td></tr>'
                   for k in pending) or \
-          '<tr><td colspan="2" class="dim">Nothing is waiting on you.</td></tr>'
+          '<tr><td colspan="3" class="dim">Nothing is waiting on you.</td></tr>'
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>mcpgawk</title><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -471,8 +608,9 @@ h1{{font-size:19px;font-weight:660;letter-spacing:-.02em;margin:0}}
 padding:5px 11px;border-radius:3px;background:var(--pane)}}
 input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}
 .pane{{display:none}}
-#n0:checked~main #p0,#n1:checked~main #p1,#n2:checked~main #p2,#n3:checked~main #p3{{display:block}}
+#n0:checked~main #p0,#n1:checked~main #p1,#n2:checked~main #p2,#n3:checked~main #p3,#n4:checked~main #p4{{display:block}}
 #n0:checked~nav label[for=n0],#n1:checked~nav label[for=n1],#n2:checked~nav label[for=n2],
+#n4:checked~nav label[for=n4],
 #n3:checked~nav label[for=n3]{{color:var(--ink);border-left-color:var(--acc);font-weight:600;
 background:var(--pane)}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;
@@ -523,6 +661,20 @@ border-radius:99px;border:1px solid var(--rule);color:var(--mut);white-space:now
 .note{{border-left:3px solid var(--rule);background:var(--pane);padding:10px 14px;margin-bottom:14px;
 font-size:13px}}
 .note.ok{{border-left-color:var(--ok)}}.note.warn{{border-left-color:var(--warn)}}
+.actbar{{display:flex;gap:8px;flex-wrap:wrap;align-items:center}}
+.act-btn{{font-family:var(--sans);font-size:12.5px;font-weight:600;padding:7px 14px;
+border:1px solid var(--acc);border-radius:4px;background:var(--acc);color:#fff;cursor:pointer}}
+.act-btn:hover{{background:#1f2799}}
+.act-btn[disabled]{{opacity:.5;cursor:default}}
+.act-btn.sm{{padding:5px 11px;font-size:12px;background:var(--pane);color:var(--acc)}}
+.act-btn.sm:hover{{background:rgba(42,51,194,.08)}}
+.abanner{{width:100%;padding:8px 12px;border-radius:4px;font-size:12.5px;margin-bottom:6px}}
+.abanner.run{{background:rgba(178,106,0,.09);border:1px solid var(--warn);color:var(--warn)}}
+.abanner.done{{background:rgba(21,122,64,.08);border:1px solid var(--ok);color:var(--ok)}}
+a.act-btn{{text-decoration:none;display:inline-block}}
+.whysum{{cursor:pointer;color:var(--acc);font-size:12px}}
+.whyfull{{white-space:pre-wrap;font-size:11.5px;color:var(--mut);margin-top:6px;
+max-width:60ch;line-height:1.5}}
 h2{{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fai);
 margin:22px 0 8px;font-weight:660}}
 .gl{{display:inline-block;font-size:12px;padding:4px 11px;border:1px solid var(--rule);
@@ -540,6 +692,7 @@ details.row summary .dim{{display:none}}}}
 </style></head><body>
 <input type="radio" name="nav" id="n0" checked><input type="radio" name="nav" id="n1">
 <input type="radio" name="nav" id="n2"><input type="radio" name="nav" id="n3">
+<input type="radio" name="nav" id="n4">
 <nav>
   <div class="brand">mcpgawk</div>
   <div class="sub">local · this machine only</div>
@@ -547,11 +700,12 @@ details.row summary .dim{{display:none}}}}
   <label for="n1">Runtime</label>
   <label for="n2">Evidence</label>
   <label for="n3">Decisions</label>
+  <label for="n4">Activity</label>
 </nav>
 <main>
   {errs}
   <div class="pane" id="p0">
-    <div class="top"><h1>Servers</h1><span class="act">mcpgawk — re-scan</span></div>
+    <div class="top"><h1>Servers</h1><div class="actbar">{_action_bar(token, action)}</div></div>
     {cards}{coverage}{vnote}
     {''.join(srows) or '<div class="note">No MCP servers found on this machine.</div>'}
   </div>
@@ -578,9 +732,36 @@ details.row summary .dim{{display:none}}}}
 
   <div class="pane" id="p3">
     <div class="top"><h1>Decisions</h1><span class="act">mcpgawk decide</span></div>
-    <div class="note">Approving needs a human, so it cannot happen from this page — it lives in
-    <code>mcpgawk decide</code>, behind a token printed to your terminal.</div>
-    <table><thead><tr><th>server</th><th>state</th></tr></thead><tbody>{dec}</tbody></table>
+    <div class="note">Approving moves trust, so it is gated: the button below carries this
+    session's token (in your terminal), which an agent that opened this page cannot supply. Review
+    the change in Servers first — approval here is the same act as <code>mcpgawk decide</code>.</div>
+    <table><thead><tr><th>server</th><th>state</th><th></th></tr></thead><tbody>{dec}</tbody></table>
+  </div>
+
+  <div class="pane" id="p4">
+    <div class="top"><h1>Activity</h1><div class="actbar">
+      <a class="act-btn sm" href="/export/calls.jsonl">Download log (.jsonl)</a>
+      <a class="act-btn sm" href="/export/calls.csv">Download (.csv)</a>
+    </div></div>
+    <div class="cards">
+      <div class="card"><div class="ck">calls checked</div><div class="cv">{act_summary.get('calls', '—') if isinstance(act_summary, dict) else '—'}</div>
+        <div class="cs">the WHAT — every MCP call your agents made</div></div>
+      <div class="card"><div class="ck">denied</div><div class="cv">{len(notable)}</div>
+        <div class="cs">the WHY it exists — calls the guard stopped</div></div>
+      <div class="card"><div class="ck">time span</div><div class="cv sm">{_esc(str(span_first or '')[:10] or '—')}</div>
+        <div class="cs">the WHEN — first to {_esc(str(span_last or '')[:10] or 'now')}</div></div>
+    </div>
+
+    <h2>Needs your attention — blocked calls, with the full reason</h2>
+    <table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
+    <th>basis</th><th>why (verbatim)</th></tr></thead><tbody>{acts_notable}</tbody></table>
+
+    <h2>The full record — every checked call, newest first</h2>
+    <div class="note">Tool arguments are never recorded — the log is metadata, so it can never
+    become the richest secret on your disk. <b>When</b> · <b>agent</b> (how &amp; who) ·
+    <b>server.tool</b> (what &amp; where) · <b>decision</b> &amp; <b>basis</b> (why).</div>
+    <table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
+    <th>basis</th><th>why</th></tr></thead><tbody>{acts_full}</tbody></table>
   </div>
 </main>
 </body></html>"""
@@ -693,29 +874,173 @@ def run_scan() -> dict[str, Any]:
                         else (proc.stderr or "scan failed").strip().splitlines()[-1][:200])}
 
 
-def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
-    """Serve the panel. Read-only, so unlike `decide` it needs no token and no human gate —
-    there is nothing here to authorise."""
+#: Shared state for a background action (scan/verify), so the page can show "running…" and then
+#: the result without the request that started it blocking for the whole minute-plus it takes.
+_ACTION: dict[str, Any] = {"running": False, "label": "", "message": "", "at": ""}
+_ACTION_LOCK: Any = None
+
+
+def _run_action_bg(kind: str) -> None:
+    """Run a long action (scan/verify) in the background, recording its state for the page.
+
+    Never raises: a control panel whose own action button crashes the server is worse than one
+    that reports the failure. The result lands in _ACTION for the next page render to show.
+    """
     import threading
+    global _ACTION_LOCK
+    if _ACTION_LOCK is None:
+        _ACTION_LOCK = threading.Lock()
+    with _ACTION_LOCK:
+        if _ACTION["running"]:
+            return                               # one at a time — a second click is a no-op
+        _ACTION.update(running=True, label=kind, message="", at=_now())
+
+    def work():
+        try:
+            if kind == "scan":
+                res = run_scan()
+            elif kind == "verify":
+                res = run_verify_fleet()
+            else:
+                res = {"ok": False, "message": f"unknown action {kind!r}"}
+            msg = res.get("message") or ("done" if res.get("ok") else "failed")
+        except Exception as exc:                  # noqa: BLE001 — an action must not kill the panel
+            msg = f"{type(exc).__name__}: {exc}"
+        with _ACTION_LOCK:
+            _ACTION.update(running=False, message=msg, at=_now())
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def run_verify_fleet() -> dict[str, Any]:
+    """Verify every LOCAL server's behaviour in the sandbox — the same thing the front door does,
+    triggered from the GUI. Remote servers are skipped here (they need per-server auth); local
+    servers are launched, which is why this lives behind the panel's token like every other action
+    that runs code."""
+    import json as _json
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    from . import discover, verify as _verify
+    reason = _verify.unavailable_reason()
+    if reason is not None:
+        return {"ok": False, "message": f"verify unavailable: {reason}"}
+    entries = discover.discover_servers()
+    entries = entries[0] if isinstance(entries, tuple) else (entries or {})
+    local = {n: {k: e[k] for k in ("command", "args", "env") if k in e}
+             for n, e in entries.items() if isinstance(e, dict) and e.get("command")}
+    if not local:
+        return {"ok": False, "message": "no local servers to verify"}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                     prefix="mcpgawk-panel-verify-") as fh:
+        _json.dump({"mcpServers": local}, fh)
+        cfg = fh.name
+    try:
+        rc = _verify.run([cfg], timeout=1200)
+    finally:
+        try:
+            os.unlink(cfg)
+        except OSError:
+            pass
+    if rc in (0, 1):
+        return {"ok": True, "message": f"verified {len(local)} local server(s) — "
+                f"observed behaviour recorded"}
+    if rc == 4:
+        return {"ok": False, "message": "verify timed out — INCOMPLETE, not clean"}
+    return {"ok": False, "message": f"verify did not complete (exit {rc})"}
+
+
+def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
+    """Serve the panel as an authenticated LOCAL CONTROL SURFACE.
+
+    Read views are open (there is nothing to authorise in looking). ACTIONS — re-scan, verify,
+    approve — carry the same token model as `decide`, because those run code or move trust, and an
+    agent can drive a browser: a page an agent stumbles onto must not be able to click them. The
+    token is printed to this terminal and never written to any file the agent reads.
+    """
+    import secrets
+    import threading
+    import urllib.parse
     import webbrowser
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    token = secrets.token_urlsafe(24)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_a):
             return
 
-        def do_GET(self):                        # noqa: N802
-            body = render(collect()).encode("utf-8")
+        def _send_download(self, body: bytes, ctype: str, filename: str) -> None:
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Content-Security-Policy",
-                             "default-src 'none'; style-src 'unsafe-inline'")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
             self.wfile.write(body)
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}/"
+        def do_GET(self):                        # noqa: N802
+            path = self.path.split("?", 1)[0]
+            # The record, downloadable. "Everything logged and available to download" — the raw
+            # append-only log verbatim, or a spreadsheet-friendly CSV of the same rows. No token:
+            # this is your own local record of your own machine, the same bytes `cat` would show.
+            if path == "/export/calls.jsonl":
+                self._send_download(export_log_jsonl(), "application/x-ndjson", "mcpgawk-log.jsonl")
+                return
+            if path == "/export/calls.csv":
+                self._send_download(export_log_csv(), "text/csv", "mcpgawk-log.csv")
+                return
+            body = render(collect(), token=token, action=dict(_ACTION)).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            # Actions are same-origin POST forms; keep the strict CSP but allow the form submit.
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):                       # noqa: N802
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            got = (form.get("token") or [""])[0]
+            if not secrets.compare_digest(got, token):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Refused: this action did not carry the panel's token, so it "
+                                 b"did not come from you. The token is in your terminal.")
+                return
+            act = (form.get("act") or [""])[0]
+            if act in ("scan", "verify"):
+                _run_action_bg(act)
+            elif act == "approve":
+                key = (form.get("key") or [""])[0]
+                try:
+                    from . import history
+                    result = history.approve(key)
+                    _ACTION.update(
+                        message=(f"approved {key}" if result else f"nothing to approve for {key}"),
+                        at=_now())
+                except Exception as exc:          # noqa: BLE001
+                    _ACTION.update(message=f"approve failed: {exc}", at=_now())
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        # Port busy is the common case (a panel is already running), not a crash-worthy fault.
+        # A raw traceback here is exactly the un-production roughness this tool is judged on.
+        if exc.errno in (48, 98):                # EADDRINUSE on macOS / Linux
+            log(f"\n  mcpgawk panel: port {port} is already in use — a panel is probably already"
+                f"\n  open at http://127.0.0.1:{port}/ . To run a second one: mcpgawk panel"
+                f" --port {port + 1}\n")
+            return 1
+        log(f"\n  mcpgawk panel: could not start on port {port} ({exc}).\n")
+        return 1
+    httpd.token = token                          # type: ignore[attr-defined]
+    url = f"http://127.0.0.1:{port}/?t={token[:6]}"
     log(f"\n  mcpgawk control panel — {url}\n  Ctrl-C to close.\n")
     if open_browser and not os.environ.get("MCPGAWK_NO_BROWSER"):
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
