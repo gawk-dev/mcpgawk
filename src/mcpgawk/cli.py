@@ -687,6 +687,19 @@ def _protect() -> int:
     return rc
 
 
+def _behaviour_tool_count() -> int:
+    """Tools with observed behaviour in the profile, 0 on any failure — never raises."""
+    try:
+        from .guard_hook import behaviour_path
+        raw = json.loads(behaviour_path().read_text(encoding="utf-8"))
+        servers = raw.get("servers") if isinstance(raw, dict) else None
+        if not isinstance(servers, dict):
+            return 0
+        return sum(len(v) for v in servers.values() if isinstance(v, dict))
+    except Exception:  # noqa: BLE001 — a count, not a verdict
+        return 0
+
+
 def _front_door_verify(choice: str) -> None:
     """Behavioural verification as part of the default flow — the free tier's promise is what
     servers DO, and that must not require a second command (the product sentence says "on by
@@ -741,10 +754,20 @@ def _front_door_verify(choice: str) -> None:
             except OSError:
                 pass
         if rc in (0, 1):
+            # Report what the profile actually CONTAINS, not that the run finished: a run that
+            # completed against auth walls records nothing, and "recorded" with an empty profile
+            # is exactly the swallowed-ambiguity this codebase forbids everywhere else.
+            observed_tools = _behaviour_tool_count()
             runlog.finish_run(run_id, runlog.FINDINGS if rc == 1 else runlog.OK,
-                              {"servers": len(allowed), "front_door": True})
-            print("  Observed behaviour recorded — decisions now rest on what servers DO."
-                  "\n  See `mcpgawk status`.")
+                              {"servers": len(allowed), "observed_tools": observed_tools,
+                               "front_door": True})
+            if observed_tools:
+                print(f"  Observed behaviour recorded for {observed_tools} tool(s) — decisions"
+                      "\n  now rest on what servers DO. See `mcpgawk status`.")
+            else:
+                print("  The run completed but OBSERVED NOTHING (commonly auth walls or servers"
+                      "\n  that would not exercise). Checks stay name-only, and `mcpgawk status`"
+                      "\n  says so honestly.")
         elif rc in (4, 130):
             runlog.finish_run(run_id, runlog.INCOMPLETE, {"rc": rc, "front_door": True})
             why = "skipped by you" if rc == 130 else "timed out"

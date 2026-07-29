@@ -41,5 +41,7 @@ reference/
 # The bundled verify engine's compiled dist IS the product — the generic dist/ ignore above must
 # not swallow it. 0.1.16 shipped engine-less because it did: the wheel carried node_modules but
 # no cli.js, and `mcpgawk verify` reported the engine missing on a fresh install.
-!src/mcpgawk/_bundled/verify/dist/
-!src/mcpgawk/_bundled/verify/dist/**
+!src/mcpgawk/_bundled/**
+# (the whole bundle: 0.1.18's negation covered only the engine's own dist/ — the workspace
+# packages' dists inside node_modules (@gawk/sandbox, @gawk/oracle) stayed untracked, so the
+# shipped engine crashed on ERR_MODULE_NOT_FOUND the first time a local server was verified)

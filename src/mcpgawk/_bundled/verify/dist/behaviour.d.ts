@@ -20,4 +20,14 @@ export interface BehaviourProfileDoc {
     }>>;
 }
 export declare function behaviourProfile(report: VerificationReport): BehaviourProfileDoc;
+/**
+ * Merge a fresh profile over an existing one, replacing only the servers THIS run verified.
+ *
+ * Why merge exists: until 2026-07-29 the writer replaced the whole file, so a remote-only
+ * front-door run that observed nothing WIPED every other server's recorded behaviour — observed
+ * evidence, the product's most expensive asset, destroyed by an unrelated run. A verified server
+ * is replaced even to empty (its old convictions may describe a server that has since been
+ * fixed); an unverified server's entry is retained untouched.
+ */
+export declare function mergeBehaviourProfiles(existing: unknown, fresh: BehaviourProfileDoc, verified: ReadonlySet<string>): BehaviourProfileDoc;
 //# sourceMappingURL=behaviour.d.ts.map

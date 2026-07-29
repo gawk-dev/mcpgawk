@@ -103,3 +103,27 @@ def test_incomplete_never_claims_clean(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "INCOMPLETE" in out
     assert "recorded — decisions now rest" not in out
+
+
+def test_completed_run_with_empty_profile_never_claims_recorded(monkeypatch, capsys, tmp_path):
+    _capture_run(monkeypatch, rc=0)
+    monkeypatch.setattr("mcpgawk.discover.discover_servers",
+                        lambda **kw: {"remote": {"url": "https://mcp.example.com/mcp"}})
+    prof = tmp_path / "behaviour.json"
+    prof.write_text('{"schema": "gawk.behaviour/1", "servers": {}}')
+    monkeypatch.setenv("GAWK_BEHAVIOUR", str(prof))
+    cli._front_door_verify(protect.REMOTE_ONLY)
+    out = capsys.readouterr().out
+    assert "OBSERVED NOTHING" in out
+    assert "recorded for" not in out
+
+
+def test_completed_run_reports_the_real_observed_count(monkeypatch, capsys, tmp_path):
+    _capture_run(monkeypatch, rc=0)
+    monkeypatch.setattr("mcpgawk.discover.discover_servers",
+                        lambda **kw: {"remote": {"url": "https://mcp.example.com/mcp"}})
+    prof = tmp_path / "behaviour.json"
+    prof.write_text('{"schema": "gawk.behaviour/1", "servers": {"s": {"a": {}, "b": {}}}}')
+    monkeypatch.setenv("GAWK_BEHAVIOUR", str(prof))
+    cli._front_door_verify(protect.REMOTE_ONLY)
+    assert "recorded for 2 tool(s)" in capsys.readouterr().out

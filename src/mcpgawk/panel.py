@@ -66,8 +66,12 @@ def collect() -> dict[str, Any]:
     try:
         data["activity"] = spool.summarise()
         data["recent_calls"] = spool.read(limit=40)
+        # A wider window than the recent-calls tile: sessions are the unit an operator reviews
+        # ("what did my agent do in that run"), and a 40-row window would show fragments of one.
+        data["session_calls"] = spool.read(limit=1000)
     except Exception as exc:                       # noqa: BLE001
         data["activity"], data["recent_calls"] = None, []
+        data["session_calls"] = []
         data["errors"]["runtime"] = f"{type(exc).__name__}: {exc}"
 
     try:
@@ -174,6 +178,77 @@ def _spark(series: list[int], w: int = 120, h: int = 26) -> str:
             f'<polyline points="{pts}"/></svg>')
 
 
+def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
+    """Per-tool join of what a server DECLARES against what verify OBSERVED — task 4's view.
+
+    Honesty rules: a tool with no observation says "not observed", never "clean" (the profile is
+    positive-only — absence is not evidence); a recorded observation for a tool the server no
+    longer exposes is still shown, because evidence about a disappeared tool is a finding, not
+    noise; and the baseline column distinguishes approved from added-since-approval.
+    """
+    obs = observed if isinstance(observed, dict) else {}
+    current = detail.get("current_tools") or []
+    approved = set(detail.get("approved_tools") or [])
+    raw_ann = detail.get("annotations")
+    annotations = raw_ann if isinstance(raw_ann, dict) else {}
+    rows = []
+    for tool in current:
+        ann = annotations.get(tool) if isinstance(annotations.get(tool), dict) else {}
+        ro = ann.get("readOnlyHint")
+        declared = "read-only" if ro is True else ("writes" if ro is False else "undeclared")
+        sig = obs.get(tool) if isinstance(obs.get(tool), dict) else {}
+        seen = [k for k in ("source", "sink") if sig.get(k) is True]
+        rows.append({
+            "tool": tool,
+            "baseline": "approved" if tool in approved else "added",
+            "declared": declared,
+            "observed": "+".join(seen) if seen else None,
+        })
+    for tool, sig in obs.items():
+        if tool in current or not isinstance(sig, dict):
+            continue
+        seen = [k for k in ("source", "sink") if sig.get(k) is True]
+        rows.append({"tool": tool, "baseline": "gone", "declared": "no longer exposed",
+                     "observed": "+".join(seen) if seen else None})
+    return rows
+
+
+def sessions_summary(rows: list[dict]) -> list[dict]:
+    """One row per agent session, newest first — the session record an operator reviews.
+
+    Calls with no session identity are grouped under a visible "(no identity)" row rather than
+    dropped: those are exactly the calls the sequence check cannot protect, and hiding them
+    would render the gap invisible.
+    """
+    by: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("server"):
+            continue
+        sid = r.get("session") if isinstance(r.get("session"), str) else "(no identity)"
+        s = by.setdefault(sid, {"session": sid, "calls": 0, "denied": 0,
+                                "servers": set(), "agents": {}, "first": None, "last": None})
+        s["calls"] += 1
+        if r.get("decision") == "deny":
+            s["denied"] += 1
+        s["servers"].add(r.get("server"))
+        adapter = r.get("adapter") or "?"
+        s["agents"][adapter] = s["agents"].get(adapter, 0) + 1
+        ts = r.get("ts")
+        if isinstance(ts, str):
+            s["first"] = min(s["first"], ts) if s["first"] else ts
+            s["last"] = max(s["last"], ts) if s["last"] else ts
+    out = []
+    for s in by.values():
+        out.append({
+            "session": s["session"],
+            "agent": max(s["agents"], key=s["agents"].get) if s["agents"] else "?",
+            "calls": s["calls"], "denied": s["denied"], "servers": len(s["servers"]),
+            "first": s["first"], "last": s["last"],
+        })
+    out.sort(key=lambda s: s["last"] or "", reverse=True)
+    return out
+
+
 def render(d: dict[str, Any]) -> str:
     """The panel.
 
@@ -198,6 +273,20 @@ def render(d: dict[str, Any]) -> str:
     rows = _agent_rows(d)
     covered = sum(n for _, s, n, _ in rows if s == "on")
     uncovered = sum(n for _, s, n, _ in rows if s != "on")
+
+    # --- the session record: one row per agent run, newest first -------------------------------
+    sess_parts: list[str] = []
+    for s in sessions_summary(d.get("session_calls") or calls)[:10]:
+        sid = s["session"]
+        shown = _esc(sid[:12] + ("…" if len(sid) > 12 else ""))
+        denied = (f'<span class="chip bad">{s["denied"]}</span>' if s["denied"] else "0")
+        last = _esc(str(s["last"] or "")[11:19] or "—")
+        sess_parts.append(
+            f'<tr><td class="nm" title="{_esc(sid)}">{shown}</td><td>{_esc(s["agent"])}</td>'
+            f'<td class="num">{s["calls"]}</td><td class="num">{denied}</td>'
+            f'<td class="num">{s["servers"]}</td><td class="dim">{last}</td></tr>')
+    sess = "".join(sess_parts) or \
+        '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
 
     # --- classify every server once; the tier drives sort, counts and the coverage bar ---------
     classified: list[tuple[str, dict, str | None, str]] = []
@@ -259,6 +348,22 @@ def render(d: dict[str, Any]) -> str:
             tl = "".join(f'<tr><td class="nm">{_esc(t)}</td><td class="dim">{n} call(s)</td></tr>'
                          for t, n in detail["calls_by_tool"][:8]) or \
                  '<tr><td colspan="2" class="dim">no calls recorded for this server</td></tr>'
+            dvo_parts = []
+            for r in declared_vs_observed(detail, (d.get("observed") or {}).get(name)):
+                base = {"approved": "ok", "added": "warn", "gone": "bad"}[r["baseline"]]
+                if r["observed"]:
+                    obs_cell = f'<span class="chip warn">{_esc(r["observed"])}</span>'
+                elif r["baseline"] == "gone":
+                    obs_cell = '<span class="dim">—</span>'
+                else:
+                    obs_cell = ('<span class="dim">not observed — absence is not a claim of '
+                                'safety</span>')
+                dvo_parts.append(
+                    f'<tr><td class="nm">{_esc(r["tool"])}</td>'
+                    f'<td><span class="chip {base}">{r["baseline"]}</span></td>'
+                    f'<td class="dim">{_esc(r["declared"])}</td><td>{obs_cell}</td></tr>')
+            dvo = "".join(dvo_parts) or \
+                '<tr><td colspan="4" class="dim">no measured surface yet — run mcpgawk</td></tr>'
             inner = f"""<div class="dd">
   <div class="ddgrid">
     <div><span class="k">transport</span>{_esc(detail['transport'] or local)}</div>
@@ -272,6 +377,9 @@ def render(d: dict[str, Any]) -> str:
   </div>
   <div class="ddh">what the guard has seen</div>
   <table class="mini"><tbody>{tl}</tbody></table>
+  <div class="ddh">declared vs observed · verdicts rest on observation, not names</div>
+  <table class="mini"><thead><tr><th>tool</th><th>baseline</th><th>declared</th>
+  <th>observed in the sandbox</th></tr></thead><tbody>{dvo}</tbody></table>
 </div>"""
         srows.append(f"""<details class="row"><summary>
   <span class="tier {tier}"></span>
@@ -452,6 +560,10 @@ details.row summary .dim{{display:none}}}}
     <div class="top"><h1>Runtime</h1><span class="act">{covered} covered · {uncovered} not</span></div>
     <table><thead><tr><th>agent</th><th>coverage</th><th>servers</th><th></th></tr></thead>
     <tbody>{arows}</tbody></table>
+    <h2>sessions · one row per agent run</h2>
+    <table><thead><tr><th>session</th><th>agent</th><th class="num">calls</th>
+    <th class="num">denied</th><th class="num">servers</th><th>last</th></tr></thead>
+    <tbody>{sess}</tbody></table>
     <h2>group by</h2>{groups}
     <h2>recent calls · arguments are never recorded</h2>
     <table><thead><tr><th>time</th><th>verdict</th><th>tool</th><th>agent</th><th>basis</th></tr>

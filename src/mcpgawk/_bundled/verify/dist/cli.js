@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rena
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { behaviourProfile } from "./behaviour.js";
+import { behaviourProfile, mergeBehaviourProfiles } from "./behaviour.js";
 import { serversOf, toConfig } from "./config.js";
 import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
@@ -367,11 +367,23 @@ licenseOpts = {}) {
         const targets = [join(homedir(), ".gawk", "behaviour.json")];
         if (behaviourPath && !targets.includes(behaviourPath))
             targets.push(behaviourPath);
+        const freshProfile = behaviourProfile(report);
+        const verifiedNames = new Set(report.servers.map((s) => s.server));
         for (const target of targets) {
             const isExplicit = target === behaviourPath;
             try {
                 mkdirSync(dirname(target), { recursive: true });
-                writeFileSync(target, `${JSON.stringify(behaviourProfile(report), null, 2)}\n`);
+                // MERGE, never replace the file: only the servers THIS run verified are rewritten.
+                // A remote-only run must not wipe the recorded behaviour of servers it never touched.
+                let existing = null;
+                try {
+                    existing = JSON.parse(readFileSync(target, "utf-8"));
+                }
+                catch {
+                    existing = null; // absent or corrupt — the merge treats both as nothing to retain
+                }
+                const merged = mergeBehaviourProfiles(existing, freshProfile, verifiedNames);
+                writeFileSync(target, `${JSON.stringify(merged, null, 2)}\n`);
                 if (isExplicit)
                     err(`mcpgawk verify: wrote behavioural profile → ${target}`);
             }
