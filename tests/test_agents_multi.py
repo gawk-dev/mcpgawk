@@ -171,7 +171,8 @@ def test_kimi_install_uninstall_round_trips_byte_identically(tmp_path):
     assert guard.MARKER in installed
     assert "/somebody/elses/hook.sh" in installed, "another vendor's hook was destroyed"
 
-    import tomllib
+    tomllib = pytest.importorskip("tomllib") if sys.version_info >= (3, 11) \
+        else pytest.importorskip("tomli")
     parsed = tomllib.loads(installed)
     ours = [h for h in parsed["hooks"] if guard.MARKER in h.get("command", "")]
     assert len(ours) == 1
@@ -185,7 +186,8 @@ def test_kimi_install_uninstall_round_trips_byte_identically(tmp_path):
 
 
 def test_kimi_install_is_idempotent(tmp_path):
-    import tomllib
+    tomllib = pytest.importorskip("tomllib") if sys.version_info >= (3, 11) \
+        else pytest.importorskip("tomli")
 
     adapter = _kimi_adapter(tmp_path)
     guard.install_for(adapter)
