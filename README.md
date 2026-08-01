@@ -19,6 +19,10 @@
 A local-first command that measures what a [Model Context Protocol](https://modelcontextprotocol.io)
 server costs and what it can do. It runs on your machine and uploads nothing.
 
+It is also how the [gawk gateway](https://gawk.dev) knows what it fronts: gawk Platform puts one
+endpoint in front of your MCP fleet — per-principal keys, policy, tamper-evident audit — and this
+free scanner is the seeing layer underneath it.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
 </p>
@@ -34,6 +38,8 @@ You pay for those tokens, and you haven't checked what the tools can do. mcpgawk
 - **vs. cloud scanners** (e.g. Snyk/Invariant `mcp-scan`) — they upload your inventory to a server and
   gate the verdict. mcpgawk runs entirely on your machine; nothing is uploaded, ever.
 - **vs. lazy-load gateways** — they cut tokens but tell you nothing about the *risk* surface.
+  gawk's own [gateway](https://gawk.dev) takes that seat with the risk surface measured — this
+  scanner is how it knows.
 - **mcpgawk does both** — cost **and** trust — locally, reproducibly, in one command.
 
 ## Features
