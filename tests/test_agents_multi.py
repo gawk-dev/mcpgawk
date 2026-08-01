@@ -127,6 +127,40 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path):
     assert any("/somebody/elses/hook.sh" in e.get("command", "") for e in entries)
 
 
+def test_a_working_hook_survives_a_scan_from_another_environment(tmp_path):
+    # The scan arms protection via install_for on EVERY run. Run from a throwaway venv it used
+    # to re-point a working hook at that venv's python — dead the moment the venv is gone.
+    interp = tmp_path / "python-durable"
+    interp.write_text("")
+    script = tmp_path / "guard_hook.py"
+    script.write_text("")
+    durable = f'"{interp}" "{script}" --format cursor  # {guard.MARKER}'
+    cfg = tmp_path / "hooks.json"
+    cfg.write_text(json.dumps({"version": 1, "hooks": {"beforeMCPExecution": [
+        {"command": durable, "timeout": 30, "failClosed": True}]}}), encoding="utf-8")
+    adapter = agents.AgentAdapter(key="cursor", label="Cursor", config=cfg, fmt="cursor",
+                                  parse=agents._parse_cursor, deny=agents._deny_cursor)
+    before = cfg.read_text()
+    note = guard.install_for(adapter)
+    assert cfg.read_text() == before, "a working hook was re-pointed by a scan"
+    assert "left where it is" in note
+
+
+def test_a_broken_hook_is_healed_by_the_next_scan(tmp_path):
+    dead = f'"{tmp_path}/gone-python" "{tmp_path}/gone.py" --format cursor  # {guard.MARKER}'
+    cfg = tmp_path / "hooks.json"
+    cfg.write_text(json.dumps({"version": 1, "hooks": {"beforeMCPExecution": [
+        {"command": dead, "timeout": 30, "failClosed": True}]}}), encoding="utf-8")
+    adapter = agents.AgentAdapter(key="cursor", label="Cursor", config=cfg, fmt="cursor",
+                                  parse=agents._parse_cursor, deny=agents._deny_cursor)
+    guard.install_for(adapter)
+    entries = json.loads(cfg.read_text())["hooks"]["beforeMCPExecution"]
+    ours = [e for e in entries if guard.MARKER in e.get("command", "")]
+    assert len(ours) == 1
+    assert sys.executable in ours[0]["command"], "a dead hook must be re-pointed at a live env"
+    assert ours[0]["failClosed"] is True
+
+
 def test_uninstall_removes_only_ours(tmp_path):
     cfg = tmp_path / "hooks.json"
     cfg.write_text(json.dumps({"version": 1, "hooks": {

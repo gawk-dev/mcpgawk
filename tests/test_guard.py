@@ -296,6 +296,62 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path):
     assert [g for g in groups if any(guard.MARKER in h["command"] for h in g["hooks"])][0]["matcher"] == "mcp__.*"
 
 
+def test_a_working_hook_survives_an_install_from_another_environment(tmp_path):
+    # First-run protection runs `install` on every scan. A scan run from a throwaway venv
+    # (pipx run, CI, a scratch env) used to re-point a WORKING hook at that venv's python —
+    # which dies with the venv, leaving the agent's guard broken. Found live 2026-08-01.
+    interp = tmp_path / "python-durable"
+    interp.write_text("")
+    script = tmp_path / "guard_hook.py"
+    script.write_text("")
+    durable = f'"{interp}" "{script}"  # {guard.MARKER}'
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "mcp__.*",
+         "hooks": [{"type": "command", "command": durable, "timeout": 30}]}]}}))
+    before = settings.read_text()
+    note = guard.install(settings)
+    assert settings.read_text() == before, "a working hook was re-pointed by a fresh install"
+    assert "left where it is" in note
+
+
+def test_a_broken_hook_is_healed_to_the_running_environment(tmp_path):
+    # The keep rule must not freeze a corpse: if the hook's interpreter or script is gone
+    # (uninstalled tool, deleted venv), the scan must repair it, not preserve it.
+    dead = f'"{tmp_path}/gone-python" "{tmp_path}/gone.py"  # {guard.MARKER}'
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "mcp__.*",
+         "hooks": [{"type": "command", "command": dead, "timeout": 30}]}]}}))
+    guard.install(settings)
+    data = json.loads(settings.read_text())
+    ours = [h for g in data["hooks"]["PreToolUse"] for h in g["hooks"]
+            if guard.MARKER in h["command"]]
+    assert len(ours) == 1
+    assert sys.executable in ours[0]["command"], "a dead hook must be re-pointed at a live env"
+
+
+def test_an_explicit_python_still_repoints_a_working_hook(tmp_path):
+    # `python=` is a deliberate choice by the caller — the keep rule only guards against the
+    # INCIDENTAL environment of whoever happened to run the scan.
+    interp = tmp_path / "python-durable"
+    interp.write_text("")
+    script = tmp_path / "guard_hook.py"
+    script.write_text("")
+    durable = f'"{interp}" "{script}"  # {guard.MARKER}'
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "mcp__.*",
+         "hooks": [{"type": "command", "command": durable, "timeout": 30}]}]}}))
+    chosen = tmp_path / "python-chosen"
+    chosen.write_text("")
+    guard.install(settings, python=str(chosen))
+    data = json.loads(settings.read_text())
+    ours = [h for g in data["hooks"]["PreToolUse"] for h in g["hooks"]
+            if guard.MARKER in h["command"]]
+    assert str(chosen) in ours[0]["command"]
+
+
 def test_uninstall_removes_only_ours(tmp_path):
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [

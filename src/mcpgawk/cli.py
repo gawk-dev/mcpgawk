@@ -771,21 +771,31 @@ def _front_door_verify(choice: str) -> None:
                 os.unlink(cfg)
             except OSError:
                 pass
-        if rc in (0, 1):
+        if rc in (0, 1, 2):
             # Report what the profile actually CONTAINS, not that the run finished: a run that
             # completed against auth walls records nothing, and "recorded" with an empty profile
             # is exactly the swallowed-ambiguity this codebase forbids everywhere else.
+            # rc 2 is the engine's completed-but-partial code (its exitCode contract: a server
+            # error, a check that never finished, or an unenumerated dynamic-dispatch catalog),
+            # not a crash — the engine has already named each unverified server just above.
+            # Branding the whole run "did NOT complete" discarded behaviour that WAS recorded,
+            # and one dead endpoint in any agent's config made every scan on that machine
+            # read as an error forever.
             observed_tools = _behaviour_tool_count()
-            runlog.finish_run(run_id, runlog.FINDINGS if rc == 1 else runlog.OK,
+            runlog.finish_run(run_id,
+                              runlog.INCOMPLETE if rc == 2
+                              else runlog.FINDINGS if rc == 1 else runlog.OK,
                               {"servers": len(allowed), "observed_tools": observed_tools,
                                "front_door": True})
+            partial = ("\n  PARTIAL — some server(s)/check(s) could not be verified (named"
+                       "\n  above); their checks stay name-only." if rc == 2 else "")
             if observed_tools:
                 print(f"  Observed behaviour recorded for {observed_tools} tool(s) — decisions"
-                      "\n  now rest on what servers DO. See `mcpgawk status`.")
+                      f"\n  now rest on what servers DO. See `mcpgawk status`.{partial}")
             else:
                 print("  The run completed but OBSERVED NOTHING (commonly auth walls or servers"
                       "\n  that would not exercise). Checks stay name-only, and `mcpgawk status`"
-                      "\n  says so honestly.")
+                      f"\n  says so honestly.{partial}")
         elif rc in (4, 130):
             runlog.finish_run(run_id, runlog.INCOMPLETE, {"rc": rc, "front_door": True})
             why = "skipped by you" if rc == 130 else "timed out"

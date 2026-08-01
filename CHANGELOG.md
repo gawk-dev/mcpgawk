@@ -5,6 +5,27 @@ All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelo
 > Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
 > commit message — the note recorded at the moment that version was published — not from memory.
 
+## [0.1.22] — 2026-08-01
+
+### Fixed
+
+- **A completed verification with partial evidence is no longer reported as "did NOT complete".**
+  The behaviour-verification engine's exit code 2 means the run finished but some server or check
+  could not be verified (a dead endpoint, an auth wall, an unenumerated dynamic catalog). The scan
+  now records it as INCOMPLETE, still reports what WAS observed, and labels the output PARTIAL —
+  previously one stale server in any agent config made every scan on that machine read as an error
+  forever, discarding real recorded behaviour.
+- **Protection never re-points a working guard hook at the environment that happened to run the
+  scan.** Running mcpgawk from a throwaway venv, `pipx run`, or CI used to rewrite every agent's
+  hook to that environment's interpreter — which dies with it, leaving hooks silently broken. A
+  hook whose interpreter and script still exist is now left in place; a dead hook still heals.
+- **Sandboxed installs run on glibc images.** npm silently skips a native platform package whose
+  `libc` field says glibc when the runtime is musl, so servers with glibc-only native builds
+  installed "successfully" minus their binary and died at start, reading as "checks never
+  completed". npx/node targets now run on `node:24-slim`, uvx on the uv `bookworm-slim` image
+  (Python manylinux wheels are glibc-only — same class). The install memory ceiling rises to 2g
+  (measured: 1g OOM-killed a clean real-world install, silently).
+
 ## [0.1.21] — 2026-08-01
 
 ### Changed

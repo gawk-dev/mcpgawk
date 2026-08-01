@@ -115,6 +115,31 @@ def _is_ours(entry: dict) -> bool:
     return MARKER in str(entry.get("command", ""))
 
 
+def _our_commands(node: Any) -> list[str]:
+    """Every one of OUR command strings anywhere in a loaded config structure, whatever the
+    agent's nesting shape — one walker instead of five schema-specific readers."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        cmd = node.get("command")
+        if isinstance(cmd, str) and MARKER in cmd:
+            found.append(cmd)
+        for value in node.values():
+            found.extend(_our_commands(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_our_commands(value))
+    return found
+
+
+_HOOK_CMD = re.compile(r'^"([^"]+)" "([^"]+)"')
+
+
+def _still_runs(command: str) -> bool:
+    """True if the hook command's interpreter AND script both still exist on disk."""
+    m = _HOOK_CMD.match(command)
+    return bool(m) and Path(m.group(1)).is_file() and Path(m.group(2)).is_file()
+
+
 def _pretooluse_groups(settings: dict[str, Any]) -> list[dict[str, Any]]:
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -136,6 +161,16 @@ def install(path: Path | None = None, *, python: str | None = None) -> str:
     target = path or CLAUDE_USER_SETTINGS
     settings = _load_settings(target)
     already = is_installed(settings)
+    # A WORKING hook is never re-pointed by whoever happened to run this. The scan arms
+    # protection on every run, so a run from a throwaway venv (pipx run, CI, a scratch env)
+    # used to aim the hook at an interpreter that dies with that venv — protection that looks
+    # installed and is broken. Only a deliberate `python=` re-points; a dead hook still heals.
+    if already and python is None:
+        cmds = _our_commands(settings)
+        if cmds and all(_still_runs(c) for c in cmds):
+            return (f"mcpgawk guard already installed in {target} — left where it is."
+                    f"\n  (`mcpgawk guard uninstall` first if you want it moved to this "
+                    f"environment)")
 
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -472,6 +507,18 @@ def install_for(adapter, *, python: str | None = None) -> str:
     """Install into ONE agent. Same guarantees as the Claude Code path: other vendors' hooks are
     preserved, the previous config is backed up, and the write is atomic — a half-written agent
     config leaves the user unable to start anything."""
+    # Same keep rule as `install`: a working hook is never re-pointed by the incidental
+    # environment of whoever ran the scan; only a deliberate `python=` moves it, and a hook
+    # whose interpreter or script has vanished is still healed.
+    if is_installed_for(adapter) and python is None:
+        if adapter.fmt == "kimi":
+            cmds = [c for c in re.findall(r"command\s*=\s*'([^']*)'",
+                                          _kimi_read(adapter.config)) if MARKER in c]
+        else:
+            cmds = _our_commands(_load_settings(adapter.config))
+        if cmds and all(_still_runs(c) for c in cmds):
+            return (f"  {adapter.label}: already protected — hook left where it is "
+                    f"({adapter.config})")
     if adapter.fmt == "kimi":
         return _kimi_install(adapter, python)
     already = is_installed_for(adapter)

@@ -79,6 +79,7 @@ def test_unavailable_engine_degrades_without_error(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("rc,status", [(0, runlog.OK), (1, runlog.FINDINGS),
+                                       (2, runlog.INCOMPLETE),
                                        (4, runlog.INCOMPLETE), (130, runlog.INCOMPLETE),
                                        (3, runlog.ERROR)])
 def test_run_outcome_is_recorded_with_its_real_status(monkeypatch, tmp_path, rc, status):
@@ -116,6 +117,29 @@ def test_completed_run_with_empty_profile_never_claims_recorded(monkeypatch, cap
     out = capsys.readouterr().out
     assert "OBSERVED NOTHING" in out
     assert "recorded for" not in out
+
+
+def test_partial_evidence_rc2_keeps_what_was_observed(monkeypatch, capsys, tmp_path):
+    # rc 2 is the engine's completed-but-partial code (its exitCode contract: a server error,
+    # a check that never finished, or an unenumerated dynamic-dispatch catalog) — not a crash.
+    # One dead endpoint in any agent's config used to flip the whole run to "did NOT complete",
+    # discarding behaviour that WAS recorded — permanently, on any machine with one stale entry.
+    _capture_run(monkeypatch, rc=2)
+    monkeypatch.setattr("mcpgawk.discover.discover_servers",
+                        lambda **kw: {"remote": {"url": "https://mcp.example.com/mcp"}})
+    finished: dict = {}
+    monkeypatch.setattr("mcpgawk.runlog.start_run", lambda *a, **k: "rid-1")
+    monkeypatch.setattr("mcpgawk.runlog.finish_run",
+                        lambda rid, st, summary=None, **k: finished.update(rid=rid, status=st))
+    prof = tmp_path / "behaviour.json"
+    prof.write_text('{"schema": "gawk.behaviour/1", "servers": {"s": {"a": {}, "b": {}}}}')
+    monkeypatch.setenv("GAWK_BEHAVIOUR", str(prof))
+    cli._front_door_verify(protect.REMOTE_ONLY)
+    out = capsys.readouterr().out
+    assert finished["status"] == runlog.INCOMPLETE
+    assert "recorded for 2 tool(s)" in out, "partial evidence must not be discarded"
+    assert "did NOT complete" not in out, "the engine finished; saying otherwise is false"
+    assert "PARTIAL" in out, "partial evidence must be labelled as partial"
 
 
 def test_completed_run_reports_the_real_observed_count(monkeypatch, capsys, tmp_path):
