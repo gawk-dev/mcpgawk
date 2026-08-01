@@ -2,6 +2,65 @@
 
 All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelog.com/); versioning: [SemVer](https://semver.org/).
 
+> Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
+> commit message — the note recorded at the moment that version was published — not from memory.
+
+## [0.1.21] — 2026-08-01
+
+### Changed
+
+- **MCP protocol 2026-07-28.** mcpgawk now speaks the current revision via the official Python SDK
+  v2, and negotiates down to every earlier revision, so older servers are unaffected. The
+  dependency moves to `mcp>=2,<3` (and `httpx2`, the fork the v2 transports run on).
+
+### Fixed
+
+- **A server that cannot start now says why.** The SDK v2 rename breaks unpinned Python MCP servers
+  at their next fresh install, and the traceback goes to the server's stderr, which clients do not
+  surface — so an agent simply reports the server as unavailable. mcpgawk now captures that stderr
+  and names the cause instead of reporting "connection closed". Background:
+  https://mcp.gawk.dev/mcp-sdk-v2-advisory.html
+
+## [0.1.20] — 2026-07-30
+
+- The local panel became actionable: scan, verify and approve can be triggered from it rather than
+  only from the terminal, each behind a token so a read-only viewer cannot act on your fleet.
+- A structured, downloadable Activity view of what the engine did.
+- A port already in use is explained rather than raised as a stack trace.
+- The published wheel was functionally exercised before publish, not merely built.
+
+## [0.1.19] — 2026-07-29
+
+- Packaging: the distribution carries the workspace packages' built output, and the engine is
+  verified functionally **from the wheel** before publish rather than from the source tree.
+
+## [0.1.18] — 2026-07-29
+
+- Packaging: runtime-only bundle — no type declarations or source maps. Third-party attribution
+  verified before publish.
+
+## [0.1.17] — 2026-07-29
+
+### Fixed
+
+- **The wheel actually contains the verify engine.** Earlier 0.1.1x installs could resolve without
+  it.
+
+## [0.1.16] — 2026-07-29
+
+- `THIRD_PARTY_LICENSES.md` now ships inside the distribution.
+
+## [0.1.15] — 2026-07-29
+
+### Fixed
+
+- **Python 3.10.** Guard imports use the `tomli` backport where `tomllib` does not exist.
+
+## [0.1.14] — 2026-07-29
+
+- Six agents covered, verification on by default, and the recorder proves itself rather than
+  asking to be trusted.
+
 ## [0.1.13] — 2026-07-28
 
 Cursor and Codex are now protected too — and a security fix everyone should take.
