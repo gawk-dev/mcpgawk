@@ -25,6 +25,14 @@ dependencies = [
     "httpx2>=2",         # the fork mcp v2 transports run on; probe.py builds the no-redirect client directly
     "tiktoken>=0.7",     # named cost-index tokenizer (cl100k); honestly labelled, not Claude-exact
     "httpx>=0.27",       # well-known Server Card fetch (also a transitive mcp dep; pinned explicitly)
+    "pyyaml>=6",         # Goose and Continue keep their MCP servers in YAML. Discovery is
+                         # dependency-light by design and this is a DELIBERATE exception: without
+                         # it those clients are listed as supported and contribute nothing on a
+                         # clean install. Caught 2026-08-02 — the platform repo declares PyYAML
+                         # for Finix, so every dev machine had it and every test passed while the
+                         # SHIPPED scanner would have read no Goose/Continue config at all.
+    "tomli>=2.0; python_version < '3.11'",  # tomllib backport: without it, Python 3.10 users
+                         # silently lose every Codex server (config.toml is the only TOML client).
 ]
 
 [project.optional-dependencies]
