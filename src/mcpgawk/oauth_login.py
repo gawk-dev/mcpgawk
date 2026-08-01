@@ -22,7 +22,12 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from mcp.client.auth import OAuthClientProvider
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.auth import (
+    AuthorizationCodeResult,
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthToken,
+)
 
 #: Where per-server tokens live. Overridable with GAWK_OAUTH_STORE, the same escape hatch
 #: GAWK_LICENSE_CACHE provides for the licence cache — it lets CI, a self-host deployment or a
@@ -121,11 +126,11 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
         except Exception:  # noqa: BLE001 — headless/no-browser: the printed URL is the fallback
             pass
 
-    async def _callback() -> tuple[str, Optional[str]]:
+    async def _callback() -> AuthorizationCodeResult:
         await asyncio.to_thread(done.wait, 300)
         if not captured["code"]:
             raise TimeoutError("no authorization code received within 5 minutes")
-        return captured["code"], captured["state"]
+        return AuthorizationCodeResult(code=captured["code"], state=captured["state"])
 
     provider = OAuthClientProvider(
         server_url=server_url,

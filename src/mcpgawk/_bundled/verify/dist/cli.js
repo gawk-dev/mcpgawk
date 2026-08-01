@@ -364,7 +364,14 @@ licenseOpts = {}) {
         // pillar that can observe writes it, the pillar that enforces reads it, neither needs a flag.
         // Path constant is duplicated in enforce/cli.py (DEFAULT_BEHAVIOUR_PROFILE) and pinned by a
         // cross-language test — the two runtimes must agree on it or the loop silently never closes.
-        const targets = [join(homedir(), ".gawk", "behaviour.json")];
+        // GAWK_BEHAVIOUR_PROFILE overrides the shared default, and MUST be honoured here as well as in
+        // Python. Until 2026-07-31 only the Python side could be redirected, so every run of the test
+        // suite that invoked this engine wrote to the developer's REAL ~/.gawk/behaviour.json and
+        // stripped its `verified` map. It was diagnosed as a "mystery writer" twice. Two runtimes share
+        // this file; an override only one of them respects is not an override.
+        const targets = [
+            process.env.GAWK_BEHAVIOUR_PROFILE || join(homedir(), ".gawk", "behaviour.json"),
+        ];
         if (behaviourPath && !targets.includes(behaviourPath))
             targets.push(behaviourPath);
         const freshProfile = behaviourProfile(report);

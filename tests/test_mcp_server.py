@@ -13,11 +13,12 @@ from mcpgawk.probe import ServerSnapshot
 
 def _handler(server, kind):
     """Pull a registered handler out of the SDK's request map so the tools can be driven in-process,
-    without spawning a subprocess for every assertion."""
-    from mcp.types import CallToolRequest, ListToolsRequest
-
-    want = {"list": ListToolsRequest, "call": CallToolRequest}[kind]
-    return server.request_handlers[want]
+    without spawning a subprocess for every assertion. SDK v2 keys handlers by method string and
+    hands them `(ctx, params)`; these tools never touch ctx, so None suffices in-process."""
+    want = {"list": "tools/list", "call": "tools/call"}[kind]
+    entry = server.get_request_handler(want)
+    assert entry is not None, f"no handler registered for {want}"
+    return entry.handler if hasattr(entry, "handler") else entry
 
 
 @pytest.fixture
@@ -26,18 +27,16 @@ def server():
 
 
 async def _list_tools(server):
-    from mcp.types import ListToolsRequest
-
-    result = await _handler(server, "list")(ListToolsRequest(method="tools/list"))
-    return result.root.tools
+    result = await _handler(server, "list")(None, None)
+    return result.tools
 
 
 async def _call(server, name, args):
-    from mcp.types import CallToolRequest, CallToolRequestParams
+    from mcp.types import CallToolRequestParams
 
-    req = CallToolRequest(method="tools/call", params=CallToolRequestParams(name=name, arguments=args))
-    result = await _handler(server, "call")(req)
-    return json.loads(result.root.content[0].text)
+    params = CallToolRequestParams(name=name, arguments=args)
+    result = await _handler(server, "call")(None, params)
+    return json.loads(result.content[0].text)
 
 
 # --------------------------------------------------------------------------- #
@@ -53,7 +52,7 @@ async def test_every_tool_declares_its_intent(server):
     server doing exactly that. It must not regress."""
     for tool in await _list_tools(server):
         assert tool.annotations is not None, f"{tool.name} declares no intent"
-        assert tool.annotations.destructiveHint is False
+        assert tool.annotations.destructive_hint is False
 
 
 async def test_no_tool_claims_read_only_while_it_can_execute_code(server):
@@ -71,7 +70,7 @@ async def test_no_tool_claims_read_only_while_it_can_execute_code(server):
     turning a design smell into an exploit path for any prompt injection reaching the model.
     """
     for tool in await _list_tools(server):
-        assert tool.annotations.readOnlyHint is False, (
+        assert tool.annotations.read_only_hint is False, (
             f"{tool.name} declares readOnlyHint=True — it can start processes, and a client may "
             f"auto-approve it on that promise"
         )

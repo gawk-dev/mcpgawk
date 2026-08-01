@@ -29,7 +29,7 @@ if sys.version_info < (3, 11):
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from .servercard import fetch_card
 from .transport import Candidate as _Candidate
@@ -98,8 +98,10 @@ async def _snapshot(session: ClientSession, name: str, transport: str) -> Server
     snap = ServerSnapshot(
         name=name,
         transport=transport,
-        protocol_version=getattr(init, "protocolVersion", None),
-        server_info=(init.serverInfo.model_dump(mode="json") if getattr(init, "serverInfo", None) else {}),
+        # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
+        # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
+        protocol_version=init.protocol_version,
+        server_info=(init.server_info.model_dump(by_alias=True, mode="json") if init.server_info else {}),
     )
     # tools/list is the load-bearing surface; prompts/resources are optional per server.
     snap.tools = _dump((await session.list_tools()).tools)
@@ -231,17 +233,20 @@ def _no_redirect_http_client(headers=None, timeout=None, auth=None):
     httpx already strips a static `Authorization` HEADER on a cross-origin redirect, but an httpx.Auth
     object (the SDK's OAuthClientProvider) re-runs its auth flow on the *redirected* request and could
     re-attach the OAuth token to the redirect target — a case header-stripping does NOT cover. So on
-    the auth path we refuse redirects outright. Mirrors the SDK's client defaults otherwise."""
-    import httpx
+    the auth path we refuse redirects outright. Mirrors the SDK's client defaults otherwise.
+
+    httpx2, not httpx: SDK v2's transports run on the httpx2 fork, and the client we hand them
+    must match. Our own non-MCP fetches (the Server Card) stay on regular httpx."""
+    import httpx2
     kwargs: dict[str, Any] = {
         "follow_redirects": False,
-        "timeout": timeout if timeout is not None else httpx.Timeout(30.0, read=60 * 5),
+        "timeout": timeout if timeout is not None else httpx2.Timeout(30.0, read=60 * 5),
     }
     if headers is not None:
         kwargs["headers"] = headers
     if auth is not None:
         kwargs["auth"] = auth
-    return httpx.AsyncClient(**kwargs)
+    return httpx2.AsyncClient(**kwargs)
 
 
 async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
@@ -252,10 +257,17 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
     an interactive OAuth flow; the token it obtains stays on this machine. When `auth` is present we
     force a no-redirect client so an OAuth credential can't leak across a redirect (see factory)."""
     async def _do():
-        extra = {"httpx_client_factory": _no_redirect_http_client} if auth is not None else {}
-        async with streamablehttp_client(url, headers=headers or {}, auth=auth, **extra) as (read, write, _sid):
-            async with ClientSession(read, write) as session:
-                snap = await _snapshot(session, name, "http")
+        # SDK v2: headers/auth no longer ride the transport call — they live on a caller-owned
+        # http client. The auth path keeps the no-redirect client for the same credential-leak
+        # reason as before; the plain path uses the SDK's own defaults.
+        if auth is not None:
+            http_client = _no_redirect_http_client(headers=headers or {}, auth=auth)
+        else:
+            http_client = create_mcp_http_client(headers=headers or {})
+        async with http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    snap = await _snapshot(session, name, "http")
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
     return await _bounded(_do, name, "http", timeout)

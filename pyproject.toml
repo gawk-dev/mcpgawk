@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.20"
+version = "0.1.21"
 description = "A local-first CLI that measures what an MCP server costs and what it can do. Nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,8 @@ classifiers = [
     "Environment :: Console",
 ]
 dependencies = [
-    "mcp>=1.28,<2",      # official protocol client — version-negotiated, tracks the spec
+    "mcp>=2,<3",         # official protocol client — v2 speaks 2026-07-28 and negotiates down to earlier revisions
+    "httpx2>=2",         # the fork mcp v2 transports run on; probe.py builds the no-redirect client directly
     "tiktoken>=0.7",     # named cost-index tokenizer (cl100k); honestly labelled, not Claude-exact
     "httpx>=0.27",       # well-known Server Card fetch (also a transitive mcp dep; pinned explicitly)
 ]

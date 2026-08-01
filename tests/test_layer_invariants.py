@@ -244,3 +244,36 @@ def test_the_paid_imports_in_cli_stay_function_local():
         "the two deliberate licence-gate hand-overs (run_account, run_pillar) moved or vanished — "
         "re-read the gate before trusting this wall."
     )
+
+
+def test_the_behaviour_profile_has_one_owner_and_an_override():
+    """Every user-state path must be redirectable, or the suite writes to the operator's real data.
+
+    `conftest._never_touch_real_home_state` was written 2026-07-27 after the enforce audit log did
+    exactly that. The observed-behaviour profile was hardcoded `Path.home()/".gawk"/"behaviour.json"`
+    and so escaped the guard: every full suite run overwrote the founder's real profile, stripping
+    the `verified` map. It was diagnosed as a "mystery writer" twice before the cause was found on
+    2026-07-31. A path with no override is a path the guard cannot protect.
+    """
+    import os
+    from pathlib import Path
+
+    import mcpgawk.panel as panel
+
+    src = Path(panel.__file__).read_text(encoding="utf-8")
+    hits = [ln.strip() for ln in src.splitlines()
+            if '".gawk"' in ln and "behaviour.json" in ln]
+    assert len(hits) == 1, f"the profile path must be derived in ONE place, found: {hits}"
+    assert "def behaviour_profile_path" in src
+
+    old = os.environ.get("GAWK_BEHAVIOUR_PROFILE")
+    try:
+        os.environ["GAWK_BEHAVIOUR_PROFILE"] = "/tmp/somewhere-else/behaviour.json"
+        assert panel.behaviour_profile_path() == Path("/tmp/somewhere-else/behaviour.json")
+        # everything written beside it must follow the override, or the guard leaks again
+        assert panel._action_store().parent == Path("/tmp/somewhere-else")
+    finally:
+        if old is None:
+            os.environ.pop("GAWK_BEHAVIOUR_PROFILE", None)
+        else:
+            os.environ["GAWK_BEHAVIOUR_PROFILE"] = old

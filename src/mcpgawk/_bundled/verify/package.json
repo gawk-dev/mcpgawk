@@ -24,7 +24,7 @@
   "dependencies": {
     "@gawk/oracle": "file:///Users/srinathprasannancs/devtools/mcpgawk/packages/oracle",
     "@gawk/sandbox": "file:///Users/srinathprasannancs/devtools/mcpgawk/packages/sandbox",
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.30.0"
   },
   "private": true,
   "devDependencies": {},

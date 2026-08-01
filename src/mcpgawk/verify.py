@@ -65,6 +65,39 @@ def unavailable_reason() -> str | None:
     return None
 
 
+def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, str]:
+    """Same engine as `run`, but the engine's OWN WORDS come back instead of going to a terminal.
+
+    `run` returns one int. That is fine for a CLI, where the engine's per-server lines stream past
+    the user's eyes — and useless for the GUI, which was left announcing a count it had to invent
+    (it reported every server it ATTEMPTED as verified while the tiles, which read the profile,
+    did not move). A control surface that can only say "all fine" or "all failed", and then tells
+    you to go and run a terminal command to find out which, is not a control surface.
+
+    Returns (exit code, combined output). Same code vocabulary as `run`: 3 = could not run,
+    4 = timed out and therefore INCOMPLETE, never clean.
+    """
+    reason = unavailable_reason()
+    if reason is not None:
+        return 3, f"mcpgawk verify: {reason}"
+    node = shutil.which("node")
+    cli_js = resolve_cli_js()
+    try:
+        proc = subprocess.run([node, str(cli_js), *argv], env={**os.environ}, timeout=timeout,
+                              capture_output=True, text=True, errors="replace")
+        return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))
+    except subprocess.TimeoutExpired as exc:
+        partial = ""
+        for stream in (exc.stdout, exc.stderr):    # keep whatever it managed to say first
+            if stream:
+                partial += stream if isinstance(stream, str) else stream.decode("utf-8", "replace")
+        return 4, partial + "\nmcpgawk verify: timed out — this run is INCOMPLETE, not clean"
+    except KeyboardInterrupt:
+        return 130, ""
+    except OSError as exc:
+        return 3, f"mcpgawk verify: could not start the engine ({exc})"
+
+
 def run(argv: list[str], timeout: float | None = None) -> int:
     """Exec the bundled engine. Returns its exit code, or 3 when it cannot run, or 4 on timeout.
 

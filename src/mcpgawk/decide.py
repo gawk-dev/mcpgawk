@@ -34,7 +34,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, quote, unquote_plus, urlparse
 
 from . import baseline, drift, history
 
@@ -122,12 +122,13 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "") -> str:
   <p class="sub">Changed after you approved it{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
      Your agents cannot call it until you decide.</p>
   {_diff_block(r)}
-  <form method="POST" action="/decide">
+  {(f'''<form method="POST" action="/decide">
     <input type="hidden" name="token" value="{_esc(token)}">
     <input type="hidden" name="key" value="{_esc(it['key'])}">
     <button name="action" value="keep" class="btn danger-btn">Keep blocking</button>
     <button name="action" value="approve" class="btn">Trust this change</button>
-  </form>
+  </form>''') if token else
+   '<p class="sub">Read-only view. Open the link printed in your terminal to decide.</p>'}
 </section>""")
         body = "\n".join(cards)
 
@@ -218,9 +219,19 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
 <div class="b"><h1>Refused</h1><p>{html.escape(self._REFUSAL)}</p></div>""")
 
     def do_GET(self) -> None:               # noqa: N802 - BaseHTTPRequestHandler's API
-        """READ-ONLY, always. A page load must never be able to change trust."""
+        """READ-ONLY, always. A page load must never be able to change trust.
+
+        And it must never HAND OUT the token either. do_POST's gate below exists precisely so that
+        "an agent with a shell" cannot approve its own unblocking by POSTing to localhost — but
+        this handler used to embed the full token in every unauthenticated response, so the agent
+        only had to GET the page and read it out of the hidden field first. The token is served
+        back only to a request that already proves it has it; everyone else gets the read view.
+        """
         store = history.load(history.default_path())
-        self._send(200, render_page(pending_decisions(store), self.server.token,
+        q = parse_qs(urlparse(self.path).query)
+        shown = (self.server.token
+                 if secrets.compare_digest((q.get("t") or [""])[0], self.server.token) else "")
+        self._send(200, render_page(pending_decisions(store), shown,
                                     getattr(self.server, "note", "")))
 
     def do_POST(self) -> None:              # noqa: N802
@@ -247,8 +258,10 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         elif action == "keep":
             note = "Left blocked. Your agents still cannot call it."
         self.server.note = note
+        # Carry the token back: without it the human lands on the read view and the remaining
+        # decisions become unclickable after the first approval.
         self.send_response(303)
-        self.send_header("Location", "/")
+        self.send_header("Location", f"/?t={quote(self.server.token)}")
         self.end_headers()
 
 
@@ -266,7 +279,10 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
     httpd = ThreadingHTTPServer((HOST, port), _Handler)
     httpd.token = token                     # type: ignore[attr-defined]
     httpd.note = ""                         # type: ignore[attr-defined]
-    url = f"http://{HOST}:{port}/?t={token[:6]}"
+    # The FULL token. A 6-char prefix authorised nothing, which is why the real one had to be
+    # baked into every served page for the form to work — and that is how it leaked to any local
+    # reader. In the URL it stays where this comment always claimed: the terminal and the browser.
+    url = f"http://{HOST}:{port}/?t={token}"
 
     store = history.load(history.default_path())
     waiting = len(pending_decisions(store))

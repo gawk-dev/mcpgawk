@@ -217,10 +217,30 @@ class DriftReport:
         return "".join(a[min(s[0] for s in spans):max(s[1] for s in spans)]).strip() or None
 
     @property
+    def protocol_migration(self) -> bool:
+        """Is the protocol move a FORWARD spec upgrade — i.e. the server adopting a newer revision?
+
+        MCP revisions are dates (`2025-03-26`, `2026-07-28`), so ordering is lexicographic. This
+        matters as of 2026-07-28, the largest revision since MCP launched: it drops `initialize` and
+        the session, and every server that adopts it reports a new revision. Without this, the whole
+        fleet trips `any` on upgrade day, every server lands blocked-waiting-on-you, and the user
+        clears the pile with `approve --all` — which is precisely how a baseline stops meaning
+        anything (see `_with_severity`).
+
+        A BACKWARD move is NOT a migration and stays drift: downgrading a peer onto an older, weaker
+        revision is a recognised attack, not housekeeping.
+        """
+        if not self.protocol_changed:
+            return False
+        before, after = self.protocol_changed
+        return bool(_REVISION.match(before) and _REVISION.match(after) and after > before)
+
+    @property
     def any(self) -> bool:
         return (self.pin_changed or bool(self.added or self.removed or self.changed
                                          or self.schema_changed or self.annotation_changed)
-                or self.transport_changed is not None or self.protocol_changed is not None)
+                or self.transport_changed is not None
+                or (self.protocol_changed is not None and not self.protocol_migration))
 
     def gained_params(self, key: str) -> list[str]:
         before, after = self.props.get(key, ([], []))
@@ -354,6 +374,10 @@ def _with_severity(r: DriftReport) -> DriftReport:
 
 _KIND_LABEL = {"tool": "tools", "prompt": "prompts", "resource": "resources"}
 
+#: An MCP spec revision is a date: `2025-03-26`, `2026-07-28`. Anything else is not a revision and
+#: is never treated as a migration — an unrecognised string stays drift and asks the human.
+_REVISION = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 #: How much of an inserted span to quote. Long enough to carry an injected instruction, short enough
 #: that a hostile server cannot flood the terminal by appending an essay.
 EXCERPT = 160
@@ -467,7 +491,10 @@ def render(name: str, r: DriftReport) -> str:
         lines.append(f"        ! TRANSPORT changed: {before} → {after}{note}")
     if r.protocol_changed:
         before, after = r.protocol_changed
-        lines.append(f"        ! MCP protocol changed: {before} → {after}")
+        # Still SHOWN either way — a migration is worth seeing. It just isn't a decision.
+        lines.append(f"        · MCP spec migration: {before} → {after} (newer revision, not drift)"
+                     if r.protocol_migration else
+                     f"        ! MCP protocol changed: {before} → {after}")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
     if r.baseline_extended:

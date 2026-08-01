@@ -738,7 +738,12 @@ def _front_door_verify(choice: str) -> None:
                   "\n  local servers are only launched after your yes. Re-run `mcpgawk` in a"
                   "\n  terminal to include them.")
             return
-        print(f"\n  Verifying what {len(allowed)} server(s) actually DO, in the sandbox"
+        # "in the sandbox" was printed here for weeks while nothing requested one (HANDOFF 38c).
+        # --isolate is passed below; the engine itself announces, per server, when it has to
+        # degrade (no Docker / uncontainerizable command) — so this line can promise the REQUEST
+        # and let the engine report what actually ran.
+        print(f"\n  Verifying what {len(allowed)} server(s) actually DO — container isolation is"
+              f"\n  requested, and the engine reports per server if it must run without it"
               f"\n  (observed behaviour, not declared — a few minutes; Ctrl-C skips)…")
         run_id = runlog.start_run("verify", target="fleet")
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
@@ -747,7 +752,20 @@ def _front_door_verify(choice: str) -> None:
             cfg = fh.name
         try:
             timeout = float(os.environ.get("MCPGAWK_VERIFY_TIMEOUT", "600"))
-            rc = verify_mod.run([cfg], timeout=timeout)
+            # Same evidence contract as the panel (see run_verify_fleet): every run archives the
+            # engine's per-attempt audit stream in its own directory, never overwritten.
+            from time import gmtime, strftime
+
+            from .panel import behaviour_profile_path
+            audit_args: list[str] = []
+            try:
+                run_dir = (behaviour_profile_path().parent / "verify-runs"
+                           / strftime("%Y-%m-%dT%H-%M-%SZ", gmtime()))
+                run_dir.mkdir(parents=True, exist_ok=True)
+                audit_args = ["--audit-log", str(run_dir / "audit.jsonl")]
+            except OSError:
+                audit_args = []  # read-only HOME: run without the archive rather than not at all
+            rc = verify_mod.run([cfg, "--isolate", *audit_args], timeout=timeout)
         finally:
             try:
                 os.unlink(cfg)

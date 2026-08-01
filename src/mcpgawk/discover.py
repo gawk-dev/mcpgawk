@@ -333,6 +333,13 @@ def discover_servers(home: Path | str | None = None, platform: str | None = None
             if not data:
                 continue
             for name, entry in _extract(data, shape).items():
+                # WHERE this server was declared. For a Claude Desktop extension that directory is
+                # the literal meaning of `${__dirname}` in its own manifest, so without it the
+                # server can be displayed but never launched — which is how a whole install
+                # channel became unverifiable while the page blamed the user's config (38i-q).
+                # Reserved key: `probe` ignores unknown keys and `_identity` never reads it.
+                if shape == _SHAPE_DXT_MANIFEST and isinstance(entry, dict):
+                    entry = {**entry, "_manifest_dir": str(path.parent)}
                 ident = _identity(entry)
                 if ident is None:
                     continue

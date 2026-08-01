@@ -127,3 +127,16 @@ def test_completed_run_reports_the_real_observed_count(monkeypatch, capsys, tmp_
     monkeypatch.setenv("GAWK_BEHAVIOUR", str(prof))
     cli._front_door_verify(protect.REMOTE_ONLY)
     assert "recorded for 2 tool(s)" in capsys.readouterr().out
+
+
+def test_front_door_requests_container_isolation(monkeypatch):
+    """HANDOFF 38c: this path printed "in the sandbox" for weeks while nothing ever passed
+    `--isolate` — a claim about isolation that never ran. The founder's decision (2026-07-31):
+    wire it in and let the engine degrade honestly. This pins the REQUEST; the engine itself
+    prints the per-server degradation when Docker is missing."""
+    seen = _capture_run(monkeypatch, rc=0)
+    monkeypatch.setattr("mcpgawk.discover.discover_servers",
+                        lambda **kw: {"remote": {"url": "https://mcp.example.com/mcp"}})
+    cli._front_door_verify(protect.REMOTE_ONLY)
+    assert "--isolate" in seen["argv"], (
+        "the front door promises isolation is requested, so the flag must actually be passed")

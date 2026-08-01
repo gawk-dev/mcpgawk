@@ -170,6 +170,35 @@ def test_a_request_without_the_token_cannot_approve(tmp_path, monkeypatch):
         httpd.shutdown(); httpd.server_close()
 
 
+def test_an_open_read_cannot_harvest_the_token(tmp_path, monkeypatch):
+    """The gate above is worthless if the page hands the token to whoever asks for it.
+
+    Found 2026-07-30: do_GET embedded the full token in EVERY response while read views stayed
+    open, so an agent needed no credential — GET /, scrape the hidden field, POST it back. Proven
+    end-to-end against the shipped 0.1.20 panel, and decide had the identical shape.
+    """
+    import http.client
+
+    httpd, _ = _live_server(tmp_path, monkeypatch)
+    port = httpd.server_address[1]
+
+    def _get(path: str) -> str:
+        conn = http.client.HTTPConnection(decide.HOST, port, timeout=10)
+        conn.request("GET", path)
+        body = conn.getresponse().read().decode()
+        conn.close()
+        return body
+
+    try:
+        open_view = _get("/")
+        assert "GOOD-TOKEN" not in open_view, "an unauthenticated GET handed out the token"
+        assert 'name="action"' not in open_view, "read-only view must not offer the buttons"
+        # ...and the human, arriving on the tokenised URL printed in their terminal, still can.
+        assert "GOOD-TOKEN" in _get("/?t=GOOD-TOKEN")
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
 def test_a_wrong_token_cannot_approve(tmp_path, monkeypatch):
     httpd, store_path = _live_server(tmp_path, monkeypatch)
     try:

@@ -68,9 +68,22 @@ def test_a_record_predating_transport_storage_does_not_false_alarm():
 
 
 def test_protocol_version_change_surfaces():
+    """CONTRACT CHANGED 2026-07-30, deliberately: this asserted that ANY protocol move is drift.
+
+    The 2026-07-28 revision drops `initialize` and the session, so every server that adopts it
+    reports a newer revision. Under the old rule, upgrade day put the whole fleet in
+    blocked-waiting-on-you and the pile would be cleared with a bulk approve — the failure mode
+    `_with_severity` exists to prevent. A FORWARD move is now surfaced but is not a decision; a
+    downgrade still is. See tests/test_protocol_migration.py.
+    """
     tools = [{"name": "x", "description": "d"}]
-    r = compare(_rec(tools, protocol_version="2024-11-05"), _rec(tools, protocol_version="2025-06-18"))
-    assert r.protocol_changed == ("2024-11-05", "2025-06-18") and r.any is True
+    fwd = compare(_rec(tools, protocol_version="2024-11-05"), _rec(tools, protocol_version="2025-06-18"))
+    assert fwd.protocol_changed == ("2024-11-05", "2025-06-18"), "the move must still be VISIBLE"
+    assert fwd.protocol_migration is True
+    assert fwd.any is False, "adopting a newer spec revision must not block the server"
+
+    back = compare(_rec(tools, protocol_version="2025-06-18"), _rec(tools, protocol_version="2024-11-05"))
+    assert back.any is True, "being pushed onto an older revision stays a decision"
 
 
 def test_nameless_server_switching_transport_adopts_its_old_baseline(tmp_path):

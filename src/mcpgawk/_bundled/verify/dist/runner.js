@@ -188,7 +188,18 @@ function sandboxedProbeFresh(server, sandbox) {
             // server.env goes through wrapSpawn too: a containerized target does NOT inherit the host
             // spawn env, so merging env only into stdioTransport would silently strip it in-container.
             const spawnOverride = session.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
-            await client.connect(stdioTransport(server, session.envOverrides, spawnOverride));
+            // Hold the transport: on a startup failure its stderr tail is the ONLY place the real
+            // cause exists. `listTools` has always attached it; this path did not, so every
+            // containerized probe failure was reported as the bare protocol message.
+            const transport = stdioTransport(server, session.envOverrides, spawnOverride);
+            try {
+                await client.connect(transport);
+            }
+            catch (e) {
+                const cause = explainChildFailure(stderrTailOf(transport));
+                const base = e?.message ?? String(e);
+                throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
+            }
             try {
                 text = resultText(await client.callTool({ name: toolName, arguments: args }, undefined, {
                     timeout: probeTimeoutMs(),

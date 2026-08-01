@@ -12,12 +12,38 @@ import type { VerificationReport } from "./report.js";
  * Positive-only: a role appears only when VERIFY REPRODUCED the finding. A tool with no finding is
  * absent, and its absence is not a claim of safety — the consumer falls back to the name heuristic.
  */
+/**
+ * What a run OBSERVED about one server, recorded whether or not anything was found.
+ *
+ * Separate from `servers` on purpose. `servers` is a record of CONVICTIONS; this is a record of
+ * OBSERVATION. Conflating them made a clean server indistinguishable from an unvisited one.
+ */
+export interface ServerObservation {
+    /** Tools actually exercised. 0 means this run is evidence of nothing. */
+    readonly toolsChecked: number;
+    /** Tools deliberately NOT invoked. Their absence from `servers` is not a claim of safety. */
+    readonly skipped: readonly string[];
+    /** Checks that never reached a verdict. >0 alongside 0 findings is NOT "verified clean". */
+    readonly checkErrors: number;
+    /** Vuln-class codes that ran (remote servers can only run output-based checks). */
+    readonly checksRun: readonly string[];
+    /** Which sandbox actually ran it. "none" is the honest value for an unisolated run. */
+    readonly backend: string;
+}
 export interface BehaviourProfileDoc {
     readonly schema: "gawk.behaviour/1";
     readonly servers: Record<string, Record<string, {
         source?: true;
         sink?: true;
     }>>;
+    /**
+     * Observation record, added 2026-07-30. ADDITIVE: `servers` keeps its exact shape and meaning,
+     * so every existing reader (including gawk_platform/detectors/behaviour.py) is unaffected.
+     * Readers that want "was this server actually looked at?" must consult THIS map — membership of
+     * `servers` answers "was it convicted?", which is a different question and was being used for
+     * both.
+     */
+    readonly verified?: Record<string, ServerObservation>;
 }
 export declare function behaviourProfile(report: VerificationReport): BehaviourProfileDoc;
 /**

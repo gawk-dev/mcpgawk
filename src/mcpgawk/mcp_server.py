@@ -29,7 +29,14 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool, ToolAnnotations
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
 
 from . import __version__, fleet
 from .discover import detect_unscannable, discover_servers
@@ -76,11 +83,10 @@ def build_server() -> Server:
     # server announced itself as "mcpgawk 1.28.1" — the `mcp` package's number. Every client that
     # logs which mcpgawk it is talking to recorded a version that does not exist, which is exactly
     # the kind of quiet inventory error this product exists to catch in other people's servers.
-    server: Server = Server(SERVER_NAME, version=__version__)
-
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return [
+    # SDK v2: handlers are `(ctx, params) -> result model` constructor kwargs; decorator
+    # registration is gone and results are wrapped explicitly.
+    async def list_tools(ctx: Any, params: Any) -> ListToolsResult:
+        return ListToolsResult(tools=[
             Tool(
                 name="scan_mcp_fleet",
                 # Plain description. This text is read by a model, and a security tool writing
@@ -140,11 +146,11 @@ def build_server() -> Server:
                     },
                 },
             ),
-        ]
+        ])
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        args = arguments or {}
+    async def call_tool(ctx: Any, params: CallToolRequestParams) -> CallToolResult:
+        name = params.name
+        args = params.arguments or {}
         try:
             if name == "scan_mcp_fleet":
                 payload = await _scan_fleet(bool(args.get("launch_local")))
@@ -158,8 +164,10 @@ def build_server() -> Server:
             # product exists to prevent.
             payload = {"error": f"{type(exc).__name__}: {exc}",
                        "note": "This scan did NOT complete. Do not read it as a clean result."}
-        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
 
+    server: Server = Server(SERVER_NAME, version=__version__,
+                            on_list_tools=list_tools, on_call_tool=call_tool)
     return server
 
 
