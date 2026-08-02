@@ -31,6 +31,13 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip build
       - run: python -m build
+
+      # Same gate the publish workflow runs, on every push and PR. publish-pypi.yml is the one that
+      # BLOCKS the upload; this is here so a packaging mistake goes red when it is introduced,
+      # rather than first being discovered by the release that was meant to ship it.
+      - name: Verify the built artefacts carry no paid code
+        run: python scripts/verify_public_artifact.py dist/*.whl dist/*.tar.gz
+
       - name: Install the built wheel in a clean env and smoke-test the CLI
         run: |
           python -m venv /tmp/smoke

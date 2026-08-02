@@ -68,6 +68,25 @@ jobs:
       - run: python -m build
         if: env.SKIP != '1'
 
+      # THE LAST GATE BEFORE PYPI — open the box that is about to leave the building.
+      #
+      # Everything else that protects the paid engine is source-level or config-level, and all of it
+      # lives in the PRIVATE repo: the sync allow-list, the pyproject package list, the gate tests.
+      # None of that can stop an upload that happens HERE. A packaging change, a stray include, or a
+      # build backend following a symlink would put `gawk_platform` in this wheel with every private
+      # gate still green — and PyPI has no unpublish, so the mistake is permanent.
+      #
+      # So the check runs on the BUILT artefacts, in the job that uploads them, after `build` and
+      # before `twine`. It also fails on OVER-exclusion (a wheel with no `_bundled/verify` is a
+      # broken free product) and on credential-shaped strings. Exit 2 means "could not check" and
+      # is treated exactly like a failure — never publish something unverified.
+      #
+      # scripts/verify_public_artifact.py is kept byte-identical to the canonical copy by
+      # public_sync's PUBLIC_SCRIPTS contract; it is stdlib-only, so it needs nothing installed.
+      - name: Verify the built artefacts carry no paid code (blocks the upload)
+        if: env.SKIP != '1'
+        run: python scripts/verify_public_artifact.py dist/*.whl dist/*.tar.gz
+
       - name: Publish to PyPI
         if: env.SKIP != '1'
         env:
