@@ -187,6 +187,28 @@ def test_summarise_counts_what_a_human_asks_for(tmp_path):
     assert (s["calls"], s["denied"], s["sessions"], s["servers"]) == (2, 1, 2, 2)
 
 
+def test_summarise_never_counts_a_decline_as_a_check(tmp_path):
+    """Eval 1.6 at the counting layer. `calls` is everything the guard SAW; `checked` is only what
+    it evaluated against an approved surface. Folding declines into `checked` is what produced
+    "802 MCP call(s) checked" over 801 declines — so they must be counted apart here, not merely
+    rendered apart upstream.
+    """
+    path = tmp_path / "calls.jsonl"
+    for _ in range(8):
+        spool.record_decision(server="a", tool="t", decision="defer", adapter="h",
+                              session="s1", path=str(path))
+    spool.record_decision(server="a", tool="t", decision="allow", adapter="h",
+                          session="s1", path=str(path))
+    spool.record_decision(server="b", tool="t", decision="deny", adapter="h",
+                          session="s2", path=str(path))
+
+    s = spool.summarise(path=str(path))
+    assert s["calls"] == 10, "every call the guard saw"
+    assert s["checked"] == 2, "only the allow + the deny were checked against anything"
+    assert s["deferred"] == 8
+    assert s["denied"] == 1
+
+
 def test_a_missing_spool_reads_as_empty_not_an_error(tmp_path):
     assert spool.read(path=str(tmp_path / "absent.jsonl")) == []
     assert spool.summarise(path=str(tmp_path / "absent.jsonl"))["calls"] == 0

@@ -32,6 +32,13 @@ WHAT IT DECIDES, and — just as important — what it refuses to decide:
 see". A security hook that returned it would be auto-approving tool calls the human was about to
 be asked about, silently REDUCING the protection on the machine it was installed to protect. So
 the only outcomes here are deny (we found something) and defer (carry on as normal).
+
+Do not confuse that with the SPOOL verb. What we return to the agent is deny-or-nothing; what we
+RECORD is one of `deny` / `allow` / `defer`, where `allow` means "checked against the approved
+surface and/or observations, and passed" and `defer` means "declined to check". The record has to
+carry that distinction because `status` reads it: with both written as `defer`, a machine with no
+usable projection produced a log byte-identical to a fully enforced one, and status reported 802
+calls "checked" where 801 were declines and nothing was ever enforced.
 """
 from __future__ import annotations
 
@@ -193,6 +200,17 @@ def approved_for(server: str, store_path: Path) -> dict[str, str] | None:
     return approved
 
 
+def approved_for_detail(server: str, store_path: Path) -> tuple[dict[str, str] | None, str | None]:
+    """`(approved, note)` — the approved surface AND why there is none, when there is none.
+
+    Public twin of `approved_for`, added for the paid gateway (2026-08-02). The gateway must not
+    only read the same baseline the hook reads — it must be able to SAY, at startup, that the
+    declared tier is inert and why. A control that is silently off is the failure this whole
+    product argues against, so the note is part of the contract, not a debug aid.
+    """
+    return _approved_from_projection(server, store_path)
+
+
 def _approved_from_projection(server: str,
                               store_path: Path) -> tuple[dict[str, str] | None, str | None]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
@@ -256,21 +274,27 @@ def _approved_from_projection(server: str,
 def decide(event: dict, store_path: Path | None = None,
            fmt: str = "claude") -> tuple[dict | None, str | None]:
     """(hook output or None to defer, stderr note or None)."""
-    output, note, _basis = _decide(event, store_path, fmt)
+    output, note, _basis, _checked = _decide(event, store_path, fmt)
     return output, note
 
 
 def _decide(event: dict, store_path: Path | None,
-            fmt: str) -> tuple[dict | None, str | None, str]:
+            fmt: str) -> tuple[dict | None, str | None, str, bool]:
     """The full decision including WHICH BASIS produced it, so the record carries the evidence
-    tier (declared vs observed) — an operator cannot calibrate trust in a deny without it."""
+    tier (declared vs observed) — an operator cannot calibrate trust in a deny without it.
+
+    The fourth value is `checked`: whether a verdict was computed against anything at all. A call
+    we DECLINED to check (no projection, stale projection, decision core unloadable) produced no
+    verdict, and must not be logged the same way as a call that was checked and passed — `status`
+    counted both and reported 802 calls "checked" where 801 were declines and none were enforced.
+    """
     tool_name, _args = _read_event(fmt, event)
     if not isinstance(tool_name, str):
-        return None, None, "declared"
+        return None, None, "declared", False
 
     parsed = parse_mcp_tool_name(tool_name)
     if parsed is None:
-        return None, None, "declared"   # not an MCP tool: not ours to judge
+        return None, None, "declared", False   # not an MCP tool: not ours to judge
     server, tool = parsed
 
     store = store_path or history_path()
@@ -281,7 +305,7 @@ def _decide(event: dict, store_path: Path | None,
     # verdict, and "we found nothing" is defer, not deny.
     core = _load_sibling("decision")
     if core is None:
-        return None, note, "declared"
+        return None, note, "declared", False
 
     # The behavioural tier (free since Task 0): observations verify recorded for THIS server,
     # plus this session's earlier observed-source calls from the spool. Both are gathered only
@@ -296,9 +320,13 @@ def _decide(event: dict, store_path: Path | None,
         sources = _session_sources(_session_id(event), behaviour)
 
     verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
+    # Checked means there was something to check AGAINST: an approved surface for this server, or
+    # recorded observations of it. With neither, `verdict` had no evidence and whatever it returned
+    # is a decline, not a pass. A DENY is checked by construction.
+    checked = verdict == core.DENY or approved is not None or observations is not None
     if verdict == core.DENY:
-        return _deny(fmt, reason), note, basis
-    return None, note, basis
+        return _deny(fmt, reason), note, basis, checked
+    return None, note, basis, checked
 
 
 def _read_event(fmt: str, event: dict) -> tuple[str | None, dict]:
@@ -356,13 +384,13 @@ def main(argv: list[str] | None = None) -> int:
             fmt = argv[i + 1]
 
     try:
-        output, note, basis = _decide(event, None, fmt)
+        output, note, basis, checked = _decide(event, None, fmt)
     except Exception as exc:  # noqa: BLE001 — our bug must never brick the agent session
         print(f"[mcpgawk guard] internal error, deferring (NOT a clean verdict): "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_OK
 
-    _record(event, output, fmt, basis)
+    _record(event, output, fmt, basis, checked)
 
     if note:
         print(f"[mcpgawk guard] {note}", file=sys.stderr)
@@ -373,7 +401,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _record(event: dict, output: dict | None, fmt: str = "claude",
-            basis: str = "declared") -> None:
+            basis: str = "declared", checked: bool = False) -> None:
     """Append this decision to the runtime spool.
 
     EVERY checked call is recorded, including the ones we defer on — that is the whole point.
@@ -404,7 +432,11 @@ def _record(event: dict, output: dict | None, fmt: str = "claude",
         spool = _load_sibling("spool")
         if spool is None:
             return
-        decision = "deny" if output else "defer"
+        # THREE outcomes, not two. `allow` is "checked against the approved surface
+        # and/or observations, and passed"; `defer` is "declined to check". Collapsing
+        # them made a machine with no usable projection indistinguishable in the log
+        # from a fully enforced one.
+        decision = "deny" if output else ("allow" if checked else "defer")
         spool.record_decision(
             server=server, tool=tool, decision=decision, adapter=adapter, basis=basis,
             session=_session_id(event),

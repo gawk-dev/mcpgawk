@@ -126,9 +126,16 @@ def _report(action: str, exc: Exception) -> None:
           file=sys.stderr)
 
 
-def start_run(kind: str, target: str | None = None, *, path: str | None = None) -> str | None:
+def start_run(kind: str, target: str | None = None, *, summary: dict[str, Any] | None = None,
+              path: str | None = None) -> str | None:
     """Open a run and return its id, or None if the registry could not be written (the caller
-    carries on regardless — a None id simply means this run will not appear in the timeline)."""
+    carries on regardless — a None id simply means this run will not appear in the timeline).
+
+    `summary` at OPEN time exists for facts that matter while the run is still `running` — the
+    enforce gateway's listen endpoint is the motivating case: a UI that wants to say "a gateway is
+    up, point your agent at http://…/mcp" can only say it while the process is alive, which is
+    exactly when `finish_run`'s summary does not exist yet. `finish_run` replaces it wholesale, so
+    a caller that wants a fact to survive the run must repeat it there."""
     if kind not in KINDS:
         raise ValueError(f"unknown run kind {kind!r}; add it to runlog.KINDS deliberately")
     run_id = uuid.uuid4().hex
@@ -136,9 +143,11 @@ def start_run(kind: str, target: str | None = None, *, path: str | None = None) 
         with _connect(path) as conn:
             conn.execute("begin immediate")
             conn.execute(
-                "insert into runs (run_id, kind, target, started_at, status, host, pid) "
-                "values (?,?,?,?,?,?,?)",
-                (run_id, kind, target, _now(), RUNNING, socket.gethostname(), os.getpid()),
+                "insert into runs (run_id, kind, target, started_at, status, summary, host, pid) "
+                "values (?,?,?,?,?,?,?,?)",
+                (run_id, kind, target, _now(), RUNNING,
+                 json.dumps(summary, sort_keys=True) if summary else None,
+                 socket.gethostname(), os.getpid()),
             )
             conn.execute("commit")
         return run_id

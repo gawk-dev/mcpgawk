@@ -1,1 +1,1 @@
-{"version":3,"file":"sarif.d.ts","sourceRoot":"","sources":["../src/sarif.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,aAAa,CAAC;AA6BtD,wBAAgB,OAAO,CAAC,MAAM,EAAE,kBAAkB,GAAG,MAAM,CAsE1D"}
+{"version":3,"file":"sarif.d.ts","sourceRoot":"","sources":["../src/sarif.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,aAAa,CAAC;AA6BtD,wBAAgB,OAAO,CAAC,MAAM,EAAE,kBAAkB,GAAG,MAAM,CAkF1D"}

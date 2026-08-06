@@ -16,6 +16,10 @@ export declare const EGRESS_COVERAGE: string;
 export declare const DOCKER_COVERAGE: string;
 /** The ADR-0014 claim: isolation AND observation in the same run — the strongest coverage. */
 export declare const PROXIED_COVERAGE: string;
+/** What replaces every coverage CLAIM when the run did not complete. Deliberately contains none of
+ * the strong-claim wording (no "BLOCKED", no "is recorded") — an incomplete run has established
+ * nothing to make a claim about. Followed by the specific reasons and {@link EGRESS_COVERAGE}. */
+export declare const INCOMPLETE_COVERAGE: string;
 /** Transparent, re-derivable status: worst severity present decides it — EXCEPT `incomplete`, which
  * means the server could not be fully verified (a dynamic-dispatch server whose hidden catalog was
  * not enumerated) and so must NOT read as `clean`. Precedence: vulnerable > at-risk > incomplete >
@@ -42,6 +46,16 @@ export interface ReportServer {
     readonly status: Status;
     readonly toolsChecked: number;
     readonly checksRun: readonly string[];
+    /** Every check this server's verification INTENDED to perform (see {@link Completeness}). */
+    readonly checksPlanned: number;
+    /** The subset that produced a verdict either way. `< checksPlanned` ⇒ the server is INCOMPLETE. */
+    readonly checksCompleted: number;
+    /** Derived, never decided locally: `checksCompleted === checksPlanned` AND a tool was exercised
+     * AND (dispatcher) the hidden catalog was fully enumerated+probed. `status` can only be `clean`
+     * when this is true. */
+    readonly complete: boolean;
+    /** Why not complete — empty iff `complete`. Rendered by every human surface. */
+    readonly incompleteReasons: readonly string[];
     readonly findings: readonly ReportFinding[];
     readonly skipped: ReadonlyArray<{
         readonly tool: string;
@@ -94,6 +108,14 @@ export interface VerificationReport {
         /** Number of servers hiding a larger tool catalog behind dynamic dispatch that was NOT
          * enumerated. >0 means the run is INCOMPLETE, not clean — same spirit as checkErrors. */
         readonly dynamicDispatch: number;
+        /** Every check the whole run intended to perform. */
+        readonly checksPlanned: number;
+        /** The subset that produced a verdict. `< checksPlanned` ⇒ the run is INCOMPLETE. */
+        readonly checksCompleted: number;
+        /** THE field: every renderer and the exit code derive from this and {@link status}. */
+        readonly complete: boolean;
+        /** Why the run is not complete — empty iff `complete`. */
+        readonly incompleteReasons: readonly string[];
         readonly status: Status;
         readonly bySeverity: Record<Severity, number>;
     };
@@ -115,8 +137,51 @@ export declare function groupEgressByHost(egressFindings: readonly ReportFinding
     host: string;
     tools: string[];
 }>;
-/** Worst severity → status. critical ⇒ vulnerable; high/medium ⇒ at-risk; else clean. */
+/** Worst severity → status. critical ⇒ vulnerable; high/medium ⇒ at-risk; else clean.
+ *
+ * NOTE: severity ALONE can never decide a status — it cannot see whether anything was actually
+ * checked. Use {@link deriveStatus}, which folds this together with {@link Completeness}. This is
+ * exported only for the severity half and for direct unit tests of it. */
 export declare function statusOf(severities: readonly Severity[]): Status;
+/**
+ * The ONE completeness derivation (remediation plan 1A). Everything downstream — `status`, the exit
+ * code, the coverage sentence, prose, JSON, HTML, SARIF, JUnit — is a function of this, so no two
+ * surfaces can disagree the way they did before 2026-08-02.
+ *
+ * `checksPlanned` is every check the run INTENDED to perform; `checksCompleted` is the subset that
+ * produced a verdict either way. A check that hit infra noise (see {@link CheckError}) is planned
+ * but NOT completed, so it can never be silently absorbed into a clean pass.
+ */
+export interface Completeness {
+    readonly checksPlanned: number;
+    readonly checksCompleted: number;
+    readonly complete: boolean;
+    /** Human-readable, machine-stable reasons the run/server is not complete. Empty iff complete. */
+    readonly reasons: readonly string[];
+}
+/** Completeness for ONE server. A server is complete only when every check it planned produced a
+ * verdict, at least one tool was actually exercised, and (for a dispatcher) its whole hidden
+ * catalog was enumerated AND probed. */
+export declare function serverCompleteness(r: DispatchCoverage & {
+    readonly toolsChecked: number;
+    readonly checkErrors: readonly CheckError[];
+    readonly checksPlanned?: number;
+    readonly checksCompleted?: number;
+}): Completeness;
+/** Completeness for the WHOLE run: every server complete, at least one server, at least one tool
+ * anywhere, and no server that failed outright. */
+export declare function runCompleteness(servers: readonly ReportServer[], errors: readonly ReportError[]): Completeness;
+/**
+ * The single status algebra. Precedence is unchanged (vulnerable > at-risk > incomplete > clean) —
+ * a reproduced finding still outranks incompleteness — but `clean` is now UNREACHABLE unless the
+ * run/server is complete. Before this, `clean` was decided by severity alone, so any number of
+ * failed checks (1 or 1000) still read as a clean pass.
+ */
+export declare function deriveStatus(severity: Status, completeness: Completeness): Status;
+/** The ONLY exit-code derivation: a pure function of {@link Status}. 1 = actionable (a reproduced
+ * finding), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
+ * computed independently of `summary.status`, so `incomplete` could exit 0 and `clean` exit 2. */
+export declare function exitCodeForStatus(status: Status): number;
 /** The three dispatch-coverage fields — shared by the raw {@link ServerReport} and the rendered
  * {@link ReportServer}, so the F4-4 rule is computed from one place on either shape. */
 interface DispatchCoverage {

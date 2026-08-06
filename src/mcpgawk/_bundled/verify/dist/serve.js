@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { dockerAvailable } from "@gawk/sandbox";
 import { CHECKS } from "./checks.js";
 import { serversOf, toConfig } from "./config.js";
-import { discoverFleet } from "./fleet.js";
+import { FLEET_STATES, discoverFleet, stateStatus } from "./fleet.js";
 import { REPORT_CSS, renderReportBody } from "./html.js";
 import { buildReport } from "./report.js";
 import { loadTimeline } from "./timeline.js";
@@ -233,15 +233,22 @@ var unsafeEl=document.getElementById('unsafe'),isolateEl=document.getElementById
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 
 // ---- Fleet hub: the real servers on this machine, from mcpgawk discovery ----
-var STATE_MAP={CLEAN:['clean','clean'],REVIEW:['review','risk'],VULNERABLE:['vulnerable','vuln'],
-  AUTH:['needs auth','muted'],SKIPPED:['skipped','incomplete'],UNREACHABLE:['unreachable','muted'],
-  'NOT-SCANNABLE':['remote','muted']};
+// GENERATED from fleet.ts's stateStatus — the one definition. This used to be a hand-written
+// second copy that had already drifted from it, which is exactly how two surfaces come to
+// disagree about whether a server was checked.
+var STATE_MAP=${JSON.stringify(Object.fromEntries(FLEET_STATES.map((s) => {
+        const { label, role } = stateStatus(s);
+        return [s, [label, role]];
+    })))};
 // Each AI tool takes its ecosystem's identity tint (Nativerse DS --eco-* tokens); unknown tools fall back to accent.
 var ECO={'claude-code':'--eco-anthropic','claude-desktop':'--eco-anthropic','claude-desktop-extension':'--eco-anthropic',
   'claude.ai':'--eco-anthropic','codex':'--eco-openai','gemini-cli':'--eco-google','antigravity':'--eco-google',
   'chrome':'--eco-google','vscode':'--eco-ms'};
 function ecoStyle(c){var t=ECO[c];return t?' style="--eco:var('+t+')"':'';}
-function stateOf(s){return STATE_MAP[String(s||'').toUpperCase()]||[String(s||'').toLowerCase(),'muted'];}
+// Unknown state => incomplete, never muted. Same rule as stateStatus's default branch: muted is
+// the deliberate 'we chose not to scan this', so using it as the fallback files anything new or
+// unexpected under 'nothing to see here'.
+function stateOf(s){return STATE_MAP[String(s||'').toUpperCase()]||[String(s||'').toLowerCase(),'incomplete'];}
 function fleetRow(sv){
   var st=stateOf(sv.state),label=st[0],role=st[1];
   // A Verify action only where a launch spec is available (sv.scannable). Clicking it launches the
@@ -275,13 +282,24 @@ function renderFleet(f){
   servers.forEach(function(sv){(sv.clients&&sv.clients.length?sv.clients:['(unattributed)']).forEach(function(c){
     (groups[c]=groups[c]||[]).push(sv);});});
   // summary counts by role
+  // EVERY role gets a stat. 'incomplete' had none, so a SKIPPED server was counted into a role
+  // that was never rendered and simply vanished from the summary — the totals then read as though
+  // the fleet were fully accounted for, with a green Clean tally sitting next to the gap.
   var counts={};servers.forEach(function(sv){var r=stateOf(sv.state)[1];counts[r]=(counts[r]||0)+1;});
+  var STATS=[['vuln','Vulnerable','--bad'],['risk','Review','--warn'],
+             ['incomplete','Not checked','--warn'],['clean','Clean','--clean'],
+             ['muted','Not scanned','--muted']];
+  var shown=0;
+  var cells=STATS.map(function(s){
+    var n=counts[s[0]]||0;if(!n)return '';shown+=n;
+    return '<div class="stat"><div class="k">'+s[1]+'</div><div class="v" style="color:var('+s[2]+')">'+n+'</div></div>';
+  }).join('');
+  // A role we forgot to list must surface as a visible discrepancy, not disappear silently.
+  var unaccounted=servers.length-shown;
   var summary='<div class="fleet-summary">'+
     '<div class="stat"><div class="k">Servers</div><div class="v">'+servers.length+'</div></div>'+
-    (counts.risk?'<div class="stat"><div class="k">Review</div><div class="v" style="color:var(--warn)">'+counts.risk+'</div></div>':'')+
-    (counts.vuln?'<div class="stat"><div class="k">Vulnerable</div><div class="v" style="color:var(--bad)">'+counts.vuln+'</div></div>':'')+
-    (counts.clean?'<div class="stat"><div class="k">Clean</div><div class="v" style="color:var(--clean)">'+counts.clean+'</div></div>':'')+
-    (counts.muted?'<div class="stat"><div class="k">Not scanned</div><div class="v" style="color:var(--muted)">'+counts.muted+'</div></div>':'')+
+    cells+
+    (unaccounted>0?'<div class="stat"><div class="k">Unaccounted</div><div class="v" style="color:var(--warn)">'+unaccounted+'</div></div>':'')+
     '</div>';
   var body=Object.keys(groups).sort().map(function(c){
     return '<div class="fgroup"><div class="gh"'+ecoStyle(c)+'><b>'+esc(c)+'</b> <span class="ct">'+groups[c].length+' server(s)</span></div>'+
@@ -374,11 +392,13 @@ async function runVerify(url,payload,statusText){
   }catch(ex){errEl.innerHTML='<div class="err">Request failed: '+ex.message+'</div>';return null}
   finally{go.disabled=false;statusEl.textContent='';}
 }
-// Worst verdict across the run's servers — for the fleet-row annotation only.
-function worstStatus(report){
-  var order=['vulnerable','at-risk','incomplete','clean'];var seen=(report&&report.servers||[]).map(function(s){return s.status});
-  for(var i=0;i<order.length;i++)if(seen.indexOf(order[i])>=0)return order[i];
-  return null;
+// The run's verdict, as the SERVER derived it. This used to re-implement deriveStatus's precedence
+// here as a hard-coded array — a third copy of the status algebra — and it read only
+// report.servers, so it ignored report.errors AND ignored the completeness half entirely: a run
+// with zero servers and N errors returned null and showed no annotation at all. summary.status is
+// already in the payload and is the only value the exit code, the HTML banner and SARIF agree on.
+function runStatus(report){
+  return (report&&report.summary&&report.summary.status)||null;
 }
 function configProblem(text){
   if(!text.trim()) return 'Paste an MCP server config to verify — the shape is shown in the box.';
@@ -408,7 +428,7 @@ document.getElementById('fleet').addEventListener('click',function(e){
     'Verifying '+name+' — spawning it in the sandbox and probing each tool…').then(function(data){
     // Close the loop on the row itself. An ANNOTATION beside the pill, never a pill rewrite:
     // the pill is the CLI's scan state and the two surfaces must not disagree.
-    var st=data&&worstStatus(data.report);if(!st)return;
+    var st=data&&runStatus(data.report);if(!st)return;
     var row=document.querySelector('[data-srv="'+(window.CSS&&CSS.escape?CSS.escape(name):name)+'"]');if(!row)return;
     var nm=row.querySelector('.nm');if(!nm)return;
     var old=row.querySelector('.vnote');if(old)old.remove();
@@ -499,7 +519,8 @@ export function createVerifyServer(opts) {
             send(res, 200, "text/html; charset=utf-8", renderTimelinePage(timeline));
             return;
         }
-        if (req.method === "GET" && (req.url === "/api/timeline" || req.url?.startsWith("/api/timeline?"))) {
+        if (req.method === "GET" &&
+            (req.url === "/api/timeline" || req.url?.startsWith("/api/timeline?"))) {
             const limit = Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("limit") ?? 100);
             send(res, 200, "application/json", JSON.stringify(await loadTimeline(Number.isFinite(limit) ? limit : 100)));
             return;

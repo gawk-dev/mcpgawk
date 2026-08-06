@@ -1,5 +1,5 @@
 import { REPORT_CSS } from "./html.js";
-import { formatDuration, durationSeconds, groupByDay, shortenTarget, summaryChips, timelineTotals, } from "./timeline.js";
+import { durationSeconds, formatDuration, groupByDay, shortenTarget, summaryChips, timelineTotals, } from "./timeline.js";
 /**
  * The local timeline view — "what has run on this machine, and how did it go".
  *
@@ -34,7 +34,11 @@ const STATUS = {
     incomplete: { cls: "st-open", label: "incomplete" },
 };
 const KIND_LABEL = {
-    scan: "scan", verify: "verify", enforce: "enforce", monitor: "monitor", guard: "guard",
+    scan: "scan",
+    verify: "verify",
+    enforce: "enforce",
+    monitor: "monitor",
+    guard: "guard",
 };
 function timeOfDay(iso) {
     // Render in the viewer's local zone: the registry stores UTC, but "when did I run this" is a

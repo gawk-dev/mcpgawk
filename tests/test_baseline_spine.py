@@ -32,20 +32,20 @@ def store(tmp_path: Path) -> str:
 
 
 def test_nothing_is_approved_until_someone_approves_it(store):
-    history.record("srv", REC, path=store)
+    history.record("mcp:srv", REC, path=store)
     # First sighting is trust-on-first-use in scan, so this IS approved; a second, different
     # sighting must NOT move it.
-    history.record("srv", {**REC, "pin": "ffffffffffffffff"}, path=store)
-    assert baseline.approved_pin("srv", store) == REC["pin"], "a sighting is not an approval"
+    history.record("mcp:srv", {**REC, "pin": "ffffffffffffffff"}, path=store)
+    assert baseline.approved_pin("mcp:srv", store) == REC["pin"], "a sighting is not an approval"
 
 
 def test_approve_moves_the_shared_baseline(store):
-    history.record("srv", REC, path=store)
+    history.record("mcp:srv", REC, path=store)
     moved = {**REC, "pin": "ffffffffffffffff", "tools": {"read_file": "111111111111"}}
-    history.record("srv", moved, path=store)
-    history.approve("srv", path=store)
-    assert baseline.approved_pin("srv", store) == "ffffffffffffffff"
-    assert baseline.approved_tools("srv", store) == {"read_file": "111111111111"}
+    history.record("mcp:srv", moved, path=store)
+    history.approve("mcp:srv", path=store)
+    assert baseline.approved_pin("mcp:srv", store) == "ffffffffffffffff"
+    assert baseline.approved_tools("mcp:srv", store) == {"read_file": "111111111111"}
 
 
 def test_a_name_the_user_typed_resolves_to_the_key_it_is_stored_under(store):
@@ -61,17 +61,17 @@ def test_a_name_the_user_typed_resolves_to_the_key_it_is_stored_under(store):
 def test_export_carries_only_approved_state(store):
     """A sighting must never cross the boundary: handing verify the last thing SEEN would give it
     the poisoned surface as though it were trusted."""
-    history.record("approved-one", REC, path=store)
-    history.approve("approved-one", path=store)
+    history.record("mcp:approved-one", REC, path=store)
+    history.approve("mcp:approved-one", path=store)
 
     raw = json.loads(Path(store).read_text())
-    raw["servers"]["seen-only"] = {"seen": [REC]}          # sighted, never approved
+    raw["servers"]["mcp:seen-only"] = {"seen": [REC]}          # sighted, never approved
     Path(store).write_text(json.dumps(raw))
 
     data = baseline.export(store)
     assert data["schema"] == baseline.SCHEMA
-    assert "approved-one" in data["servers"]
-    assert "seen-only" not in data["servers"]
+    assert "mcp:approved-one" in data["servers"]
+    assert "mcp:seen-only" not in data["servers"]
 
 
 def test_never_approved_is_none_not_empty(store):
@@ -83,8 +83,8 @@ def test_never_approved_is_none_not_empty(store):
 
 def test_the_cli_emits_the_cross_runtime_shape(store, tmp_path):
     """`mcpgawk baseline --json` is the contract verify reads. If this shape moves, verify breaks."""
-    history.record("srv", REC, path=store)
-    history.approve("srv", path=store)
+    history.record("mcp:srv", REC, path=store)
+    history.approve("mcp:srv", path=store)
 
     r = subprocess.run(
         [sys.executable, "-m", "mcpgawk.cli", "baseline", "--json"],
@@ -94,8 +94,8 @@ def test_the_cli_emits_the_cross_runtime_shape(store, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     data = json.loads(r.stdout)
     assert data["schema"] == "gawk.baseline/1"
-    assert data["servers"]["srv"]["tools"] == REC["tools"]
-    assert data["servers"]["srv"]["pin"] == REC["pin"]
+    assert data["servers"]["mcp:srv"]["tools"] == REC["tools"]
+    assert data["servers"]["mcp:srv"]["pin"] == REC["pin"]
 
 
 def test_asking_for_an_unapproved_server_fails_loudly(store, tmp_path):

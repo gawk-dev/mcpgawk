@@ -51,17 +51,38 @@ def collect() -> dict[str, Any]:
     data: dict[str, Any] = {"errors": {}}
 
     try:
-        from .discover import discover_servers
-        found = discover_servers()
-        data["entries"] = found[0] if isinstance(found, tuple) else (found or {})
+        from .discover import discover_report, problem_lines
+        found, sources = discover_report()
+        data["entries"] = found or {}
+        # The sweep's own shortfalls (unparsable config, unreadable file, unrecognised entry
+        # shapes, disabled servers) — rendered on the Servers tab so a partial fleet can never
+        # present as a complete one. Same lines the CLI prints.
+        data["discovery_problems"] = problem_lines(sources)
     except Exception as exc:                       # noqa: BLE001
-        data["entries"] = {}
+        data["entries"], data["discovery_problems"] = {}, []
         data["errors"]["fleet"] = f"{type(exc).__name__}: {exc}"
 
     try:
-        store = history.load(history.default_path())
+        # Capabilities that exist for this user but that NO local scan can reach — account-hosted
+        # connectors and browser native-messaging hosts. The CLI has always listed these; the
+        # panel did not, so on the screen the operator actually uses they were simply absent,
+        # which is the one rendering a discovery tool must never produce.
+        from .discover import detect_unscannable
+        data["unscannable"] = detect_unscannable()
+    except Exception as exc:                       # noqa: BLE001
+        data["unscannable"] = []
+        data["errors"]["unscannable"] = f"{type(exc).__name__}: {exc}"
+
+    try:
+        # load_checked, not load: `load` degrades an unreadable store to an empty one, and an
+        # empty store renders as a calm, confident "nothing approved, nothing wrong" panel that is
+        # byte-identical to a fresh machine. The corruption never raised, so this except never
+        # fired and the error tile never appeared. The reason has to travel WITH the result.
+        store, load_error = history.load_checked(history.default_path())
         data["store"] = store
         data["pending"] = history.pending(store)
+        if load_error:
+            data["errors"]["baseline"] = load_error
     except Exception as exc:                       # noqa: BLE001
         data["store"], data["pending"] = {"servers": {}}, []
         data["errors"]["baseline"] = f"{type(exc).__name__}: {exc}"
@@ -78,8 +99,13 @@ def collect() -> dict[str, Any]:
         data["errors"]["runtime"] = f"{type(exc).__name__}: {exc}"
 
     try:
-        data["hooks"] = {a.key: guard.is_installed_for(a)
-                         for a in agent_mod.ADAPTERS.values() if a.config.is_file()}
+        # `is_installed_for` answers "is our marker in this config?" — true for a hook whose
+        # interpreter or script has since gone, which checks nothing. The panel's rule is that
+        # unenforceable is never rendered as checked, so it asks whether the hook can actually RUN.
+        _health = {a.key: guard.hook_health_for(a)
+                   for a in agent_mod.ADAPTERS.values() if a.config.is_file()}
+        data["hooks"] = {k: v == "ok" for k, v in _health.items()}
+        data["hook_health"] = _health
         data["adapters"] = agent_mod.ADAPTERS
         data["no_hook"] = agent_mod.NO_HOOK_POINT
     except Exception as exc:                       # noqa: BLE001
@@ -132,6 +158,11 @@ def collect() -> dict[str, Any]:
                                                or (f.get("evidence") or {}).get("hosts") or [])]
                     data["findings"].append({
                         "server": s.get("server"),
+                        # When this server was last actually verified. The report can now carry
+                        # servers from EARLIER runs (a single-server verify no longer deletes the
+                        # rest), so a finding must be able to say how old it is instead of
+                        # inheriting the run timestamp of a run that never touched it.
+                        "verified_at": s.get("verifiedAt") or data["verify_at"],
                         "tool": f.get("tool") or cand.get("toolName"),
                         "code": f.get("code") or cand.get("code"),
                         "class": f.get("class") or cand.get("findingClass"),
@@ -155,6 +186,16 @@ def collect() -> dict[str, Any]:
         data["verify_blocked"] = unavailable_reason()
     except Exception:                              # noqa: BLE001
         data["verify_blocked"] = "verification engine not available in this install"
+
+    try:
+        data["monitor"] = monitor_status()
+    except Exception as exc:                       # noqa: BLE001 — degrade the tile, not the page
+        data["monitor"] = {"installed": False, "db_present": False, "error": str(exc)}
+
+    try:
+        data["gateway"] = gateway_status()
+    except Exception as exc:                       # noqa: BLE001 — degrade the tile, not the page
+        data["gateway"] = {"installed": False, "audit_present": False, "error": str(exc)}
 
     return data
 
@@ -237,6 +278,104 @@ def _classify(name: str, key: str | None, d: dict) -> str:
     return "baseline"
 
 
+
+
+def _merge_verify_report(report_path: Path | str, prev_report: dict) -> None:
+    """Preserve servers the latest run did not cover, instead of deleting their results.
+
+    `gawk-verify --out` writes the report for the run it just did. The panel verifies ONE server
+    at a time by design (a fleet run costs minutes), so every row-level verify replaced the file
+    with a single-server report and silently erased every other server's reproduced findings: the
+    pill flipped red -> green "At baseline" and the Findings tab claimed "No verify has run yet"
+    seconds after one had.
+
+    What is deliberately NOT done here: recomputing the top-level `summary`. That value is derived
+    by the engine's status algebra over the servers IT verified, and synthesising a merged one in
+    Python would be a fourth implementation of the algebra we just finished consolidating. The
+    summary therefore keeps describing THIS run, `merged` says the server list is wider than it,
+    and every server entry carries `verifiedAt` so a preserved result can be shown with its age
+    rather than passed off as current.
+    """
+    try:
+        fresh = json.loads(Path(report_path).read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return                       # nothing written (engine failed) — leave the previous file be
+
+    now = fresh.get("generatedAt") or ""
+    fresh_servers = [s for s in (fresh.get("servers") or []) if isinstance(s, dict)]
+    covered = {s.get("server") for s in fresh_servers}
+    for s in fresh_servers:
+        s.setdefault("verifiedAt", now)
+
+    kept = []
+    for s in (prev_report.get("servers") or []):
+        if not isinstance(s, dict) or s.get("server") in covered:
+            continue                 # this run has a newer answer for it
+        s.setdefault("verifiedAt", prev_report.get("generatedAt") or "")
+        kept.append(s)
+
+    if not kept:
+        return                       # the run covered everything we had — the file is already right
+
+    fresh["servers"] = fresh_servers + kept
+    fresh["merged"] = True
+    # Same treatment for run-level errors, so a server that failed to start does not vanish either.
+    fresh_errors = [e for e in (fresh.get("errors") or []) if isinstance(e, dict)]
+    fresh["errors"] = fresh_errors + [
+        e for e in (prev_report.get("errors") or [])
+        if isinstance(e, dict) and e.get("server") not in covered
+    ]
+    try:
+        tmp = f"{report_path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(fresh, fh, indent=2, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, report_path)
+    except OSError:
+        pass                         # a read-only HOME must not fail an otherwise-good run
+
+
+def verify_verdict(*, checked: int, skipped: list, errors: int, hits: int,
+                   folded: int = 0, backend: str | None = None,
+                   degraded: str | None = None) -> tuple[str, str, str]:
+    """(outcome, level, detail) for one server a verify run touched.
+
+    "observed" is NOT a verdict — it says we managed to run, which is a fact about US. The founder
+    watched this page award `browserstack` a green `observed` chip while the grey text beside it
+    read "20 with findings": the chip said good news, the sentence said his most-used server was
+    convicted on every tool checked.
+
+    Order matters and is deliberate — the first thing that is true wins:
+      convictions > checks that never completed > checks never attempted > NOTHING CHECKED > clean.
+    """
+    bits = [f"{checked or hits} tool(s) watched"]
+    if skipped:            # never let an untested tool read as a clean one
+        bits.append(f"{len(skipped)} not invoked — absence there proves nothing")
+    if errors:
+        bits.append(f"{errors} check(s) never completed")
+    if backend:            # the truth about isolation, per server, instead of a claim
+        bits.append(f"isolation: {backend}")
+    if degraded:           # container isolation was requested and did NOT run — say why
+        bits.append(f"ran WITHOUT container isolation — {degraded.split('—')[0].strip()}")
+    if folded:             # classified, never dropped — the list is on the Findings screen
+        bits.append(f"{folded} first-party finding(s) folded (the vendor's own traffic)")
+    detail = " · ".join(bits)
+
+    if hits:               # convictions outrank everything: this is the headline, not an aside
+        return (f"{hits} tool(s) with findings", "bad", detail)
+    if errors:             # nothing proven wrong AND some checks never ran => not clean
+        return ("incomplete — not clean", "warn", detail)
+    if skipped:
+        return (f"partial — {checked} of {checked + len(skipped)} checked", "warn", detail)
+    if not checked:
+        # ZERO checked is not a clean pass, it is the absence of one. This used to fall through to
+        # the green badge, so a server with 85 declared tools and a 0/85 coverage bar on the same
+        # page was awarded "clean - 0 tool(s)" AND counted into the headline "1 clean".
+        return ("not verified — 0 tool(s) checked", "warn", detail)
+    return (f"clean — {checked} tool(s)", "ok", detail)
+
+
 def classified_servers(d: dict[str, Any]) -> list[tuple[str, dict, str | None, str]]:
     """(name, entry, store_key, tier) for every discovered server, sorted worst-first.
     One classification, shared by the page and the CSV export — two copies would be two answers."""
@@ -249,6 +388,23 @@ def classified_servers(d: dict[str, Any]) -> list[tuple[str, dict, str | None, s
         key = next((k for k, v in servers.items()
                     if name in ((v or {}).get("aliases") or [])), None)
         out.append((name, entry, key, _classify(name, key, d)))
+
+    # FALL BACK TO THE APPROVED BASELINE. This list used to be purely discovery-driven, so when
+    # discovery came back short the panel reported "0 of 0 server(s)" while the CLI, at the same
+    # instant on the same HOME, listed 15. Worse than a wrong number: a server you approved and
+    # which then vanished from every config is exactly the one worth seeing, and it was the one
+    # guaranteed to be missing. Anything in the trust store that discovery did not account for is
+    # added here and marked, so the row can say it is not currently configured.
+    seen_names = {n for n, _, _, _ in out}
+    seen_keys = {k for _, _, k, _ in out if k}
+    for key, rec in servers.items():
+        aliases = [a for a in ((rec or {}).get("aliases") or []) if a]
+        label = aliases[0] if aliases else key
+        already = key in seen_keys or label in seen_names or any(a in seen_names for a in aliases)
+        if already:
+            continue
+        out.append((label, {"_baseline_only": True}, key, _classify(label, key, d)))
+
     order = {t: i for i, (t, _, _) in enumerate(TIERS)}
     out.sort(key=lambda r: (order.get(r[3], 9), r[0]))
     return out
@@ -580,6 +736,92 @@ def first_party(server: str, hosts: list[str], entry: dict | None) -> bool:
     return True
 
 
+def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
+    """The six stages of getting this machine under the gateway, each with its REAL state.
+
+    Design decision (2026-08-01): the tabs stay grouped by function — the LiteLLM pattern, where
+    the nav is objects you operate and the journey lives in a guided first run. This is that
+    guided run, as data: one row per stage, `state` in done/now/todo, a fact line drawn from the
+    machine (never a promise), and `where` naming the tab that carries the control.
+
+    Rule 2 of the journey mockup: a stage you haven't reached is a STEP, not an empty room — so
+    every stage is listed always, and an unreached one says what would make it real rather than
+    rendering as a blank. The strip disappears only when every stage is done.
+    """
+    from . import history as _h
+
+    entries = d.get("entries") or {}
+    store = (d.get("store") or {}).get("servers") or {}
+    ran = d.get("verified_runs") or {}
+    calls = d.get("recent_calls") or []
+    gw = d.get("gateway") or {}
+    live = gw.get("live") or {}
+    rows = _agent_rows(d)
+    protected = sum(1 for _, _, st, _, _ in rows if st == "on")
+    approved = sum(1 for k in store if _h.approved({"servers": store}, k))
+    clients = sorted({c for e in entries.values() if isinstance(e, dict)
+                      for c in (e.get("_clients") or [])})
+    signins = [n for n, e in entries.items()
+               if isinstance(e, dict) and _login_button_applicable(e, n)]
+    # An audit row whose principal is not the process-wide declared name is a call the gateway
+    # attributed to a KEY — the end state this whole journey exists to reach.
+    attributed = [p for p in (gw.get("by_principal") or [])
+                  if p.get("principal") and p["principal"] != "(not asserted)"]
+
+    steps: list[dict[str, Any]] = []
+    steps.append({
+        "key": "see", "title": "See the fleet",
+        "state": "done" if entries else "now",
+        "fact": (f"{len(entries)} server(s) found across {len(clients)} client(s)"
+                 if entries else "no servers discovered yet"),
+        "where": "Servers",
+        "problems": d.get("discovery_problems") or []})
+    cannot_n = len(d.get("unscannable") or [])
+    # A capability that CANNOT be signed into is not a pending sign-in. Counting them together
+    # would either overstate the work left or, worse, imply they are one click from covered.
+    cannot_note = (f" · {cannot_n} capability(ies) cannot be signed into from here"
+                   if cannot_n else "")
+    steps.append({
+        "key": "connect", "title": "Connect what needs signing in",
+        "state": "now" if signins else "done",
+        "fact": ((f"{len(signins)} server(s) need your browser sign-in before they will speak"
+                  if signins else "nothing is waiting on a sign-in") + cannot_note),
+        "where": "Servers"})
+    steps.append({
+        "key": "verify", "title": "Verify what they do",
+        "state": "done" if ran else "now",
+        "fact": (f"{len(ran)} of {len(entries)} server(s) watched running"
+                 if entries else "verify runs a server and records what it actually does"),
+        "where": "Evidence"})
+    steps.append({
+        "key": "protect", "title": "Protect the agents",
+        "state": "done" if rows and protected == len(rows) else "now" if rows else "todo",
+        "fact": (f"{protected} of {len(rows)} agent(s) have the pre-execution hook"
+                 if rows else "no agent with a hook point found on this machine"),
+        "where": "Agents"})
+    steps.append({
+        "key": "gateway", "title": "Put the gateway in the path",
+        "state": "done" if live else "now",
+        "fact": (f"running at {live.get('listen') or 'stdio'}" if live else
+                 "no gateway running — one endpoint in front of the fleet is the point"),
+        "where": "Gateway"})
+    steps.append({
+        "key": "keys", "title": "Give each agent its own key",
+        "state": "done" if attributed else "todo" if not live else "now",
+        "fact": (f"{len(attributed)} principal(s) have calls attributed to them"
+                 if attributed else
+                 "no call has been attributed to an agent key yet" if live else
+                 "needs a running gateway with --principals"),
+        "where": "Gateway"})
+    # Approvals are the free-tier spine and belong in the fact line of 'see', not a stage of
+    # their own — the founder's flow is fleet → trust → gateway, not a checklist of features.
+    if approved:
+        steps[0]["fact"] += f" · {approved} at an approved baseline"
+    if calls:
+        steps[3]["fact"] += f" · {len(calls)} recent call(s) checked"
+    return steps
+
+
 def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
     """The ONE thing to do now, in priority order — and where it is.
 
@@ -601,10 +843,18 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
         servers = len({f.get("server") for f in findings})
         return (f"{len(findings)} finding(s) across {servers} server(s) — open Findings and decide "
                 f"which are real.", "bad")
-    unprot = len(d.get("no_hook") or {})
+    # PRESENT on this machine, not the size of the constant. `no_hook` is a static table of agents
+    # that HAVE no interception point (VS Code, Claude Desktop) — so `len()` of it is 2 on every
+    # machine in the world, and the panel printed "2 agent(s) have no pre-execution hook" as its
+    # next best action on a machine whose Agents tab said "No agents found". A number presented as
+    # machine state has to come from the machine; this intersects the table with the clients
+    # discovery actually saw. Eval Tier 4.
+    seen_clients = {c for e in (d.get("entries") or {}).values() if isinstance(e, dict)
+                    for c in (e.get("_clients") or [])}
+    unprot = sorted(set(d.get("no_hook") or {}) & seen_clients)
     if unprot:
-        return (f"{unprot} agent(s) have no pre-execution hook, so their calls are not checked — "
-                f"open Agents.", "warn")
+        return (f"{len(unprot)} agent(s) here have no pre-execution hook ({', '.join(unprot)}), so "
+                f"their calls are not checked — open Agents.", "warn")
     entries = d.get("entries") or {}
     ran = d.get("verified_runs") or {}
     never = [n for n in entries if not (isinstance(ran.get(n), dict)
@@ -685,9 +935,18 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     """
     from . import history as _h
 
-    entries = d.get("entries") or {}
+    # NB there is deliberately no `entries` local any more. The row counter was its last consumer,
+    # and it was the wrong source for it (see the note at the counter): discovery-only, while the
+    # rows come from `classified`. Anything here that needs discovery should say `d["entries"]` at
+    # the point of use, so it cannot quietly become the default answer to "how many servers".
     store = d.get("store") or {}
     servers = store.get("servers") or {}
+    # The gateway pane reads this machine unless collect() already did — render(d) with a
+    # synthetic d in tests must not require the key.
+    global _D_FOR_ROLES
+    _D_FOR_ROLES = {**d, "_token": token}
+    gwpane = _gateway_pane(d.get("gateway") or gateway_status(), token, action)
+    monpane = _monitor_pane(d.get("monitor") or {"installed": False, "db_present": False})
     pending = d.get("pending") or []
     act = d.get("activity") or {}
     calls = d.get("recent_calls") or []
@@ -759,9 +1018,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     for name, entry, key, tier in classified:
         detail = server_detail(store, key, calls) if key else None
         local = "local" if entry.get("command") else "remote"
-        clients = ", ".join(entry.get("_clients") or []) or "—"
+        # A server present in the trust store but in nobody's config right now. It is shown (its
+        # absence from this page was the defect) but must not be presented as something an agent
+        # can currently call.
+        if entry.get("_baseline_only"):
+            local = "not configured"
+        clients = ", ".join(entry.get("_clients") or []) or (
+            "approved, but in no agent config right now" if entry.get("_baseline_only") else "—")
         seen = detail["calls_seen"] if detail else 0
         tools = len(detail["current_tools"]) if detail else "—"
+        # THREE DIFFERENT FACTS WERE BEING SHOWN AS ONE NUMBER. `current_tools` is the latest
+        # sighting, `approved_tools` is what the operator agreed to, and the verify line counts
+        # against whatever that run saw — so one screen could read "baseline 44", "45" and
+        # "20 of 44" and look simply wrong. It was not wrong; it was unlabelled. And the gap
+        # between approved and now is DRIFT, which is the single thing this product exists to
+        # notice — hiding it inside a bare count is the worst place to lose it.
+        tools_approved = len(detail["approved_tools"]) if detail else 0
+        drift_note = ""
+        if detail and isinstance(tools, int) and tools_approved and tools != tools_approved:
+            more = tools - tools_approved
+            drift_note = (f'<span class="dt"> ({tools_approved} approved, '
+                          f'{abs(more)} {"added" if more > 0 else "removed"} since)</span>')
         checked = min(((d.get("verified_runs") or {}).get(name) or {}).get("toolsChecked") or 0,
                       tools if isinstance(tools, int) else 0)
         # Two row actions. `approve` is offered only when this server is actually waiting on a
@@ -773,6 +1050,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         if token and key and key in (d.get("pending") or []):
             _acts += ('<button class="act-sm warn" name="act" value="approve" title="Accept this '
                       'server\'s current surface as the trusted baseline">approve</button>')
+        if token and _login_button_applicable(entry, name):
+            _acts += ('<button class="act-sm" name="act" value="login" title="Complete this '
+                      'server\'s browser sign-in now — a browser window opens on this machine '
+                      'and the token stays local">sign in</button>')
         act_cell = (f'<form method="POST" action="/" class="rowact">'
                     f'<input type="hidden" name="token" value="{_esc(token)}">'
                     f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
@@ -882,7 +1163,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             srows.append(f"""<div class="row s3{' sel' if _is_sel else ''}">
   {who}
   {state_tag}
-  <span class="n"><b>{tools}</b></span>
+  <span class="n"><b>{tools}</b>{drift_note}</span>
 </div>""")
         else:
             watched_s = (f' <s>/ {checked} watched</s>'
@@ -891,7 +1172,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
   {who}
   <span><span class="chip mode">{local}</span></span>
   <span class="dim cl-agents">{_esc(clients)}</span>
-  <span class="n cl-num"><b>{tools}</b>{watched_s}</span>
+  <span class="n cl-num"><b>{tools}</b>{drift_note}{watched_s}</span>
   <span class="n cl-num"><b>{seen}</b></span>
   {state_tag}
   {act_cell or '<span></span>'}
@@ -926,7 +1207,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         for n, (c, t) in sorted(_cov.items(), key=lambda kv: (kv[1][0] - kv[1][1], kv[0]))) or \
         ('<div class="unobs">No server has been measured yet — nothing to draw a bar from. '
          'An empty chart here is not coverage.</div>')
-    cov_count = (f'<b>{_watched_sum}</b> of {_tools_sum} measured tools watched'
+    cov_count = (f'<b>{_watched_sum}</b> of {_tools_sum} tools <i>currently exposed</i> watched'
                  + (f' · {_unmeasured} server(s) never measured' if _unmeasured else ''))
 
     # --- runtime: agents, then the call log with one Group by ----------------------------------
@@ -941,7 +1222,12 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         + f'<select name="tier"><option value="">every tier</option>{_tiers}</select>'
         + '<button class="filter-btn" type="submit">filter</button>'
         + (f'<a class="clearf" href="/?t={_esc(token)}">clear</a>' if (q or tier_filter) else "")
-        + f'<span class="count rowcount">{len(srows)} of {len(entries)} server(s)'
+        # `len(classified)`, NOT `len(entries)`. `entries` is discovery only, while the rows now
+        # fall back to the approved baseline (queue #12) — so a machine whose configs had gone
+        # rendered "2 of 0 server(s)": a denominator smaller than its own numerator. The counter
+        # has to describe the same universe the rows come from, or the fix for #12 just moves the
+        # wrong number somewhere else.
+        + f'<span class="count rowcount">{len(srows)} of {len(classified)} server(s)'
         + (' matching this filter' if (q or tier_filter) else "") + '</span>'
         + '</form>')
 
@@ -1029,9 +1315,26 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return f'<a class="tll" href="/?{"&amp;".join(parts)}#p6">{label}</a>'
 
     _SEL_TR = '<tr class="selrow">'
+    def _age_note(f: dict) -> str:
+        """Say so when this row is OLDER than the run that produced the page.
+
+        `collect()` has carried a per-finding `verified_at` since single-server verifies stopped
+        deleting everyone else's results (queue #10) — precisely so a preserved finding could state
+        its own age instead of inheriting the timestamp of a run that never touched it. Nothing
+        rendered it, so on screen a week-old conviction and one from thirty seconds ago were
+        indistinguishable, which is the half of #10 that survived the fix. Shown only when it
+        DIFFERS from the run: on an ordinary full-fleet run every row carries the same date, and a
+        note repeated on every row is read as furniture rather than as information.
+        """
+        own = str(f.get("verified_at") or "")[:10]
+        run = str(d.get("verify_at") or "")[:10]
+        if not own or own == run:
+            return ""
+        return f'<div class="dt">from an earlier run · {_esc(own)}</div>'
+
     frows = "".join(
         (_SEL_TR if tl == _tl_key(f) else "<tr>")
-        + f'<td class="nm">{_esc(f.get("server"))}</td>'
+        + f'<td class="nm">{_esc(f.get("server"))}{_age_note(f)}</td>'
         f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
         f'<td>{_esc(f.get("class") or f.get("code") or "?")}{_foldnote(f)}</td>'
         f'<td><span class="chip {_fchip(f)}">{_esc(f.get("severity") or "?")}</span></td>'
@@ -1046,6 +1349,34 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     _nba_text, _nba_tier = next_best_action(d)
     nba = (f'<div class="nba {_nba_tier}"><b>Next:</b> {_esc(_nba_text)}</div>')
+
+    # Discovery's own shortfalls, above the fleet list: a config that exists but could not be
+    # used, an entry shape we skipped, a server the client disabled. Without this the list below
+    # implies a completeness the sweep did not achieve ("nothing was found" ≠ "nothing was
+    # looked at" — the same rule the CLI's empty state follows).
+    # CANNOT BE SIGNED INTO — a first-class state, not a login that stays pending forever. An
+    # account-hosted connector runs in the user's Anthropic account with no local endpoint: there
+    # is nothing here to authenticate to, and offering a button would be a promise we cannot keep.
+    cannot = ""
+    if d.get("unscannable"):
+        rows_ = "".join(
+            f'<tr><td class="nm">{_esc(str(u.get("name") or ""))}</td>'
+            f'<td><span class="chip unv">{_esc(str(u.get("kind") or ""))}</span></td>'
+            f'<td class="dim">{_esc(str(u.get("why") or ""))}</td></tr>'
+            for u in d["unscannable"])
+        cannot = ('<div class="note">These are reachable by your agents but CANNOT be scanned or '
+                  'signed into from this machine — they are named so the fleet list above is not '
+                  'read as everything you have. This list is itself incomplete: a connector you '
+                  'added and never re-authorised leaves no trace on disk.</div>'
+                  '<table><thead><tr><th>capability</th><th>kind</th><th>why not</th></tr></thead>'
+                  f'<tbody>{rows_}</tbody></table>')
+
+    disc_problems = ""
+    if d.get("discovery_problems"):
+        items = "".join(f"<li>{_esc(ln)}</li>" for ln in d["discovery_problems"])
+        disc_problems = (f'<div class="note warn">This fleet list is INCOMPLETE — discovery '
+                         f'could not use everything it found:<ul style="margin:6px 0 0 18px">'
+                         f'{items}</ul></div>')
 
     _ran = d.get("verified_runs") or {}
     isorows = "".join(
@@ -1126,24 +1457,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # buffer, so a run that convicted 21 tools left every view except the result banner untouched —
     # "apart from the verify the fleet output nothing changed in the panel". Severity-first: a
     # suppressed finding is still SHOWN, marked, never silently dropped.
-    _sev = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    #: A muted finding stays listed and marked — never silently dropped (`mcpgawk wrong`).
-    _MUTED = ' <span class="chip">muted by you</span>'
-    fnd = "".join(
-        f'<tr><td class="nm">{_esc(f.get("server"))}</td>'
-        f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
-        f'<td>{_esc(f.get("class") or f.get("code") or "?")}'
-        f'{_MUTED if f.get("suppressed") else ""}</td>'
-        f'<td><span class="chip {"bad" if f.get("severity") in ("critical", "high") else "warn"}">'
-        f'{_esc(f.get("severity") or "?")}</span></td>'
-        f'<td class="dim">{_esc(f.get("evidence") or "—")}</td>'
-        f'<td class="dim">{_esc(f.get("repro"))}</td></tr>'
-        for f in sorted(d.get("findings") or [],
-                        key=lambda f: (_sev.get(str(f.get("severity")).lower(), 9),
-                                       str(f.get("server"))))) or \
-        ('<tr><td colspan="6" class="dim">No verify has run yet — click '
-         '“Verify fleet (run &amp; watch)”. An empty table here is not a clean bill of health.'
-         '</td></tr>')
+    # (A second findings table used to be built here into `fnd` and then never rendered —
+    # dead since the Findings screen moved to its own view. `frows` above is the one that
+    # ships. Removed 2026-08-03; it was one of three long-standing ruff errors on this file.)
 
     vb = d.get("verify_blocked")
     vnote = (f'<div class="note warn">Behavioural verification unavailable — {_esc(vb)}</div>'
@@ -1293,6 +1609,30 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
       rather than hidden.</span></li>
   </ol>
 </div></div>"""
+    # THE GUIDED FIRST RUN (function tabs stay; the journey is a strip over them). Every stage
+    # carries its real state and names the tab holding its control. Gone entirely once every
+    # stage is done — a checklist of ticks is noise on a machine already set up.
+    _steps = journey_steps(d)
+    journey = ""
+    if any(st.get("state") != "done" for st in _steps):
+        _items = []
+        for i, st in enumerate(_steps, 1):
+            _mark = {"done": "✓", "now": str(i), "todo": "·"}.get(st.get("state"), str(i))
+            _probs = ""
+            if st.get("problems"):
+                _probs = ('<span class="dim"> — ' + _esc("; ".join(st["problems"][:2])) + '</span>')
+            _items.append(
+                f'<li class="jstep {_esc(st.get("state") or "")}"><b>{_mark} '
+                f'{_esc(st.get("title") or "")}</b>'
+                f'<span>{_esc(st.get("fact") or "")}{_probs} · '
+                f'<i>{_esc(st.get("where") or "")}</i></span></li>')
+        journey = ('<div class="card"><div class="chead"><h1>Getting set up</h1></div>'
+                   '<ol class="jrny">' + "".join(_items) + '</ol></div>')
+
+    _mon = d.get("monitor") or {}
+    _mon_open = sum(int(r.get("open_alerts") or 0) for r in (_mon.get("servers") or []))
+    _ct_mon = f'<span class="ct alert">{_mon_open}</span>' if _mon_open else ""
+
     _ct_fnd = f'<span class="ct alert">{len(_f_real)}</span>' if _f_real else ""
     _ct_dec = f'<span class="ct alert">{len(pending)}</span>' if pending else ""
     _ct_agt = f'<span class="ct">{agent_gaps} gap(s)</span>' if agent_gaps else ""
@@ -1321,7 +1661,7 @@ line-height:1.5}}
 .bhead{{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
 .brand{{font-weight:700;letter-spacing:-.02em;font-size:15px}}
 .bsub{{font-family:var(--mono);font-size:10px;color:var(--fai)}}
-input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}
+input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}#n0:focus-visible ~ .sheet label.pill[for=n0]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n1:focus-visible ~ .sheet label.pill[for=n1]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n2:focus-visible ~ .sheet label.pill[for=n2]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n3:focus-visible ~ .sheet label.pill[for=n3]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n4:focus-visible ~ .sheet label.pill[for=n4]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n5:focus-visible ~ .sheet label.pill[for=n5]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n6:focus-visible ~ .sheet label.pill[for=n6]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n7:focus-visible ~ .sheet label.pill[for=n7]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n8:focus-visible ~ .sheet label.pill[for=n8]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}
 .rail{{display:flex;gap:4px;background:var(--rail);border:1px solid var(--line);
 border-radius:10px;padding:4px;margin-bottom:14px;flex-wrap:wrap}}
 .pill{{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--mut);
@@ -1332,16 +1672,19 @@ padding:6px 13px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
 #n0:checked~.sheet label[for=n0],#n1:checked~.sheet label[for=n1],
 #n2:checked~.sheet label[for=n2],#n3:checked~.sheet label[for=n3],
 #n4:checked~.sheet label[for=n4],#n5:checked~.sheet label[for=n5],
-#n6:checked~.sheet label[for=n6]{{background:var(--card);color:var(--ink);font-weight:600;
+#n8:checked~.sheet label[for=n8],
+#n6:checked~.sheet label[for=n6],#n7:checked~.sheet label[for=n7]{{background:var(--card);
+color:var(--ink);font-weight:600;
 border-color:var(--line);box-shadow:0 1px 2px rgba(20,22,30,.06)}}
 #n0:checked~.sheet label[for=n0] .dot,#n1:checked~.sheet label[for=n1] .dot,
 #n2:checked~.sheet label[for=n2] .dot,#n3:checked~.sheet label[for=n3] .dot,
 #n4:checked~.sheet label[for=n4] .dot,#n5:checked~.sheet label[for=n5] .dot,
-#n6:checked~.sheet label[for=n6] .dot{{background:var(--acc)}}
+#n6:checked~.sheet label[for=n6] .dot,#n7:checked~.sheet label[for=n7] .dot,
+#n8:checked~.sheet label[for=n8] .dot{{background:var(--acc)}}
 .pane{{display:none}}
 #n0:checked~.sheet #p0,#n1:checked~.sheet #p1,#n2:checked~.sheet #p2,
 #n3:checked~.sheet #p3,#n4:checked~.sheet #p4,#n5:checked~.sheet #p5,
-#n6:checked~.sheet #p6{{display:block}}
+#n6:checked~.sheet #p6,#n7:checked~.sheet #p7,#n8:checked~.sheet #p8{{display:block}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:12px;
 box-shadow:0 1px 2px rgba(20,22,30,.04);overflow:hidden;margin-bottom:16px}}
 .chead{{display:flex;align-items:center;gap:12px;padding:14px 16px;flex-wrap:wrap}}
@@ -1523,8 +1866,19 @@ place-items:center}}
 /* the numbered pseudo-element is grid item 1; the description must stay in column 2 or it
    wraps one word per line inside the 26px number column (latent in the mockup's own CSS) */
 .fr li span{{grid-column:2;color:var(--mut);font-size:12.5px}}
+.jrny{{list-style:none;margin:0;padding:0 16px 14px}}
+.jstep{{display:grid;grid-template-columns:1fr;gap:2px;padding:8px 0;border-bottom:1px solid var(--line)}}
+.jstep:last-child{{border-bottom:0}}
+.jstep b{{font-size:13px}}
+.jstep span{{color:var(--mut);font-size:12.5px}}
+.jstep i{{font-style:normal;color:var(--acc)}}
+.jstep.done b{{color:var(--ok)}}
+.jstep.now b{{color:var(--acc)}}
+.jstep.todo b{{color:var(--fai)}}
 code{{font-family:var(--mono);font-size:11.5px;background:var(--rail);padding:2px 6px;
 border-radius:6px}}
+.snip{{font-family:var(--mono);font-size:11.5px;background:var(--rail);margin:0 16px 13px;
+padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 @media (hover:hover) and (pointer:fine){{
   .gbtn:hover,.filter-btn:hover,.act-sm:hover{{border-color:var(--acc);color:var(--acc)}}
   .act-btn:hover{{background:#1f2799}}
@@ -1545,10 +1899,10 @@ border-radius:6px}}
   .side{{border-left:none}}
 }}
 </style></head><body>
-<input type="radio" name="nav" id="n0" checked><input type="radio" name="nav" id="n1">
-<input type="radio" name="nav" id="n2"><input type="radio" name="nav" id="n3">
-<input type="radio" name="nav" id="n4"><input type="radio" name="nav" id="n5">
-<input type="radio" name="nav" id="n6">
+<input type="radio" name="nav" id="n0" checked aria-label="Servers tab"><input type="radio" name="nav" id="n1" aria-label="Agents tab">
+<input type="radio" name="nav" id="n2" aria-label="Evidence tab"><input type="radio" name="nav" id="n3" aria-label="Decisions tab">
+<input type="radio" name="nav" id="n4" aria-label="Activity tab"><input type="radio" name="nav" id="n5" aria-label="Trust tab">
+<input type="radio" name="nav" id="n6" aria-label="Findings tab"><input type="radio" name="nav" id="n7" aria-label="Gateway tab"><input type="radio" name="nav" id="n8" aria-label="Monitor tab">
 <div class="sheet">
   <div class="bhead"><span class="brand">mcpgawk</span>
     <!-- WHICH BUILD AM I LOOKING AT. A running panel never reloads its code: on 2026-07-30 the
@@ -1564,9 +1918,12 @@ border-radius:6px}}
     <label class="pill" for="n3"><span class="dot"></span>Decisions {_ct_dec}</label>
     <label class="pill" for="n5"><span class="dot"></span>Trust</label>
     <label class="pill" for="n2"><span class="dot"></span>Evidence</label>
+    <label class="pill" for="n7"><span class="dot"></span>Gateway</label>
+    <label class="pill" for="n8"><span class="dot"></span>Monitor{_ct_mon}</label>
   </div>
   {errs}
   <section class="pane" id="p0">
+    {journey}
     {firstrun}
     <div class="card">
       <div class="chead"><h1>Servers</h1><div class="tools">
@@ -1579,6 +1936,8 @@ border-radius:6px}}
        'Lost the link? Restart <code>mcpgawk panel</code> and use the fresh one it prints.</div>'}
       <div class="abar">{_action_banner(action)}</div>
       {nba}
+      {disc_problems}
+      {cannot}
       {filterbar}
       {servers_table}
     </div>
@@ -1691,6 +2050,20 @@ border-radius:6px}}
       <th>basis</th><th>why</th></tr></thead><tbody>{acts_full}</tbody></table>
     </div>
   </section>
+
+  <section class="pane" id="p7">
+    <div class="card">
+      <div class="chead"><h1>Gateway</h1></div>
+      {gwpane}
+    </div>
+  </section>
+
+  <section class="pane" id="p8">
+    <div class="card">
+      <div class="chead"><h1>Monitor</h1></div>
+      {monpane}
+    </div>
+  </section>
 </div>
 </body></html>"""
 
@@ -1793,9 +2166,9 @@ def run_scan() -> dict[str, Any]:
     a terminal, never to a button. Without `--yes` the scan default-denies local launches and
     completes in seconds: it refreshes remote servers and re-reads what is already known.
     """
+
     import subprocess
     import sys as _sys
-
     try:
         # stdin=DEVNULL IS LOAD-BEARING, not tidiness. Without it the child inherits the terminal
         # the panel was launched from, so `consent.py` sees `sys.stdin.isatty()` is True, prints
@@ -1922,6 +2295,8 @@ def _run_action_bg(kind: str, target: str | None = None) -> None:
                 res = run_scan()
             elif kind == "verify":
                 res = run_verify_fleet(target)
+            elif kind == "login":
+                res = run_login(target)
             else:
                 res = {"ok": False, "message": f"unknown action {kind!r}"}
             msg = res.get("message") or ("done" if res.get("ok") else "failed")
@@ -1933,6 +2308,842 @@ def _run_action_bg(kind: str, target: str | None = None) -> None:
         _persist_action()
 
     threading.Thread(target=work, daemon=True).start()
+
+
+def gateway_tools(live: dict[str, Any] | None, key: str = "") -> dict[str, Any]:
+    """The tools THIS key can see through the running gateway, for the Playground picker.
+
+    Uses the gateway's own REST skin (`GET /api/tools`), which invokes the same handlers as the
+    MCP endpoint — so the list is per-caller filtered by the same rule that will decide the call.
+    A failure is returned as a reason, never as an empty list: "this key sees no tools" and "we
+    could not ask" are different facts.
+    """
+    listen = (live or {}).get("listen")
+    if not listen:
+        return {"ok": False, "tools": [], "error": "no gateway with an HTTP endpoint is running"}
+    import urllib.error
+    import urllib.request
+    url = listen.rsplit("/mcp", 1)[0] + "/api/tools"
+    req = urllib.request.Request(url)
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            doc = json.loads(r.read().decode("utf-8", "replace"))
+        return {"ok": True, "tools": [t.get("name") for t in (doc.get("tools") or [])]}
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "tools": [], "error": f"gateway answered {exc.code}"}
+    except Exception as exc:                      # noqa: BLE001 — the reason goes on the page
+        return {"ok": False, "tools": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def run_playground_call(tool: str | None, key: str | None,
+                        arguments: str | None = None) -> dict[str, Any]:
+    """Call ONE tool through the running gateway, as an agent would, and report the decision.
+
+    The proof surface: the value of a gateway is the decision it makes, and until now the panel
+    could only show decisions after some other process happened to make them. This makes one on
+    demand — through the gateway's REST skin, which runs the SAME handlers, identity resolution
+    and audit write as the MCP endpoint, so what you see here is what an agent would get.
+
+    A BLOCK is a successful test of the gateway, not an error, and is reported that way.
+    """
+    tool = (tool or "").strip()
+    if not tool:
+        return {"ok": False, "message": "pick a tool to call"}
+    live = (gateway_status().get("live") or {})
+    listen = live.get("listen")
+    if not listen:
+        return {"ok": False, "message": "no gateway with an HTTP endpoint is running — start one "
+                                        "with `--listen 127.0.0.1:8080`"}
+    args: dict[str, Any] = {}
+    if arguments and arguments.strip():
+        try:
+            parsed = json.loads(arguments)
+            if not isinstance(parsed, dict):
+                raise ValueError("arguments must be a JSON object")
+            args = parsed
+        except ValueError as exc:
+            return {"ok": False, "message": f"arguments are not a JSON object: {exc}"}
+    if live.get("keys") and not (key or "").strip():
+        return {"ok": False, "message": "this gateway checks keys — paste an agent key to call "
+                                        "as that agent (that is also what the audit will record)"}
+    import urllib.error
+    import urllib.request
+    url = listen.rsplit("/mcp", 1)[0] + "/api/tools/call"
+    body = json.dumps({"name": tool, "arguments": args}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if key:
+        req.add_header("Authorization", f"Bearer {key.strip()}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            doc = json.loads(r.read().decode("utf-8", "replace"))
+        text = str(doc.get("content") or "")[:400]
+        return {"ok": True, "level": "ok", "verdict": "ALLOWED",
+                "message": f"{tool}: ALLOWED by the gateway — {text}"}
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            doc = json.loads(exc.read().decode("utf-8", "replace"))
+            detail = str(doc.get("error") or "")[:400]
+        except Exception:                         # noqa: BLE001 — body may not be JSON
+            detail = f"HTTP {exc.code}"
+        # A block is the gateway WORKING. Levelled 'warn', never 'bad': styling a successful
+        # refusal as a failure would teach the operator to read their own control as breakage.
+        return {"ok": True, "level": "warn", "verdict": "BLOCKED",
+                "message": f"{tool}: BLOCKED by the gateway — {detail}"}
+    except Exception as exc:                      # noqa: BLE001
+        return {"ok": False, "level": "bad",
+                "message": f"could not reach the gateway: {type(exc).__name__}: {exc}"}
+
+
+#: The role bundles the panel can build from what a scan already recorded. Deliberately three,
+#: not a taxonomy: an operator picking from three understood options grants correctly, while a
+#: long list gets skimmed and over-granted — and over-granting is the failure a gateway exists
+#: to prevent.
+ROLE_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("reader", "every tool the server declares read-only"),
+    ("operator", "read-only tools plus the writes that are not destructive"),
+    ("admin", "everything the fleet exposes, including destructive tools"),
+)
+
+
+def roles_from_baseline(d: dict[str, Any]) -> dict[str, list[str]]:
+    """Grant bundles derived from the tools this machine has ALREADY seen, keyed by role name.
+
+    Roles were hand-typed scope strings, which asks an operator to know both our scope vocabulary
+    and every tool their servers expose. But an approved baseline already records each item's
+    declared annotations as VALUES (drift._item_annotations), and the gateway derives its scopes
+    from exactly those hints (enforce.derive_scopes.derive_policy: readOnlyHint -> `read`,
+    destructiveHint -> `write:<tool>`, neither -> `unguarded`). So the bundles can be computed
+    from what we know instead of typed from memory.
+
+    Deliberately conservative where the server is vague: a tool with NO usable annotation lands in
+    `unguarded`, and `unguarded` is granted only to admin — an unannotated tool is one the server
+    author declined to describe, and reading that silence as "safe for everyone" is the mistake
+    this whole product argues against.
+    """
+    from . import history as _h
+
+    store = (d.get("store") or {}).get("servers") or {}
+    read_tools: set[str] = set()
+    write_tools: set[str] = set()
+    destructive: set[str] = set()
+    unannotated = False
+    for key in store:
+        rec = _h.approved({"servers": store}, key) or {}
+        anns = rec.get("annotations")
+        if not isinstance(anns, dict):
+            continue
+        for item, ann in anns.items():
+            # Items are keyed `{kind}.{name}` (drift._iter_items) — tool./prompt./resource. Only
+            # tools are callable, and the PREFIX MUST BE STRIPPED: the first cut of this produced
+            # `write:tool.create_directory`, a scope no policy would ever match, which would have
+            # granted nothing while looking exactly like a working role.
+            if not item.startswith("tool."):
+                continue
+            name = item[len("tool."):]
+            ann = ann if isinstance(ann, dict) else {}
+            ro, de = ann.get("readOnlyHint"), ann.get("destructiveHint")
+            if de is True:
+                destructive.add(name)
+            elif ro is True:
+                read_tools.add(name)
+            elif ro is False:
+                write_tools.add(name)
+            else:
+                unannotated = True
+    out = {
+        "reader": ["read"] if read_tools else [],
+        "operator": (["read"] if read_tools else []) + sorted(f"write:{t}" for t in write_tools),
+        "admin": ((["read"] if read_tools else [])
+                  + sorted(f"write:{t}" for t in (write_tools | destructive))
+                  + (["unguarded"] if unannotated else [])),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def role_evidence(d: dict[str, Any]) -> str:
+    """One line saying what the offered bundles are built FROM — a role proposed with no visible
+    basis is a guess wearing a name."""
+    roles = roles_from_baseline(d)
+    if not roles:
+        return ("No approved baseline yet, so there is nothing to build roles from. Scan and "
+                "approve a server first — a role is a statement about tools we have seen.")
+    reads = len([g for g in roles.get("admin", []) if g == "read"])
+    writes = len([g for g in roles.get("admin", []) if g.startswith("write:")])
+    return (f"Built from your approved baselines: "
+            f"{'read-only tools' if reads else 'no read-only tools'}, {writes} write/destructive "
+            f"tool(s)"
+            + (" · tools your servers left unannotated are granted only to admin"
+               if "unguarded" in roles.get("admin", []) else ""))
+
+
+def _ensure_role(keys_file: str, role: str, grants: list[str]) -> None:
+    """Write a role bundle into the principals registry if it is not already there.
+
+    Never overwrites an existing bundle: an operator who tuned `reader` by hand must not have it
+    silently replaced by our derivation the next time someone issues a key. Refuses to create an
+    EMPTY bundle — a role granting nothing reads as protection while the key is useless, the same
+    reason PrincipalRegistry refuses an unknown role at load.
+    """
+    if not grants:
+        raise ValueError(f"{role} would grant nothing — approve a scanned server first, so the "
+                         f"bundle can be built from tools we have actually seen")
+    path = Path(keys_file)
+    doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"principals": {}}
+    roles = doc.setdefault("roles", {})
+    if role in roles:
+        return
+    roles[role] = list(grants)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def principal_upstreams(keys_file: str | None) -> dict[str, list[str]]:
+    """{principal: [backend, …]} it carries its OWN credential for. NAMES ONLY — never values.
+
+    Two auth axes look identical in a UI and must not be confused. The operator's browser login
+    (the sign-in button) is the OPERATOR's credential: right for scanning and verifying. A
+    gateway that then used that one token for every agent behind it would make every agent act
+    as the operator, and the audit could not tell them apart — which is why the engine refuses
+    it (identity.upstream_for grants an upstream credential only to an AUTHENTICATED principal,
+    never a declared name). So this surface answers the second question: which agents can reach a
+    server as THEMSELVES.
+
+    Deliberately read-only: adding a credential means putting a secret somewhere, and this panel
+    does not collect secrets — it says who has one and points at where they are declared.
+    """
+    if not keys_file:
+        return {}
+    try:
+        doc = json.loads(Path(keys_file).read_text(encoding="utf-8"))
+        principals = doc.get("principals")
+        if not isinstance(principals, dict):
+            return {}
+        out: dict[str, list[str]] = {}
+        for name, spec in principals.items():
+            up = (spec or {}).get("upstream") if isinstance(spec, dict) else None
+            if isinstance(up, dict) and up:
+                out[str(name)] = sorted(str(b) for b in up)
+        return out
+    except Exception:                             # noqa: BLE001 — unreadable means "unknown"
+        return {}
+
+
+def run_monitor_start() -> dict[str, Any]:
+    """Start continuous monitoring from the panel, watching what this machine already has.
+
+    THE GAP THIS CLOSES (audit 2026-08-02): monitoring was production-grade and NOTHING started
+    it. `bootstrap_config_from_machine` existed with no caller, so a customer who never typed
+    `mcpgawk monitor run` got zero monitoring while paying for it. LiteLLM's lesson applies —
+    protective behaviour should not require an operator to discover a flag.
+
+    Detached on purpose: the daemon outlives this panel process, and its heartbeat run row is what
+    the Monitor tab reads to say RUNNING. Nothing is invented here — this is the same command the
+    docs give, with the config the machine can already derive.
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+    import time
+    try:
+        import importlib.util
+        if importlib.util.find_spec("gawk_platform") is None:
+            return {"ok": False, "message": "continuous monitoring ships with gawk Platform"}
+    except Exception:                             # noqa: BLE001
+        return {"ok": False, "message": "continuous monitoring ships with gawk Platform"}
+    if monitor_status().get("running") is True:
+        return {"ok": False, "message": "monitoring is already running on this machine"}
+    # NO --config: that is what makes the daemon monitor every server this machine already has
+    # (bootstrap_config_from_machine). There is no --from-machine flag; passing one would abort
+    # with "unrecognized arguments" while this page happily reported success.
+    cmd = [_sys.executable, "-m", "mcpgawk", "monitor", "run"]
+    log = tempfile.NamedTemporaryFile(prefix="mcpgawk-monitor-", suffix=".log", delete=False)
+    try:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
+                                start_new_session=True)
+    except Exception as exc:                      # noqa: BLE001 — the reason goes ON the page
+        return {"ok": False, "message": f"could not start monitoring: {exc}"}
+    # A DETACHED start that reports success the moment Popen returns is a lie waiting to happen:
+    # a licence refusal, a missing store or a bad config exits in well under a second and the page
+    # would still say "started". So wait, and if it is already gone, report ITS OWN last words.
+    for _ in range(20):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    if proc.poll() is not None:
+        try:
+            lines = [ln.strip() for ln in Path(log.name).read_text(errors="replace").splitlines()
+                     if ln.strip()]
+        except OSError:
+            lines = []
+        # The LAST line is often an unrelated upgrade notice; the CAUSE is usually earlier. Prefer
+        # a line that names a failure, else fall back to the tail. Reporting the wrong line sends
+        # the operator to debug something that is working.
+        cause = next((ln for ln in lines
+                      if any(w in ln.lower() for w in
+                             ("licen", "error", "could not", "refus", "no mcp servers",
+                              "not found", "traceback", "failed"))), None)
+        detail = f" — {cause or (lines[-1] if lines else f'exit {proc.returncode}')}"
+        return {"ok": False, "message": f"monitoring did not stay up{detail}"}
+    return {"ok": True, "message": f"monitoring started (pid {proc.pid}) — it watches the servers "
+                                   f"this machine already has and raises an alert when one moves. "
+                                   f"This page shows it as RUNNING once it registers."}
+
+
+def monitor_status(home: Path | str | None = None) -> dict[str, Any]:
+    """What continuous monitoring is doing on this machine, read-only.
+
+    The pillar was invisible here: `monitor.db` was read by `mcpgawk monitor status` and nothing
+    else, so the surface the operator actually uses could not say whether the thing they pay for
+    was running at all. Same honesty pattern as `gateway_status`: real rows when they exist, an
+    explicit "not installed"/"never started" otherwise — and `running` comes from the run registry
+    (a live heartbeat), never inferred from the database merely existing.
+    """
+    import importlib.util
+    import socket
+
+    from . import runlog
+
+    db = ((Path(home) / ".gawk") if home else behaviour_profile_path().parent) / "monitor.db"
+    out: dict[str, Any] = {
+        "installed": importlib.util.find_spec("gawk_platform") is not None,
+        "db_present": db.is_file(), "servers": [], "running": None, "since": None,
+    }
+    runs_db = str(Path(home) / ".mcpgawk" / "runs.db") if home else None
+    try:
+        out["running"] = False
+        for r in runlog.list_runs(kind="monitor", limit=25, path=runs_db):
+            if (r.status == runlog.RUNNING and r.host == socket.gethostname()
+                    and runlog._pid_alive(r.pid)):
+                out["running"], out["since"] = True, r.started_at
+                break
+    except Exception as exc:                      # noqa: BLE001 — recorded, never disguised
+        out["running"] = None                     # None = "cannot tell", not "no"
+        out["runs_error"] = str(exc)
+    if not db.is_file():
+        return out
+    try:
+        from gawk_platform.monitor.status import status_rows
+        from gawk_platform.monitor.store import SqliteMonitorStore
+        store = SqliteMonitorStore(str(db), read_only=True)
+        try:
+            out["servers"] = status_rows(store)
+        finally:
+            store.close()
+    except Exception as exc:                      # noqa: BLE001 — a broken db is a page note
+        out["error"] = str(exc)
+    return out
+
+
+def _monitor_start_button(mon: dict[str, Any]) -> str:
+    """Offered only where it can work: the pillar installed, and not already running. A button
+    that cannot do its job is the pattern the sign-in button already avoids."""
+    token = _D_FOR_ROLES.get("_token", "") if isinstance(_D_FOR_ROLES, dict) else ""
+    if not token:
+        return ('<div class="note">Starting monitoring is a control, not state — it appears only '
+                'through the link printed in the terminal that started the panel. Or run: '
+                '<code>mcpgawk monitor run</code></div>')
+    if not mon.get("installed"):
+        return ""
+    return (f'<form method="POST" action="/" style="margin:0 16px 13px">'
+            f'<input type="hidden" name="token" value="{_esc(token)}">'
+            f'<button class="act-btn" name="act" value="monitor-start">Start monitoring</button>'
+            f'</form>')
+
+
+def _monitor_pane(mon: dict[str, Any]) -> str:
+    """The Monitor tab. What is watched, when it was last checked, and what is unresolved."""
+    frame = ('<div class="note">Monitoring re-checks each approved server on a schedule and '
+             'raises an alert when its surface moves — the rug-pull case, where a server you '
+             'already trusted changes after you approved it.</div>')
+    if not mon.get("installed"):
+        return frame + ('<div class="note">Continuous monitoring ships with gawk Platform — not '
+                        'installed in this environment.</div>')
+    if mon.get("running") is True:
+        state = (f'<div class="note ok">Monitoring RUNNING since '
+                 f'{_esc(str(mon.get("since") or "")[:19])}.</div>')
+    elif mon.get("running") is None:
+        state = ('<div class="note warn">Cannot tell whether monitoring is running — the run '
+                 f'registry is unreadable: {_esc(str(mon.get("runs_error") or ""))}</div>')
+    else:
+        state = ('<div class="note warn">Monitoring is NOT running. Nothing is re-checking these '
+                 'servers, so a server that changes after you approved it will not raise an '
+                 'alert.</div>' + _monitor_start_button(mon))
+    if not mon.get("db_present"):
+        return (frame + state
+                + '<div class="note">No monitoring history on this machine yet — nothing has '
+                  'been watched, which is not the same as nothing having changed.</div>')
+    err = (f'<div class="note warn">monitoring history unreadable: {_esc(mon["error"])}</div>'
+           if mon.get("error") else "")
+    rows = mon.get("servers") or []
+    if not rows:
+        return frame + state + err + ('<div class="note">The monitoring store exists but holds no '
+                                      'servers yet.</div>')
+    parts = []
+    for r in rows:
+        ok = r.get("last_ok")
+        # never checked != checked and failed. An unknown must never render as a pass.
+        chip = ('<span class="chip ok">checked</span>' if ok is True else
+                '<span class="chip bad">check failed</span>' if ok is False else
+                '<span class="chip unv">never checked</span>')
+        alerts = (f'<span class="chip bad">{r["open_alerts"]}</span>' if r.get("open_alerts")
+                  else "0")
+        parts.append(
+            f'<tr><td class="nm">{_esc(str(r.get("server_id") or ""))}</td>'
+            f'<td>{chip}</td>'
+            f'<td>{"yes" if r.get("has_baseline") else "<b>no</b>"}</td>'
+            f'<td class="num">{alerts}</td>'
+            f'<td class="dim">{_esc(str(r.get("last_check") or "never"))[:19]}</td></tr>')
+    open_total = sum(int(r.get("open_alerts") or 0) for r in rows)
+    head = (f'<div class="filters"><span class="count" style="margin-left:0">{len(rows)} '
+            f'server(s) watched · {open_total} unresolved alert(s)</span></div>')
+    return (frame + state + err + head
+            + '<table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
+              '<th>open alerts</th><th>when</th></tr></thead>'
+              f'<tbody>{"".join(parts)}</tbody></table>')
+
+
+def gateway_roles(keys_file: str | None) -> list[str]:
+    """The role names defined in the running gateway's principal registry, for the issue-key
+    form. Empty when there is no file, no roles block, or the file cannot be read — the form then
+    offers no role and the issued key is deny-by-default, which is the honest state anyway."""
+    if not keys_file:
+        return []
+    try:
+        import json as _json
+        doc = _json.loads(Path(keys_file).read_text(encoding="utf-8"))
+        roles = doc.get("roles")
+        return sorted(str(r) for r in roles) if isinstance(roles, dict) else []
+    except Exception:                             # noqa: BLE001 — an unreadable file offers none
+        return []
+
+
+def run_issue_key(name: str | None, role: str | None = None) -> dict[str, Any]:
+    """Issue ONE agent key against the running gateway's registry, and hand it back once.
+
+    The LiteLLM virtual-key ceremony applied to agents: the operator names an agent, picks a role
+    (a bundle the registry already defines), and gets a key + a paste-able config. The gateway
+    hot-reloads its registry, so the key works on the next call without a restart — and the
+    per-caller audit shipped this morning means every call it makes is attributable to THAT
+    agent, which is the whole argument for routing agents through the gateway rather than the
+    per-agent hooks (a hook only ever sees a self-asserted client name).
+    """
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "message": "an agent key needs a name — it is what the audit trail "
+                                        "will attribute every call to"}
+    gw = gateway_status()
+    live = gw.get("live") or {}
+    keys_file = live.get("keys_file")
+    if not live:
+        return {"ok": False, "message": "no gateway is running on this machine — start one with "
+                                        "`mcpgawk enforce serve --listen 127.0.0.1:8080 "
+                                        "--principals <file>`, then issue keys against it"}
+    if not keys_file:
+        return {"ok": False,
+                "message": "this gateway was started without --principals, so it has no key "
+                           "registry to add to. Restart it with --principals <file> to give each "
+                           "agent its own identity."}
+    try:
+        from gawk_platform.enforce.identity import issue_key
+    except ImportError:
+        return {"ok": False, "message": "agent keys ship with gawk Platform (the gateway)"}
+    # "+reader" means: this bundle does not exist in the registry yet — write it from the tools
+    # we have actually seen, then issue against it. Without this the derived roles would be a
+    # picker that produces nothing, which is worse than no picker.
+    if role and role.startswith("+"):
+        role = role[1:]
+        try:
+            _ensure_role(keys_file, role, roles_from_baseline(_D_FOR_ROLES or {}).get(role) or [])
+        except Exception as exc:                  # noqa: BLE001 — the reason goes ON the page
+            return {"ok": False, "message": f"could not define role {role}: {exc}"}
+    try:
+        key = issue_key(keys_file, name, role=role or None)
+    except Exception as exc:                      # noqa: BLE001 — the reason goes ON the page
+        return {"ok": False, "message": f"could not issue a key for {name}: {exc}"}
+    listen = live.get("listen") or "http://127.0.0.1:8080/mcp"
+    snippet = ('{\n  "mcpServers": {\n    "gawk": {\n'
+               f'      "url": "{listen}",\n'
+               f'      "headers": {{"Authorization": "Bearer {key}"}}\n'
+               '    }\n  }\n}')
+    role_note = f" with role {role}" if role else " with NO grants yet (deny-by-default)"
+    return {"ok": True, "secret": key, "snippet": snippet,
+            "message": f"issued a key for {name}{role_note}. Copy it now — it is shown once, "
+                       f"and the gateway already accepts it (no restart needed)."}
+
+
+def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
+    """What the gateway control plane looks like from this machine, read-only.
+
+    Positioning is deliberate (founder, 2026-08-01): the gateway is the product's frame — ONE
+    endpoint in front of the fleet, per-principal keys, policy, refusals, audit — and scan/verify
+    is how it knows. So the panel shows this surface with or without gawk Platform installed:
+    real audit rows when they exist, an honest "ships with gawk Platform" otherwise — the same
+    pattern `status` uses for deep monitoring. `home` is injectable for tests, like discover's.
+
+    `live` is the gateway running RIGHT NOW, read from the enforce run row (kind='enforce',
+    status='running', pid still alive on this host) — the only place the listen endpoint exists;
+    inbound.serve only ever prints it. A readable runs.db with no such row honestly means "not
+    running"; an UNREADABLE one is recorded as `runs_error`, never passed off as "not running" —
+    a swallowed error must not look like a real answer.
+    """
+    import importlib.util
+    import socket
+    import sqlite3
+
+    from . import runlog
+
+    # THROUGH behaviour_profile_path, never a hardcoded ~/.gawk: the hardcoded form is exactly
+    # how the behaviour profile slipped past conftest's real-home guard (see that docstring).
+    db = ((Path(home) / ".gawk") if home else behaviour_profile_path().parent) / "enforce-audit.db"
+    out: dict[str, Any] = {
+        "installed": importlib.util.find_spec("gawk_platform") is not None,
+        "audit_present": db.is_file(),
+        "events": [], "blocks": 0, "sessions": 0, "principals": [], "by_principal": [],
+        "live": None,
+    }
+    runs_db = str(Path(home) / ".mcpgawk" / "runs.db") if home else None
+    try:
+        for r in runlog.list_runs(kind="enforce", limit=25, path=runs_db):
+            if (r.status == runlog.RUNNING and r.host == socket.gethostname()
+                    and runlog._pid_alive(r.pid)):
+                out["live"] = {"target": r.target, "since": r.started_at,
+                               "listen": r.summary.get("listen"),
+                               "keys": bool(r.summary.get("keys")),
+                               "keys_file": r.summary.get("keys_file"),
+                               "stdio": r.summary.get("transport") == "stdio"}
+                break
+    except Exception as exc:                      # noqa: BLE001 — recorded, never disguised
+        out["runs_error"] = str(exc)
+    if not db.is_file():
+        return out
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            cols = ("at", "tool", "phase", "decision", "reason", "severity", "principal", "client")
+            out["events"] = [dict(zip(cols, r)) for r in con.execute(
+                "SELECT taken_at, tool_name, phase, decision, reason, severity, principal, client"
+                " FROM events ORDER BY id DESC LIMIT 12")]
+            out["blocks"] = con.execute(
+                "SELECT COUNT(*) FROM events WHERE decision='block'").fetchone()[0]
+            out["sessions"] = con.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM events").fetchone()[0]
+            out["principals"] = [r[0] or "(not asserted)" for r in con.execute(
+                "SELECT DISTINCT principal FROM events")]
+            # Per-principal rollup, tool calls only: lifecycle rows (tool_name NULL) would count
+            # every session per principal and say nothing about who DID what.
+            out["by_principal"] = [
+                {"principal": r[0] or "(not asserted)", "calls": r[1], "blocks": r[2] or 0,
+                 "last": r[3]}
+                for r in con.execute(
+                    "SELECT principal, COUNT(*),"
+                    " SUM(CASE WHEN decision='block' THEN 1 ELSE 0 END), MAX(taken_at)"
+                    " FROM events WHERE tool_name IS NOT NULL"
+                    " GROUP BY principal ORDER BY COUNT(*) DESC")]
+        finally:
+            con.close()
+    except Exception as exc:                      # noqa: BLE001 — a broken db is a page note
+        out["error"] = str(exc)
+    return out
+
+
+def _snippet_for(live: dict[str, Any]) -> str:
+    """The "point your agent here" block for a RUNNING gateway — the exact config a customer
+    pastes, not a description of one. HTTP shape from the live listen address; stdio has no
+    address, so the honest offer there is `enforce install`, which wraps each configured server
+    in place (the same wiring that gateway already has with the agent that launched it)."""
+    if live.get("listen"):
+        headers = (',\n      "headers": {"Authorization": "Bearer <your principal key>"}'
+                   if live.get("keys") else "")
+        cfg = ('{\n  "mcpServers": {\n    "gawk": {\n'
+               f'      "url": "{live["listen"]}"{headers}\n'
+               '    }\n  }\n}')
+        return ('<div class="note">Point your agent here — one entry replaces every '
+                'per-server block in its MCP config:</div>'
+                f'<pre class="snip">{_esc(cfg)}</pre>')
+    return ('<div class="note">This gateway speaks stdio to the agent that launched it — there '
+            'is no address to share. To put every agent on this machine behind the gateway: '
+            '<code>mcpgawk enforce install</code> (wraps each configured server in place, '
+            'reversibly).</div>')
+
+
+#: The collected page data, so the key form can build role bundles from the approved baseline
+#: without threading `d` through three render helpers. Set once per render, read immediately.
+_D_FOR_ROLES: dict[str, Any] | None = None
+
+
+def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | None) -> str:
+    """The agent-invite ceremony: name an agent, pick a role, get ONE key + its config.
+
+    LiteLLM's virtual-key flow, with agents as the invitees rather than people. Shown only with
+    the panel token (issuing a credential is the most action-shaped thing this surface does, and
+    an agent that merely opens the page must never be able to mint itself one) and only when a
+    gateway with a key registry is actually running — an issue button pointing at nothing would
+    be the "unblock that cannot work" pattern the sign-in button already avoids.
+    """
+    action = action or {}
+    issued = ""
+    if action.get("secret"):
+        # Shown ONCE, and never persisted (see _persist_action's whitelist). No copy button:
+        # the CSP forbids scripts, so the honest affordance is selectable text.
+        issued = ('<div class="note ok">Copy this now — it is not stored and cannot be shown '
+                  f'again:</div><pre class="snip">{_esc(action["secret"])}</pre>'
+                  f'<pre class="snip">{_esc(action.get("snippet") or "")}</pre>')
+    if not token:
+        return issued + ('<div class="note">Issuing an agent key is a control, not state — it '
+                         'appears only through the link printed in the terminal that started '
+                         'the panel.</div>')
+    if not live:
+        return issued
+    if not live.get("keys_file"):
+        return issued + ('<div class="note warn">This gateway was started without '
+                         '<code>--principals</code>, so it has no key registry: every caller is '
+                         'the same principal and the audit cannot tell your agents apart. '
+                         'Restart it with <code>--principals &lt;file&gt;</code> to give each '
+                         'agent its own identity.</div>')
+    roles = gateway_roles(live.get("keys_file"))
+    derived = {} if roles else roles_from_baseline(_D_FOR_ROLES or {})
+    if not roles and derived:
+        opts = "".join(f'<option value="+{_esc(r)}">{_esc(r)} — {_esc(desc)}</option>'
+                       for r, desc in ROLE_TEMPLATES if r in derived)
+        return (issued
+                + f'<div class="note">{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
+                + f'<form method="POST" action="/" class="filters">'
+                  f'<input type="hidden" name="token" value="{_esc(token)}">'
+                  f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
+                  f'maxlength="80" required>'
+                  f'<select name="role"><option value="">no grants yet</option>{opts}</select>'
+                  f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key'
+                  f'</button></form>')
+    if roles:
+        opts = "".join(f'<option value="{_esc(r)}">{_esc(r)}</option>' for r in roles)
+        role_field = (f'<select name="role"><option value="">no grants yet</option>{opts}'
+                      f'</select>')
+        role_note = ""
+    else:
+        role_field = '<input type="hidden" name="role" value="">'
+        role_note = ('<div class="note">No roles are defined in this registry yet. A key issued '
+                     'now identifies its agent in the audit trail but can call nothing — add a '
+                     '<code>"roles"</code> block (name → grant list) to grant in one step.</div>')
+    return (issued + role_note
+            + f'<form method="POST" action="/" class="filters">'
+              f'<input type="hidden" name="token" value="{_esc(token)}">'
+              f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
+              f'maxlength="80" required>{role_field}'
+              f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key</button>'
+              f'</form>')
+
+
+def _playground_form(live: dict[str, Any], token: str) -> str:
+    """Call a tool through the gateway, from here. The gateway's value is the DECISION it makes;
+    until this, the panel could only show decisions some other process happened to trigger.
+
+    Token-gated: this really calls a real tool on a real server. The tool list is fetched with no
+    key (what an unauthenticated caller sees) purely to populate the picker — the CALL carries
+    whatever key the operator pastes, which is what the audit will attribute it to.
+    """
+    if not token or not live.get("listen"):
+        return ""
+    probe = gateway_tools(live)
+    if probe.get("tools"):
+        opts = "".join(f'<option value="{_esc(t)}">{_esc(t)}</option>' for t in probe["tools"])
+        picker = f'<select name="tool">{opts}</select>'
+        note = ""
+    else:
+        picker = '<input name="tool" placeholder="tool name" maxlength="80" required>'
+        note = (f'<div class="note">Could not list tools through the gateway'
+                f'{" — " + _esc(probe.get("error") or "") if probe.get("error") else ""}. '
+                f'Type a tool name to call it anyway.</div>'
+                if not probe.get("ok") else
+                '<div class="note">An unauthenticated caller sees no tools here — that is the '
+                'gateway filtering by identity. Paste an agent key and name its tool.</div>')
+    return (f'<div class="note">Call a tool through the gateway, as an agent would — the same '
+            f'handlers, the same policy, and the decision lands in the trail below.</div>{note}'
+            f'<form method="POST" action="/" class="filters">'
+            f'<input type="hidden" name="token" value="{_esc(token)}">{picker}'
+            f'<input name="key" placeholder="agent key (Bearer)" maxlength="200">'
+            f'<input name="arguments" placeholder=\'{{"arg": "value"}}\' maxlength="400">'
+            f'<button class="act-btn sm" name="act" value="gw-call">Call through gateway</button>'
+            f'</form>')
+
+
+def _gateway_pane(gw: dict[str, Any], token: str = "",
+                  action: dict[str, Any] | None = None) -> str:
+    """The Gateway tab body. Frame first, then the LIVE gateway if one is running (endpoint +
+    point-your-agent-here + the agent-key ceremony), then who did what per principal, then the
+    raw trail."""
+    frame = ('<div class="note">One endpoint in front of every server: agents call the gateway, '
+             'the gateway enforces your approved baseline, observed behaviour and policy per '
+             'principal — and every allow, block and refusal lands in a tamper-evident audit '
+             'trail. Scan and verify are how it knows.</div>')
+    live = gw.get("live")
+    live_html = ""
+    if live:
+        what = _esc(str(live.get("target") or "your fleet"))
+        since = _esc(str(live.get("since") or "")[:19])
+        where = (f' · <code>{_esc(live["listen"])}</code>' if live.get("listen")
+                 else " · stdio (no listener)")
+        keys = " · per-principal keys in force" if live.get("keys") else ""
+        live_html = (f'<div class="note ok">Gateway RUNNING since {since} — in front of '
+                     f'{what}{where}{keys}</div>' + _snippet_for(live)
+                     + _issue_key_form(live, token, action)
+                     + _playground_form(live, token))
+    elif gw.get("runs_error"):
+        live_html = (f'<div class="note warn">Cannot tell whether a gateway is running — '
+                     f'run registry unreadable: {_esc(gw["runs_error"])}</div>')
+    if not live:
+        live_html += _issue_key_form({}, token, action)
+    if not gw.get("audit_present"):
+        where = ("No gateway activity recorded on this machine yet. Start one: "
+                 "<code>mcpgawk enforce serve --gateway-config deploy/gateway.example.yaml</code>"
+                 if gw.get("installed") else
+                 "The gateway ships with gawk Platform — not installed in this environment.")
+        return (frame + live_html
+                + f'<div class="note">{where} Deployable from one YAML: see '
+                  f'<code>deploy/gateway.example.yaml</code> and the Docker image.</div>')
+    head = (f'<div class="filters"><span class="count" style="margin-left:0">'
+            f'{gw.get("blocks", 0)} block(s) · {gw.get("sessions", 0)} session(s) · '
+            f'principals: {_esc(", ".join(gw.get("principals") or []) or "—")}</span></div>')
+    if not live and not gw.get("runs_error"):
+        live_html += ('<div class="note">No gateway running right now — the trail below is '
+                      'from earlier sessions. Start one: <code>mcpgawk enforce serve '
+                      '--gateway-config deploy/gateway.example.yaml</code></div>')
+    per = ""
+    if gw.get("by_principal"):
+        ups = principal_upstreams((live or {}).get("keys_file"))
+        parts = []
+        for p in gw["by_principal"]:
+            pname = str(p.get("principal") or "")
+            blocked = (f'<span class="chip bad">{p["blocks"]}</span>' if p.get("blocks") else "0")
+            own = ", ".join(ups.get(pname) or []) or "—"
+            parts.append(
+                f'<tr><td class="nm">{_esc(pname)}</td>'
+                f'<td class="num">{p.get("calls", 0)}</td>'
+                f'<td class="num">{blocked}</td>'
+                f'<td class="dim">{_esc(own)}</td>'
+                f'<td class="dim">{_esc(str(p.get("last") or ""))[:19]}</td></tr>')
+        note = ""
+        if not ups:
+            note = ('<div class="note">No agent carries its own credential for a backend yet, so '
+                    'every call upstream is made as the gateway. Your browser sign-in is the '
+                    '<b>operator\'s</b> credential — reusing it for every agent would make them '
+                    'all act as you, and the trail could not tell them apart. Give an agent its '
+                    'own access by adding an <code>upstream</code> block to its principal in the '
+                    'registry (this panel never collects secrets).</div>')
+        per = (note + '<table><thead><tr><th>principal</th><th>calls</th><th>blocked</th>'
+               '<th>own credentials for</th><th>last seen</th></tr></thead>'
+               f'<tbody>{"".join(parts)}</tbody></table>')
+    rows = "".join(
+        f'<tr><td class="dim">{_esc(str(e.get("at") or ""))[:19]}</td>'
+        f'<td class="nm">{_esc(str(e.get("tool") or "—"))}</td>'
+        f'<td>{_esc(str(e.get("decision") or ""))}</td>'
+        f'<td class="dim">{_esc(str(e.get("reason") or ""))}</td>'
+        f'<td>{_esc(str(e.get("principal") or "—"))}</td>'
+        f'<td class="dim">{_esc(str(e.get("client") or "—"))}</td></tr>'
+        for e in gw.get("events") or [])
+    err = (f'<div class="note">audit trail unreadable: {_esc(gw["error"])}</div>'
+           if gw.get("error") else "")
+    return (frame + live_html + head + err + per
+            + '<table><thead><tr><th>when</th><th>tool</th><th>decision</th><th>reason</th>'
+              '<th>principal</th><th>client</th></tr></thead>'
+              f'<tbody>{rows}</tbody></table>')
+
+
+def _transport_flag(entry: dict | None, url: str) -> str:
+    """`--sse` or `--http` — scan has to be TOLD which, because a URL is not a config path.
+
+    SSE is chosen only on evidence (the entry declares it, or the URL ends in the conventional
+    /sse), because guessing the transport wrong fails just as loudly as guessing the argument
+    shape wrong did.
+    """
+    declared = ""
+    if isinstance(entry, dict):
+        for key in ("type", "transport"):
+            value = entry.get(key)
+            if isinstance(value, str):
+                declared += value.lower()
+    if "sse" in declared or url.rstrip("/").endswith("/sse"):
+        return "--sse"
+    return "--http"
+
+
+def _run_login_cli(url: str, flag: str = "--http"):
+    """The real `mcpgawk scan --http <url> --login` flow, in this same interpreter.
+
+    Module-level so a test can stand in a fake without patching subprocess for everyone. 330s:
+    the OAuth callback itself waits up to 5 minutes for the human to finish in the browser.
+
+    `flag` is only nominally optional. This used to pass the URL as scan's POSITIONAL argument,
+    which is a config FILE PATH (`cli.py:_load_config` opens it) — so every panel sign-in died
+    with `FileNotFoundError: No such file or directory: 'https://…'` and reported it as
+    "sign-in did not complete", blaming the sign-in for an argument bug. Found 2026-08-03 by the
+    founder clicking the button on a real server, reproduced in one command afterwards.
+    """
+    import subprocess
+    import sys as _sys
+    return subprocess.run([_sys.executable, "-m", "mcpgawk", "scan", flag, url, "--login"],
+                          capture_output=True, text=True, timeout=330)
+
+
+def run_login(name: str | None) -> dict[str, Any]:
+    """Complete ONE server's interactive browser sign-in, from the panel.
+
+    The "needs your sign-in" row used to end with "run `mcpgawk scan --login <url>` in your own
+    terminal" — a dead end with a button-shaped hole. This runs the SAME flow: the browser opens
+    on this machine, the token lands in ~/.gawk/oauth, and nothing new is invented — so the
+    consent story is unchanged, only the typing is gone.
+    """
+    from . import discover, remote_login
+    if not name:
+        return {"ok": False, "message": "sign-in needs a server name"}
+    try:
+        servers = discover.discover_servers()
+    except Exception as exc:                      # noqa: BLE001 — the failure goes ON the page
+        return {"ok": False, "message": f"could not read the fleet: {exc}"}
+    entry = servers.get(name)
+    if entry is None:
+        return {"ok": False,
+                "message": f"no server named {name!r} in the current fleet — refresh and retry"}
+    url = remote_login.login_url(entry, name)
+    if not url:
+        return {"ok": False,
+                "message": f"{name} has no browser sign-in we can run: it is not an mcp-remote "
+                           f"launcher, and the last scan did not see it ask for credentials"}
+    try:
+        proc = _run_login_cli(url, _transport_flag(entry, url))
+    except Exception as exc:                      # noqa: BLE001 — includes the 330s timeout
+        return {"ok": False, "message": f"sign-in for {name} did not complete: {exc}"}
+    # The token ON DISK is the outcome that matters, not the subprocess's exit code — the flow
+    # can exit non-zero after storing a perfectly good token (the follow-on probe may fail).
+    if remote_login.stored_access_token(url):
+        return {"ok": True, "message": f"signed in to {name} — the token is stored on this "
+                                       f"machine; verify can use it now"}
+    tail = [ln for ln in ((proc.stderr or "") + (proc.stdout or "")).splitlines() if ln.strip()]
+    detail = f" — {tail[-1].strip()}" if tail else ""
+    return {"ok": False, "message": f"sign-in for {name} did not complete{detail}"}
+
+
+def _login_button_applicable(entry: dict, name: str = "") -> bool:
+    """Offer sign-in wherever one can actually happen, and nowhere else.
+
+    Two shapes qualify: an interactive-auth launcher (mcp-remote), and a plain REMOTE server that
+    the last scan saw answer 401/403 — our engine has always been able to OAuth the second
+    (`scan --http <url> --login`), and gating the button on the launcher's name alone meant those
+    servers got no button at all while the capability sat unused. Evidence, never a guess: a
+    remote server we have no auth-required record for is left alone rather than handed a button
+    that may do nothing.
+
+    A completed login still suppresses the offer — it would be a re-run trap.
+    """
+    from . import remote_login
+    url = remote_login.login_url(entry, name)
+    if not url:
+        return False
+    return not remote_login.stored_access_token(url)
 
 
 #: Launchers that complete an INTERACTIVE browser sign-in before a server will speak MCP.
@@ -2057,8 +3268,6 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
     servers are launched, which is why this lives behind the panel's token like every other action
     that runs code."""
     import json as _json
-    import subprocess
-    import sys as _sys
     import tempfile
 
     from . import discover, verify as _verify
@@ -2101,6 +3310,17 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         # the panel." The engine already writes the complete report atomically; we simply never
         # asked for it.
         report_path = behaviour_profile_path().parent / "last-verify.json"
+        # KEEP THE PREVIOUS RESULTS. `--out` writes the report for THIS run, so verifying one
+        # server rewrote the file with only that server in it and every other server's real,
+        # reproduced findings were deleted — the row's pill flipped red to green "At baseline" and
+        # the Findings tab said "No verify has run yet" seconds after one had. A per-server verify
+        # is the DEFAULT shape here, so this path erased evidence on the common case.
+        prev_report: dict[str, Any] = {}
+        try:
+            if report_path.is_file():
+                prev_report = _json.loads(report_path.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):
+            prev_report = {}                      # unreadable previous report: nothing to preserve
         try:
             report_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -2146,6 +3366,8 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         except OSError:
             prof_after = -1.0
         profile_unwritten = prof_after == prof_before
+        # Merge THIS run's servers over the previous ones, rather than replacing the file.
+        _merge_verify_report(report_path, prev_report)
         if audit_args:
             try:                                  # the report belongs with its audit stream
                 _shutil.copyfile(report_path, run_dir / "report.json")
@@ -2233,41 +3455,23 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         # Per-server rows for the PAGE. Sending the user to a terminal to find out which server
         # failed is the CLI-only habit this surface exists to replace.
         def _verdict(n: str) -> tuple[str, str, str]:
-            """(outcome, level, detail) for a server a run exercised.
+            """Thin adapter: pull this server's numbers out of the maps, then apply the rule.
 
-            "observed" is NOT a verdict — it says we managed to run, which is a fact about US. The
-            founder watched this page award `browserstack` a green `observed` chip while the grey
-            text beside it read "20 with findings": the chip said good news, the sentence said his
-            most-used server was convicted on every tool checked. A verification tool whose green
-            state contains 20 convictions tells the user the opposite of what it found.
+            The rule itself lives at module level (`verify_verdict`) because it decides whether a
+            server is presented as clean, and a safety verdict buried in a closure inside the
+            function that runs a whole fleet verify is one that cannot be tested — which is how
+            "clean - 0 tool(s)" shipped.
             """
             o = ran_map.get(n) if isinstance(ran_map.get(n), dict) else {}
-            checked = o.get("toolsChecked") or 0
-            skipped = list(o.get("skipped") or [])
-            errors = o.get("checkErrors") or 0
-            hits = len(real_map.get(n) or ()) if report_readable else len(seen_map.get(n) or {})
-            folded = folded_map.get(n, 0)
-
-            bits = [f"{checked or hits} tool(s) watched"]
-            if skipped:            # never let an untested tool read as a clean one
-                bits.append(f"{len(skipped)} not invoked — absence there proves nothing")
-            if errors:
-                bits.append(f"{errors} check(s) never completed")
-            if o.get("backend"):   # the truth about isolation, per server, instead of a claim
-                bits.append(f"isolation: {o['backend']}")
-            if degraded_map.get(n):  # container isolation was requested and did NOT run — say why
-                bits.append(f"ran WITHOUT container isolation — {degraded_map[n].split('—')[0].strip()}")
-            if folded:               # classified, never dropped — the list is on the Findings screen
-                bits.append(f"{folded} first-party finding(s) folded (the vendor's own traffic)")
-            detail = " · ".join(bits)
-
-            if hits:               # convictions outrank everything: this is the headline, not an aside
-                return (f"{hits} tool(s) with findings", "bad", detail)
-            if errors:             # nothing proven wrong AND some checks never ran => not clean
-                return ("incomplete — not clean", "warn", detail)
-            if skipped:
-                return (f"partial — {checked} of {checked + len(skipped)} checked", "warn", detail)
-            return (f"clean — {checked} tool(s)", "ok", detail)
+            return verify_verdict(
+                checked=o.get("toolsChecked") or 0,
+                skipped=list(o.get("skipped") or []),
+                errors=o.get("checkErrors") or 0,
+                hits=len(real_map.get(n) or ()) if report_readable else len(seen_map.get(n) or {}),
+                folded=folded_map.get(n, 0),
+                backend=o.get("backend"),
+                degraded=degraded_map.get(n),
+            )
 
         rows = []
         for n in got:
@@ -2411,14 +3615,38 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                  b"did not come from you. The token is in your terminal.")
                 return
             act = (form.get("act") or [""])[0]
-            if act in ("scan", "verify"):
+            if act in ("scan", "verify", "login"):
                 # `key` carries the server for a row action; absent = whole fleet.
                 _run_action_bg(act, (form.get("key") or [""])[0] or None)
+            elif act == "issue-key":
+                # Issue ONE agent key against the RUNNING gateway's registry. Synchronous (a file
+                # write, not a subprocess) and the secret is held in _ACTION for exactly one
+                # render — see _persist_action, which never writes it to disk.
+                res = run_issue_key((form.get("name") or [""])[0],
+                                    (form.get("role") or [""])[0] or None)
+                _ACTION.update(message=res.get("message") or "", rows=[],
+                               level="ok" if res.get("ok") else "bad",
+                               secret=res.get("secret") or "", snippet=res.get("snippet") or "",
+                               at=_now())
+            elif act == "monitor-start":
+                res = run_monitor_start()
+                _ACTION.update(message=res.get("message") or "", rows=[],
+                               level="ok" if res.get("ok") else "bad",
+                               secret="", snippet="", at=_now())
+            elif act == "gw-call":
+                # A real call through the running gateway. Synchronous: the REST skin answers in
+                # one request and the whole point is to see the decision immediately.
+                res = run_playground_call((form.get("tool") or [""])[0],
+                                          (form.get("key") or [""])[0],
+                                          (form.get("arguments") or [""])[0])
+                _ACTION.update(message=res.get("message") or "", rows=[],
+                               level=res.get("level") or ("ok" if res.get("ok") else "bad"),
+                               secret="", snippet="", at=_now())
             elif act == "keep":
                 # Leaving it blocked IS the decision — deliberately a no-op on state, exactly like
                 # `decide`'s keep. The message confirms the consequence, not an action performed.
                 _ACTION.update(message="Left blocked. Your agents still cannot call it.",
-                               rows=[], level="ok", at=_now())
+                               rows=[], level="ok", secret="", snippet="", at=_now())
             elif act == "protect":
                 # Install the pre-execution hook for ONE agent — the same guard.install_for the
                 # CLI uses (other vendors' hooks preserved, previous config backed up, atomic

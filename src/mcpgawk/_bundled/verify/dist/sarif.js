@@ -82,9 +82,21 @@ export function toSarif(report) {
                     },
                 },
                 results,
-                ...(toolExecutionNotifications.length > 0
-                    ? { invocations: [{ executionSuccessful: true, toolExecutionNotifications }] }
-                    : {}),
+                // ALWAYS emitted, and `executionSuccessful` follows the report's derived `complete` — it is
+                // SARIF's own field for "the run itself succeeded", and GitHub renders `true` + 0 results as
+                // a successful scan with no alerts. Hardcoding it true meant a run where nothing completed
+                // (or nothing was even checked) rendered in code scanning as a clean bill of health.
+                invocations: [
+                    {
+                        executionSuccessful: report.summary.complete,
+                        ...(report.summary.complete
+                            ? {}
+                            : {
+                                exitCodeDescription: `incomplete: ${report.summary.incompleteReasons.join("; ")}`,
+                            }),
+                        ...(toolExecutionNotifications.length > 0 ? { toolExecutionNotifications } : {}),
+                    },
+                ],
             },
         ],
     };

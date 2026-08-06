@@ -32,8 +32,20 @@ DENY = "deny"
 DEFER = "defer"
 
 
+def content_hash(description: str | None) -> str:
+    """The approved-surface fingerprint of one tool's model-visible text.
+
+    MUST stay byte-identical to `drift._hash`, which writes the `{tool: hash}` map into the trust
+    store — comparing against a differently-computed hash would deny every call on every server.
+    `tests/test_rugpull_runtime.py` pins the two together.
+    """
+    import hashlib
+    return hashlib.sha256((description or "").encode()).hexdigest()[:12]
+
+
 def declared_verdict(server: str, tool: str,
-                     approved: dict[str, str] | None) -> tuple[str, str, str | None]:
+                     approved: dict[str, str] | None,
+                     live_hash: str | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -43,20 +55,38 @@ def declared_verdict(server: str, tool: str,
     machines. `{}` is "approved as having no tools", so any call is a deviation.
 
     A tool ABSENT from an approved server's surface → DENY: a tool that appeared after approval is
-    exactly the shape a malicious update takes. A tool PRESENT in the surface → DEFER, not allow —
-    whether its content still matches is the rug-pull check, which needs the live hash the caller
-    may not have; claiming to check it here would be the more dangerous error.
+    exactly the shape a malicious update takes.
+
+    `live_hash` is this tool's CURRENT content fingerprint, when the caller has it. Supplied, a
+    mismatch against the approved hash is the RUG-PULL and is denied: same tool name, description
+    rewritten to steer the model. Omitted, the check is skipped and the verdict rests on name
+    membership alone — the free agent hook reads a flat projection and genuinely does not hold the
+    live surface, and denying on evidence it does not have would be the more dangerous error.
+
+    The paid gateway is not in that position: it holds `listed.tools` and the approved map in the
+    SAME process, and passed neither. `mcpgawk scan` reported the rug-pull signature while the
+    gateway allowed the call silently.
     """
     if approved is None:
         return DEFER, BASIS_DECLARED, None
     if tool not in approved:
         return DENY, BASIS_DECLARED, deny_reason(server, tool)
+    approved_hash = approved.get(tool)
+    # Both sides must be present. A record written before hashes existed, or a caller that could
+    # not compute one, is missing evidence — and missing evidence is never a deny here.
+    if live_hash and approved_hash and live_hash != approved_hash:
+        return DENY, BASIS_DECLARED, (
+            f"{server}.{tool} has CHANGED since you approved it — same name, different content "
+            f"(approved {approved_hash}, now {live_hash}). This is the rug-pull shape: a tool you "
+            f"trusted rewritten to say something else. Re-read it, then `mcpgawk approve {server}`."
+        )
     return DEFER, BASIS_DECLARED, None
 
 
 def verdict(server: str, tool: str, approved: dict[str, str] | None,
             observations: dict[str, dict] | None = None,
-            session_sources: tuple[tuple[str, str], ...] = ()) -> tuple[str, str, str | None]:
+            session_sources: tuple[tuple[str, str], ...] = (),
+            live_hash: str | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -72,7 +102,7 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
       observed sink running after an observed source delivered untrusted content — which is the
       lethal-trifecta shape caught live, on evidence, not on names.
     """
-    decision, basis, reason = declared_verdict(server, tool, approved)
+    decision, basis, reason = declared_verdict(server, tool, approved, live_hash)
     if decision == DENY:
         return decision, basis, reason
 

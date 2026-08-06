@@ -53,6 +53,15 @@ export interface ServerReport {
     readonly checkErrors: readonly CheckError[];
     /** Vuln-class codes that RAN (remote servers can only run output-based checks). */
     readonly checksRun: readonly string[];
+    /** Every check this run INTENDED to perform for this server (tools × applicable checks, plus the
+     * dispatched hidden-tool probes). Counted where the checks are actually driven, not inferred. */
+    readonly checksPlanned?: number;
+    /** The subset of `checksPlanned` that produced a verdict either way (finding or clean). A check
+     * that ended in a {@link CheckError} is planned but NOT completed. `checksCompleted <
+     * checksPlanned` makes the server INCOMPLETE — it is the single fact that makes `clean`
+     * unreachable when anything failed. Optional only so older fixtures still build: when absent,
+     * report.ts falls back to "a check that errored never completed", which is the same rule. */
+    readonly checksCompleted?: number;
     /** Fingerprint of the server's tool inventory — for drift / rug-pull detection over time. */
     readonly pins: ServerPins;
     /**

@@ -20,6 +20,11 @@ export const PROXIED_COVERAGE = "egress is enforced at the OS level AND observed
     "exfiltration is BLOCKED while every HTTP(S) destination — including the npx/uvx install " +
     "fetch — is recorded. A non-allowlisted host in this report was seen by the only possible " +
     "way out, not by a bypassable observer.";
+/** What replaces every coverage CLAIM when the run did not complete. Deliberately contains none of
+ * the strong-claim wording (no "BLOCKED", no "is recorded") — an incomplete run has established
+ * nothing to make a claim about. Followed by the specific reasons and {@link EGRESS_COVERAGE}. */
+export const INCOMPLETE_COVERAGE = "NO COVERAGE CLAIM — this run did not complete, so nothing can be asserted about what was not " +
+    "checked. Not clean, not proven: incomplete because";
 /**
  * Cluster undeclared-egress findings by the host they reached, ordered ANOMALY-FIRST — a host
  * reached by the FEWEST tools ranks first. On a server with no `allowedHosts`, its own upstream
@@ -42,13 +47,91 @@ export function groupEgressByHost(egressFindings) {
         .map(([host, tools]) => ({ host, tools: [...tools].sort() }))
         .sort((a, b) => a.tools.length - b.tools.length || a.host.localeCompare(b.host));
 }
-/** Worst severity → status. critical ⇒ vulnerable; high/medium ⇒ at-risk; else clean. */
+/** Worst severity → status. critical ⇒ vulnerable; high/medium ⇒ at-risk; else clean.
+ *
+ * NOTE: severity ALONE can never decide a status — it cannot see whether anything was actually
+ * checked. Use {@link deriveStatus}, which folds this together with {@link Completeness}. This is
+ * exported only for the severity half and for direct unit tests of it. */
 export function statusOf(severities) {
     if (severities.includes("critical"))
         return "vulnerable";
     if (severities.some((s) => s === "high" || s === "medium"))
         return "at-risk";
     return "clean";
+}
+/** The counts a {@link ServerReport} carries, plus the legacy fallback: when the runner did not
+ * record explicit counts, a check that errored is by definition planned-but-not-completed, so
+ * `complete ⟺ checkErrors.length === 0` still holds. */
+function countsOf(r) {
+    const planned = r.checksPlanned ?? (r.checksCompleted ?? 0) + r.checkErrors.length;
+    const completed = r.checksCompleted ?? Math.max(planned - r.checkErrors.length, 0);
+    return { planned, completed };
+}
+/** Completeness for ONE server. A server is complete only when every check it planned produced a
+ * verdict, at least one tool was actually exercised, and (for a dispatcher) its whole hidden
+ * catalog was enumerated AND probed. */
+export function serverCompleteness(r) {
+    const { planned, completed } = countsOf(r);
+    const reasons = [];
+    if (completed !== planned) {
+        reasons.push(`${planned - completed} check(s) never completed (infra failure, not a verdict) — ${completed}/${planned} completed`);
+    }
+    if (r.toolsChecked === 0) {
+        reasons.push("no tool was actually exercised, so nothing was proven about this server");
+    }
+    if (dispatchForcesIncomplete(r)) {
+        reasons.push("a dynamic-dispatch catalog was not fully enumerated AND probed");
+    }
+    return {
+        checksPlanned: planned,
+        checksCompleted: completed,
+        complete: reasons.length === 0,
+        reasons,
+    };
+}
+/** Completeness for the WHOLE run: every server complete, at least one server, at least one tool
+ * anywhere, and no server that failed outright. */
+export function runCompleteness(servers, errors) {
+    const checksPlanned = servers.reduce((n, s) => n + s.checksPlanned, 0);
+    const checksCompleted = servers.reduce((n, s) => n + s.checksCompleted, 0);
+    const reasons = [];
+    if (servers.length === 0)
+        reasons.push("no server was verified at all");
+    if (servers.length > 0 && servers.reduce((n, s) => n + s.toolsChecked, 0) === 0) {
+        reasons.push("no tool anywhere was exercised");
+    }
+    if (errors.length > 0)
+        reasons.push(`${errors.length} server(s) could not be verified`);
+    for (const s of servers) {
+        for (const reason of s.incompleteReasons)
+            reasons.push(`${s.server}: ${reason}`);
+    }
+    return { checksPlanned, checksCompleted, complete: reasons.length === 0, reasons };
+}
+/**
+ * The single status algebra. Precedence is unchanged (vulnerable > at-risk > incomplete > clean) —
+ * a reproduced finding still outranks incompleteness — but `clean` is now UNREACHABLE unless the
+ * run/server is complete. Before this, `clean` was decided by severity alone, so any number of
+ * failed checks (1 or 1000) still read as a clean pass.
+ */
+export function deriveStatus(severity, completeness) {
+    if (severity === "vulnerable" || severity === "at-risk")
+        return severity;
+    return completeness.complete ? "clean" : "incomplete";
+}
+/** The ONLY exit-code derivation: a pure function of {@link Status}. 1 = actionable (a reproduced
+ * finding), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
+ * computed independently of `summary.status`, so `incomplete` could exit 0 and `clean` exit 2. */
+export function exitCodeForStatus(status) {
+    switch (status) {
+        case "vulnerable":
+        case "at-risk":
+            return 1;
+        case "incomplete":
+            return 2;
+        default:
+            return 0;
+    }
 }
 /**
  * F4-4: would a would-be-clean dispatcher still be INCOMPLETE? True unless its WHOLE catalog was
@@ -93,24 +176,23 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             };
         });
         const active = findings.filter((f) => !f.suppressed);
-        const base = statusOf(active.map((f) => f.severity));
-        // A dispatcher is INCOMPLETE unless its WHOLE hidden catalog was enumerated AND behaviourally
-        // probed (F4-4) — a partially-probed dispatcher must never read as a clean pass. Real findings
-        // (at-risk/vulnerable) still take precedence over incompleteness.
-        // ...and a server where NOTHING was checked cannot be clean either. Safe mode skips every
-        // not-read-only tool, so an all-mutating server (a common shape — writers, senders, deployers)
-        // connected fine, had all its tools skipped, and still wore a green "clean" over an empty
-        // examination. Found live 2026-07-27 verifying mcpgawk's OWN server: `toolsChecked: 0`,
-        // 2 skipped, `status: "clean"`. The whole-run guard below already refused to call an
-        // all-errored run clean; this is the same rule at the per-server level, which it did not cover.
-        const nothingChecked = r.toolsChecked === 0;
-        const status = base === "clean" && (dispatchForcesIncomplete(r) || nothingChecked) ? "incomplete" : base;
+        // ONE derivation (1A): severity decides only convicted-vs-not; completeness decides whether
+        // `clean` is even sayable. A dispatcher whose hidden catalog was not fully enumerated+probed
+        // (F4-4), a server where no tool was exercised (safe mode skips every mutator — found live
+        // 2026-07-27 on mcpgawk's OWN server: `toolsChecked: 0`, `status: "clean"`), and a server with
+        // ANY check that never completed all land in the same place: INCOMPLETE, never clean.
+        const completeness = serverCompleteness(r);
+        const status = deriveStatus(statusOf(active.map((f) => f.severity)), completeness);
         return {
             server: r.server,
             transport: r.transport,
             status,
             toolsChecked: r.toolsChecked,
             checksRun: [...r.checksRun],
+            checksPlanned: completeness.checksPlanned,
+            checksCompleted: completeness.checksCompleted,
+            complete: completeness.complete,
+            incompleteReasons: completeness.reasons,
             findings,
             skipped: r.skipped.map((s) => ({ tool: s.tool, class: s.klass })),
             checkErrors: [...r.checkErrors],
@@ -132,19 +214,11 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
     // because their catalog wasn't fully enumerated+probed (F4-4). Only the latter folds the overall
     // status to `incomplete`: a fully-probed dispatcher is a real clean, not a hedge.
     const dispatchServers = servers.filter((s) => (s.dynamicDispatch?.length ?? 0) > 0).length;
-    const dispatchIncompleteServers = servers.filter(dispatchForcesIncomplete).length;
-    const severityStatus = statusOf(activeFindings.map((f) => f.severity));
-    // A run where NOTHING was actually verified but a server errored is not "clean" — nothing was
-    // proven. Read it as `incomplete` so an all-errored run never wears a green banner.
-    const nothingVerified = servers.length === 0 && errors.length > 0;
-    // A run in which no tool anywhere was actually examined is not a clean run, even when every
-    // server connected happily. Without this, verifying a fleet of all-mutating servers in safe mode
-    // returned a green summary having proven nothing at all.
-    const noToolsAnywhere = servers.length > 0 && servers.every((s) => s.toolsChecked === 0);
-    const summaryStatus = severityStatus === "clean" &&
-        (dispatchIncompleteServers > 0 || nothingVerified || noToolsAnywhere)
-        ? "incomplete"
-        : severityStatus;
+    // The SAME derivation as each server, one level up: the run is complete only when every server
+    // is, at least one server was verified, at least one tool anywhere was exercised, and no server
+    // failed outright. A summary can no longer say `clean` above a server saying `incomplete`.
+    const completeness = runCompleteness(servers, errors);
+    const summaryStatus = deriveStatus(statusOf(activeFindings.map((f) => f.severity)), completeness);
     return {
         schemaVersion: REPORT_SCHEMA_VERSION,
         tool: "gawk-verify",
@@ -157,12 +231,20 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             errors: errors.length,
             checkErrors: servers.reduce((n, s) => n + s.checkErrors.length, 0),
             dynamicDispatch: dispatchServers,
+            checksPlanned: completeness.checksPlanned,
+            checksCompleted: completeness.checksCompleted,
+            complete: completeness.complete,
+            incompleteReasons: completeness.reasons,
             status: summaryStatus,
             bySeverity,
         },
         servers,
         errors: [...errors],
-        coverage: coverageOf(servers),
+        // The coverage sentence is the strongest claim the product makes ("raw-socket / DNS / UDP
+        // exfiltration is BLOCKED ... every HTTP(S) destination is recorded"). It is a statement about
+        // what THIS run established, so it is unsayable on a run that did not complete — it used to be
+        // printed unconditionally, including on runs where the target never started.
+        coverage: coverageOf(servers, completeness),
     };
 }
 /**
@@ -170,7 +252,11 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
  * aspiration. A server on the plain "proxy" backend with no degradedReason simply never had
  * `isolate` requested (today's default) — that's not a degradation, just the normal mode.
  */
-function coverageOf(servers) {
+function coverageOf(servers, completeness) {
+    // No coverage CLAIM on an incomplete run. What we can honestly say is what was NOT established.
+    if (!completeness.complete) {
+        return `${INCOMPLETE_COVERAGE} ${completeness.reasons.join("; ")}. ${EGRESS_COVERAGE}`;
+    }
     const local = servers.filter((s) => s.sandboxBackend !== "none");
     if (local.length === 0)
         return EGRESS_COVERAGE; // all-remote run, no local sandbox involved

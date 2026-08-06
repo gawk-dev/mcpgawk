@@ -265,12 +265,27 @@ def status(path: Path | None = None) -> str:
             line += f" ({others} other PreToolUse hook(s) present — install merges, never replaces)"
         return line
 
-    script = hook_script_path()
-    healthy = script.is_file()
-    lines = [f"mcpgawk guard: INSTALLED in {target}",
+    # The health question is about the command the agent will RUN, not about our package layout.
+    # Stat-ing `hook_script_path()` answered "is mcpgawk installed here now?", which is true even
+    # when the settings file points at an interpreter that died with a deleted venv — so the
+    # `← MISSING` branch could never fire for a real breakage (`uv tool install --force`, a moved
+    # venv). Read the configured commands and check each one.
+    cmds = _our_commands(settings)
+    dead = [c for c in cmds if not _still_runs(c)]
+    healthy = bool(cmds) and not dead
+    lines = [f"mcpgawk guard: {'INSTALLED' if healthy else 'INSTALLED but BROKEN'} in {target}",
              f"  matcher: {MCP_MATCHER} (MCP tool calls only)",
-             f"  timeout: {HOOK_TIMEOUT_S}s",
-             f"  script:  {script}{'' if healthy else '  ← MISSING, the hook cannot run'}"]
+             f"  timeout: {HOOK_TIMEOUT_S}s"]
+    for cmd in cmds:
+        broken = cmd in dead
+        lines.append(f"  command: {cmd}"
+                     f"{'  ← CANNOT RUN, every MCP call goes unchecked' if broken else ''}")
+    if not cmds:
+        # `is_installed` matched on a shape `_our_commands` cannot read: report the disagreement
+        # rather than printing a confident INSTALLED with nothing behind it.
+        lines.append("  command: none readable in this file — the hook cannot be verified")
+    if not healthy:
+        lines.append("  fix: `mcpgawk guard install` re-points it at this interpreter")
     lines.append("  decision: local — reads your approved baseline and the behavioural profile "
                  "verify recorded; nothing leaves this machine.")
     return "\n".join(lines)
@@ -501,6 +516,41 @@ def is_installed_for(adapter) -> bool:
     except GuardError:
         return False
     return MARKER in json.dumps(settings)
+
+
+def configured_commands(adapter) -> list[str]:
+    """OUR hook command strings as they are actually written in THIS agent's config.
+
+    The command string is the only thing the agent will ever run. Anything derived from our own
+    package layout answers a different question — where we happen to be installed today — and
+    answers it `True` for a hook that cannot start.
+    """
+    try:
+        if adapter.fmt == "kimi":
+            if not adapter.config.is_file():
+                return []
+            return [c for c in re.findall(r"command\s*=\s*'([^']*)'",
+                                          _kimi_read(adapter.config)) if MARKER in c]
+        return _our_commands(_load_settings(adapter.config))
+    except (GuardError, OSError):
+        return []
+
+
+def hook_health_for(adapter) -> str:
+    """`"absent"`, `"broken"` or `"ok"` for ONE agent — the single definition of "am I protected?".
+
+    Three states, never two. Collapsing `broken` into either neighbour is the defect this exists to
+    prevent: reported as `ok`, a hook whose interpreter died with a throwaway venv passes every MCP
+    call through unchecked while the UI says every call is checked; reported as `absent`, a real
+    installation the user deliberately made looks like something they never did.
+
+    `broken` is reachable in ordinary use — `uv tool install --force`, moving the venv, deleting the
+    script — so it is not an attacker-only branch.
+    """
+    cmds = configured_commands(adapter)
+    if not cmds:
+        return "absent"
+    return "ok" if all(_still_runs(c) for c in cmds) else "broken"
 
 
 def install_for(adapter, *, python: str | None = None) -> str:

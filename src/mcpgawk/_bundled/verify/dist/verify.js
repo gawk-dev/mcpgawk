@@ -47,7 +47,12 @@ async function selectIsolatedSandbox(server) {
 async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.name) {
     const findings = [];
     const checkErrors = [];
+    // 1A: count what was PLANNED and what actually reached a verdict, at the only place that knows.
+    // Everything downstream (status, exit code, coverage claim, every renderer) derives from these.
+    let checksPlanned = 0;
+    let checksCompleted = 0;
     for (const check of checks) {
+        checksPlanned += 1;
         const candidate = {
             code: check.code,
             findingClass: check.findingClass,
@@ -81,6 +86,10 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
         if (outcome.kind !== "verdict" && isInfra) {
             checkErrors.push({ tool: attributionName, code: check.code, detail: outcome.reason });
         }
+        else {
+            // A verdict, or a non-infra "did not reproduce" — either way this check reached a conclusion.
+            checksCompleted += 1;
+        }
         ctx.emit({
             type: "check",
             server: ctx.serverName,
@@ -97,7 +106,7 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
             evidence: outcome.kind === "verdict" ? outcome.verdict.evidence : undefined,
         });
     }
-    return { findings, checkErrors };
+    return { findings, checkErrors, checksPlanned, checksCompleted };
 }
 /**
  * Verify one MCP server behaviourally: enumerate its tools, then for each callable one run every
@@ -208,6 +217,9 @@ export async function verifyServer(server, opts = {}) {
     const findings = [];
     const skipped = [];
     const checkErrors = [];
+    // 1A: the run's own accounting of planned-vs-completed checks (see report.ts's Completeness).
+    let checksPlanned = 0;
+    let checksCompleted = 0;
     // F4: what we can probe THROUGH the executor. Present only for a dispatcher with a readable
     // executor schema; hidden tools WITH a captured schema are probed, those without stay
     // enumerated-but-unprobeable (recorded so Phase 3's status logic never calls the server clean
@@ -233,6 +245,8 @@ export async function verifyServer(server, opts = {}) {
             });
             findings.push(...res.findings);
             checkErrors.push(...res.checkErrors);
+            checksPlanned += res.checksPlanned;
+            checksCompleted += res.checksCompleted;
         }
         // F4: drive the executor to probe each hidden tool the same way — synthesise args against the
         // HIDDEN tool's own schema, wrapped into the executor envelope by `dispatchedProbe`, so the
@@ -268,6 +282,8 @@ export async function verifyServer(server, opts = {}) {
                     const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit }, attribution);
                     findings.push(...res.findings);
                     checkErrors.push(...res.checkErrors);
+                    checksPlanned += res.checksPlanned;
+                    checksCompleted += res.checksCompleted;
                     hiddenProbed.push(hidden.name);
                 }
             }
@@ -290,6 +306,8 @@ export async function verifyServer(server, opts = {}) {
         skipped,
         checkErrors,
         checksRun: checks.map((c) => c.code),
+        checksPlanned,
+        checksCompleted,
         pins: pinInventory(server.name, tools),
         sandboxBackend,
         sandboxDegradedReason,

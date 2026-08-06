@@ -210,7 +210,10 @@ def test_hook_exits_zero_and_stays_silent_on_garbage_input(tmp_path):
     store = _store(tmp_path, {})
     for bad in ("", "   ", "not json at all", "[1,2,3]"):
         proc = subprocess.run([sys.executable, str(HOOK_SCRIPT)], input=bad, text=True,
-                              capture_output=True, env={"MCPGAWK_HISTORY": str(store)}, timeout=60)
+                              capture_output=True, timeout=60,
+                              # HOME too: without it the child resolves ~ to the DEVELOPER's real
+                              # home and writes ~/.mcpgawk state, which the suite tripwire catches.
+                              env={"MCPGAWK_HISTORY": str(store), "HOME": str(store.parent)})
         assert proc.returncode == 0, bad
         assert proc.stdout.strip() == "", bad
 
@@ -252,7 +255,7 @@ def test_lean_reader_agrees_with_the_canonical_baseline_loader(tmp_path):
     shape changes, this fails HERE rather than in a user's agent."""
     from mcpgawk import baseline
 
-    key = "srv"
+    key = "mcp:srv"
     store = tmp_path / "history.json"
     # Written by the product's OWN writer, so the file under test is genuinely canonical rather
     # than a shape this test invented.
@@ -413,6 +416,82 @@ def test_status_reports_all_three_states(tmp_path):
     text = guard.status(settings)
     assert "INSTALLED" in text
     assert "nothing leaves this machine" in text
+
+
+def test_the_hook_records_declines_differently_from_checked_passes(tmp_path, monkeypatch):
+    """Eval 1.6, driven through the hook itself rather than the renderer.
+
+    A call the guard DECLINED to check (no projection) and a call it checked and passed were
+    written to the spool byte-identically as `defer`, so `status` counted both: 802 "checked" on a
+    machine where 801 were declines and nothing was ever enforced. Asserted on what actually lands
+    in the log, because that log is the only thing status can read.
+    """
+    import json as _json
+
+    from mcpgawk import guard_hook, history
+
+    store_path = tmp_path / "history.json"
+    spool_path = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("MCPGAWK_HISTORY", str(store_path))
+    monkeypatch.setenv("MCPGAWK_SPOOL", str(spool_path))
+    monkeypatch.setenv("GAWK_BEHAVIOUR", str(tmp_path / "behaviour.json"))
+
+    def decisions() -> list[str]:
+        if not spool_path.is_file():
+            return []
+        return [_json.loads(ln)["decision"]
+                for ln in spool_path.read_text().splitlines() if ln.strip()]
+
+    def _run(mod, tool):
+        import io
+        monkeypatch.setattr("sys.stdin", io.StringIO(
+            _json.dumps({"tool_name": tool, "session_id": "s1"})))
+        mod.main([])
+
+    # 1. No approved baseline at all: the guard declines. That is NOT a check.
+    _run(guard_hook, "mcp__figma__get_file")
+    assert decisions() == ["defer"], "a declined call must not be logged as a pass"
+
+    # 2. A real approved surface, written through the canonical writer so the projection is genuine.
+    history.save({"servers": {"figma": {"approved": {"tools": {"get_file": "h1"}},
+                                        "aliases": []}}}, store_path)
+    _run(guard_hook, "mcp__figma__get_file")
+    _run(guard_hook, "mcp__figma__delete_everything")
+
+    assert decisions() == ["defer", "allow", "deny"], (
+        "checked-and-passed, checked-and-denied, and declined must be three distinct records")
+
+
+def test_a_hook_whose_script_is_gone_reports_BROKEN_not_INSTALLED(tmp_path):
+    """Eval 1.8. `status` used to stat OUR package path, which answers "is mcpgawk installed here
+    now?" — true even when the settings file points at an interpreter or script that no longer
+    exists. So the `cannot run` branch could never fire for a real breakage, and every MCP call
+    proceeded unchecked behind a confident INSTALLED.
+
+    Reproduces the realistic trigger (`uv tool install --force`, a moved venv) by pointing the
+    configured command at paths that are then deleted.
+    """
+    settings = tmp_path / "settings.json"
+    fake_py = tmp_path / "bin" / "python"
+    fake_script = tmp_path / "pkg" / "guard_hook.py"
+    for p in (fake_py, fake_script):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("#!/bin/sh\n")
+
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": guard.MCP_MATCHER, "hooks": [{"type": "command",
+         "command": f'"{fake_py}" "{fake_script}" {guard.MARKER}'}]}]}}))
+
+    assert "INSTALLED" in guard.status(settings)
+    assert "CANNOT RUN" not in guard.status(settings)
+
+    fake_script.unlink()                       # the venv/script goes away under the user
+
+    text = guard.status(settings)
+    assert "BROKEN" in text, "a hook that cannot start must not read as INSTALLED"
+    assert "CANNOT RUN" in text
+    assert "every MCP call goes unchecked" in text
+    assert "guard install" in text, "the repair must be named"
 
 
 def test_cli_wires_guard(tmp_path, capsys):

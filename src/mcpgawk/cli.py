@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from . import drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
-from .discover import detect_unscannable, discover_servers
+from .discover import detect_unscannable, discover_report, discover_servers
 from .label import build_label, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
@@ -35,6 +35,23 @@ def _load_config(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return data.get("mcpServers", data)
+
+
+def _consent_agents(entries: dict | None) -> list[str]:
+    """The client names behind the discovered fleet, for the consent question. Reads `_clients`
+    (plural, a list) — the key discovery actually emits. This read `_client` for weeks: the
+    consent prompt's "which of your tools" detail rendered empty on every machine while every
+    test stayed green, because the tests supplied the inputs production never did."""
+    return sorted({str(c).strip()
+                   for e in (entries or {}).values() if isinstance(e, dict)
+                   for c in (e.get("_clients") or [])} - {""})
+
+
+def _discovery_problems(sources: list[dict]) -> list[str]:
+    """Delegates to discover.problem_lines — one renderer for the CLI and the panel, so the two
+    surfaces cannot drift apart on what counts as a reportable shortfall."""
+    from .discover import problem_lines
+    return problem_lines(sources)
 
 
 def _headers(pairs: list[str] | None) -> dict[str, str]:
@@ -82,15 +99,31 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     # Zero-config: with no path given, DISCOVER every MCP server configured across the machine's IDE
     # clients (Claude Desktop/Code, Cursor, VS Code, Windsurf, …), deduped. `mcpgawk scan` just works.
     is_discovery = not args.config
-    cfg = _load_config(args.config) if args.config else discover_servers()
+    sources: list[dict] = []
+    if args.config:
+        cfg = _load_config(args.config)
+    else:
+        # Module-level name on purpose: tests stub `cli.discover_report` to inject a fleet, the
+        # same seam they used on discover_servers before the report existed.
+        cfg, sources = discover_report()
     targets = [(n, e) for n, e in cfg.items() if not only or n in only]
     if is_discovery and not targets:
-        print("mcpgawk: no MCP servers found in your IDE configs "
-              "(Claude Desktop/Code, Cursor, VS Code, Windsurf, …).\n"
-              "  Point it at a config:  mcpgawk scan path/to/mcp.json\n"
+        # "Nothing was found" and "nothing was looked at" must never render alike: say what WAS
+        # examined, and name every source that existed but yielded nothing readable — an empty
+        # fleet asserted over a config we failed to parse is the false all-clear this product
+        # exists to prevent.
+        print(f"mcpgawk: no scannable MCP servers found — looked in {len(sources)} config "
+              f"location(s) across {len({s['client'] for s in sources})} client(s).",
+              file=sys.stderr)
+        for line in _discovery_problems(sources):
+            print(f"  ⚠ {line}", file=sys.stderr)
+        print("  Point it at a config:  mcpgawk scan path/to/mcp.json\n"
               "  Or scan one server:    mcpgawk scan --stdio \"npx -y <server>\"  |  --http <url>",
               file=sys.stderr)
         return [], {}, []
+    if is_discovery:
+        for line in _discovery_problems(sources):
+            print(f"mcpgawk: ⚠ {line}", file=sys.stderr)
     # Default-deny consent before LAUNCHING any discovered/configured stdio server (spawning runs its
     # code). Explicit --stdio never reaches here; remote servers aren't spawned so they always pass.
     approved = gate_stdio_consent(targets, assume_yes=getattr(args, "yes", False))
@@ -150,6 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
     # binary. A tool that cannot state its own version cannot be supported.
     p.add_argument("--version", action="version", version=f"mcpgawk {_installed_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
+    n = sub.add_parser("install-node",
+                       help="fetch the Node runtime `verify` needs (26 MB download, no admin rights)")
+    n.add_argument("--yes", "-y", action="store_true",
+                   help="skip the confirmation — required in a non-interactive session, because "
+                        "this downloads and then RUNS third-party code")
     s = sub.add_parser("scan", help="measure MCP server(s) locally")
     s.add_argument("config", nargs="?", help="path to an mcp.json config")
     s.add_argument("--stdio", help='one stdio server, e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp"')
@@ -306,6 +344,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--json", action="store_true", help="machine-readable output")
     r.add_argument("--prune", action="store_true",
                    help="drop finished runs older than 90 days, then report what is left")
+
+    # DISCOVERY ONLY — these never reach argparse at runtime. `_dispatch` intercepts `verify` and
+    # the account commands before the parser is built, because each owns its own flags and the free
+    # parser must not try to validate them. That interception also made them INVISIBLE: they were
+    # absent from the `{scan,baseline,...}` list `--help` prints, so the beta guide ended up telling
+    # testers "`verify` isn't in this build" about a working, free, flagship capability.
+    # `add_argument` is deliberately absent: these parsers exist to be LISTED, and a flag written
+    # here would be a second, silently-wrong copy of a contract the engine already owns.
+    sub.add_parser(
+        "verify",
+        help="run a server in a sandbox and watch what it actually does",
+        description="Run the server and observe it — the behavioural check. FREE. Its flags belong "
+                    "to the verify engine, so run `mcpgawk verify` with no arguments to see them.")
+    for _name, _help in ACCOUNT_COMMANDS.items():
+        sub.add_parser(_name, help=_help)
     return p
 
 
@@ -632,6 +685,22 @@ def _protect() -> int:
     print("mcpgawk — checking what your agents can call, and turning protection on.\n")
 
     choice = protect.load_consent()
+
+    # A SAVED consent is not a human. `launch` means "start every local stdio server", which puts
+    # that server's live credentials on the process table of whatever machine this runs on. The
+    # non-interactive fallback below was written to degrade to remote-only in exactly that case —
+    # and a saved `launch` skipped straight past it, because the whole block is guarded on
+    # `choice is None`. So CI, a piped run and an agent session all launched the fleet with real
+    # keys, which is the one thing that branch exists to prevent (found 2026-08-02).
+    #
+    # Deliberately the SAME human-presence test the trust-store writes use: one definition of "is
+    # a person here", not a second one that can disagree with the first.
+    if choice == protect.LAUNCH_ALL and history.approval_blocked_reason() is not None:
+        print("  A saved 'launch' consent does not carry to a non-interactive run — checking "
+              "remote servers only.\n  Run this in your own terminal to include local servers.\n",
+              file=sys.stderr)
+        choice = protect.REMOTE_ONLY
+
     scan_args = ["scan", "--track"]
     if choice is None:
         # Count local servers first so the question can be specific about what it is asking for.
@@ -641,8 +710,7 @@ def _protect() -> int:
             entries = found[0] if isinstance(found, tuple) else found
             local = sum(1 for e in (entries or {}).values()
                         if isinstance(e, dict) and e.get("command"))
-            agents = sorted({str(e.get("_client") or "").strip()
-                             for e in (entries or {}).values() if isinstance(e, dict)} - {""})
+            agents = _consent_agents(entries)
         except Exception:                          # noqa: BLE001 - discovery is best-effort here
             local, agents = 0, []
         if local:
@@ -680,7 +748,24 @@ def _protect() -> int:
         lines.append(f"  Runtime checking NOT enabled ({type(exc).__name__}: {exc})")
     guard_line = "\n".join(lines) if lines else "  No agent with a hook point found."
 
-    _front_door_verify(choice)
+    # ONLY where someone can watch it and stop it. This is a multi-minute fleet verify — every
+    # discovered server launched in a fresh container doing a cold `npx …@latest` — and it ran
+    # unconditionally on a bare `mcpgawk`. Off a TTY that means: no visible progress (stdout is
+    # block-buffered, so the scan table that DID complete sits unflushed), no Ctrl-C, and a
+    # process that looks hung for ten minutes and then dies with zero output. Which is exactly
+    # what `test_bare_invocation_does_something_useful` was reporting, and could never pass:
+    # its 300s harness budget is half the code's own 600s.
+    #
+    # The scan result above is already printed and is the useful answer. Behavioural verification
+    # is the expensive, deliberate step, so off a TTY it is NAMED and skipped, never silently
+    # dropped — an absent verify must not read as a clean one.
+    if sys.stdout.isatty():
+        _front_door_verify(choice)
+    else:
+        print("  Behavioural verification SKIPPED — it launches every server and takes minutes, "
+              "so it needs a terminal you can watch and interrupt.\n"
+              "  Run `mcpgawk verify` to do it deliberately. This is not a clean result; it is "
+              "no result.\n", file=sys.stderr)
 
     store = history.load(history.default_path())
     print(protect.protection_report(store, guard_line, unchecked=[]))
@@ -751,7 +836,13 @@ def _front_door_verify(choice: str) -> None:
             _json.dump({"mcpServers": allowed}, fh)
             cfg = fh.name
         try:
-            timeout = float(os.environ.get("MCPGAWK_VERIFY_TIMEOUT", "600"))
+            # 60s, not 600. This is the FRONT DOOR: a budget it cannot honestly promise turns a
+            # slow fleet into a ten-minute silence. Overrunning is already handled honestly —
+            # verify_mod.run returns 4 and the run is recorded INCOMPLETE below — so a short
+            # budget costs a truthful "did not finish", while a long one costs the user ten
+            # minutes and still tells them nothing. `mcpgawk verify` is where you ask for the
+            # long run; MCPGAWK_VERIFY_TIMEOUT still overrides for anyone who wants it here.
+            timeout = float(os.environ.get("MCPGAWK_VERIFY_TIMEOUT", "60"))
             # Same evidence contract as the panel (see run_verify_fleet): every run archives the
             # engine's per-attempt audit stream in its own directory, never overwritten.
             from time import gmtime, strftime
@@ -830,6 +921,16 @@ def main(argv: list[str] | None = None) -> int:
     exit points plus exceptions, and threading a close call through all of them is exactly how a
     history ends up with runs that silently never closed.
     """
+    # Line-buffer stdout even when it is a pipe. Python block-buffers off a TTY, so a run that is
+    # killed — by a timeout, by Ctrl-C, by CI — discards everything it had already produced. That
+    # is how a bare `mcpgawk` came to look like it hung in total silence while it had in fact
+    # printed the banner and the entire scan table: 3376 bytes, sitting in an 8 KiB buffer that
+    # was never flushed. Work done but not shown is indistinguishable from work not done.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):  # a replaced/detached stdout (tests, embedding)
+        pass
+
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw or raw[0] != "scan":
         code = _dispatch(argv)
@@ -917,6 +1018,16 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if args.cmd == "runs":
         return _runs(args)
 
+    if args.cmd == "install-node":
+        from .node_runtime import install_node
+
+        path, message = install_node(assume_yes=args.yes)
+        print(("✓ " if path else "mcpgawk install-node: ") + message,
+              file=sys.stdout if path else sys.stderr)
+        # 3, not 1: "could not install" must never share an exit code with "installed, and
+        # something about it was wrong". Same vocabulary as verify's could-not-run.
+        return 0 if path else 3
+
     if args.cmd == "guard":
         from .guard import main as guard_main
 
@@ -942,6 +1053,22 @@ def _dispatch(argv: list[str] | None = None) -> int:
             shadow.setdefault(srv, []).extend(fs)
     labels = [_label_for(sn, m, entries.get(sn.name) or {}, args, shadow)
               for sn, m in zip(snaps, measurements)]
+
+    # WHICH SERVERS ARE REFUSING US FOR CREDENTIALS. A failed probe never reaches history
+    # (should_record drops it), so without this the one fact a UI needs to offer a sign-in —
+    # the server answered 401/403 — dies with the scan. Rewritten wholesale so an offer never
+    # outlives the problem it was made about.
+    try:
+        from . import remote_login as _rl
+        _needs = {}
+        for _sn, _lab in zip(snaps, labels):
+            if (_lab.get("x-mcpgawk") or {}).get("error_kind") == "auth-required":
+                _url = str((entries.get(_sn.name) or {}).get("url") or "")
+                if _url:
+                    _needs[_sn.name] = _url
+        _rl.record_auth_needed(_needs)
+    except Exception:                               # noqa: BLE001 — bookkeeping never costs a scan
+        pass
 
     # Findings the human marked wrong (`mcpgawk wrong`): mark them muted — NEVER remove them —
     # so every renderer, JSON included, shows them as 'muted by you' rather than absent.

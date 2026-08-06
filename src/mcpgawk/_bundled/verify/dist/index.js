@@ -4,7 +4,7 @@ export { synthesizeArgs, PROBE_TOKEN } from "./synth.js";
 export { classifyTool } from "./classify.js";
 export { CHECKS } from "./checks.js";
 export { isRemote } from "./model.js";
-export { buildReport, toCsv, statusOf, REPORT_SCHEMA_VERSION, EGRESS_COVERAGE } from "./report.js";
+export { buildReport, toCsv, statusOf, deriveStatus, serverCompleteness, runCompleteness, exitCodeForStatus, REPORT_SCHEMA_VERSION, EGRESS_COVERAGE, INCOMPLETE_COVERAGE, } from "./report.js";
 export { renderHtml, renderReportBody, REPORT_CSS } from "./html.js";
 export { toSarif } from "./sarif.js";
 export { behaviourProfile } from "./behaviour.js";

@@ -29,6 +29,19 @@ class TestBasics:
         assert run.status == runlog.FINDINGS and run.summary == {"findings": 6}
         assert run.finished and run.ended_at
 
+    def test_start_run_can_publish_facts_while_still_running(self, db):
+        """The enforce gateway's listen endpoint is only USEFUL while the run is `running` —
+        the panel answers "where do I point my agent" from this row, and by the time
+        finish_run writes its summary there is no gateway to point at any more."""
+        rid = runlog.start_run("enforce", "acme",
+                               summary={"listen": "http://127.0.0.1:8080/mcp"}, path=db)
+        run = runlog.get_run(rid, path=db)
+        assert run.status == runlog.RUNNING
+        assert run.summary["listen"] == "http://127.0.0.1:8080/mcp"
+        # The close replaces the summary wholesale — a fact that should survive must be repeated.
+        runlog.finish_run(rid, runlog.OK, {"calls": 3}, path=db)
+        assert runlog.get_run(rid, path=db).summary == {"calls": 3}
+
     def test_findings_is_not_an_error(self, db):
         """A scan that ran perfectly and found six problems is not a failure — collapsing the two
         would make the timeline useless at a glance."""

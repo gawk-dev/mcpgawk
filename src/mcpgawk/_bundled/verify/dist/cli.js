@@ -8,9 +8,8 @@ import { serversOf, toConfig } from "./config.js";
 import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
-import { requireLicense } from "./license.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
-import { buildReport, groupEgressByHost, toCsv, } from "./report.js";
+import { buildReport, exitCodeForStatus, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
 import { loadSuppressions, saveSuppressions, withSuppression } from "./suppressions.js";
@@ -45,7 +44,7 @@ mcpgawk verify resolves it; a config that references an unset variable fails lou
 --baseline <file>: first run records a fingerprint of each server's tools; later runs flag DRIFT
                    (added / removed / changed tools) — i.e. a rug-pull.
 --behaviour-profile <file>: write a gawk.behaviour/1 profile (per-tool observed source/sink) — feed
-                   it to \`gawk-enforce --behaviour-profile\` so toxic-flow blocks by BEHAVIOUR, not name.
+                   it to \`mcpgawk enforce --behaviour-profile\` so toxic-flow blocks by BEHAVIOUR, not name.
 --sarif <file>:    write a SARIF 2.1.0 report — GitHub code scanning / most CI security dashboards
                    ingest this natively. A suppressed finding is encoded as a SARIF suppression
                    (shows as "dismissed" on GitHub), not silently dropped from the file.
@@ -271,10 +270,12 @@ licenseOpts = {}) {
             // current hashes: EVERY tool would read as changed. Emitting that storm would teach the
             // operator that drift means nothing, which is worse than reporting no drift at all.
             if (LEGACY_PINS_SCHEMA_VERSIONS.includes(base.schemaVersion)) {
-                err(`baseline '${baselinePath}' is schema ${base.schemaVersion}; the fingerprint now includes ` +
-                    `tool annotations (a tool flipping readOnlyHint->destructiveHint used to hash identically ` +
-                    `and pass as unchanged). Its hashes are not comparable — delete it and re-run to re-baseline ` +
-                    `this fleet.`);
+                err([
+                    `baseline '${baselinePath}' is schema ${base.schemaVersion}; the fingerprint now includes `,
+                    "tool annotations (a tool flipping readOnlyHint->destructiveHint used to hash identically ",
+                    "and pass as unchanged). Its hashes are not comparable — delete it and re-run to re-baseline ",
+                    "this fleet.",
+                ].join(""));
                 return 2;
             }
             const priorByServer = new Map(base.pins.map((p) => [p.server, p.tools]));
@@ -420,21 +421,17 @@ licenseOpts = {}) {
         printText(report, log);
     return exitCode(report, actionable);
 }
-/** Exit: 1 = actionable (findings/drift), 2 = partial (servers errored OR checks never completed,
- * none convicted — checkErrors deliberately weighed the same as a whole-server error: a report
- * with 0 findings and >0 checkErrors is NOT a clean pass, see model.ts's CheckError docstring),
- * 0 = clean. Exported as a pure function so this decision is directly unit-testable without
- * spawning a real server process. */
+/** Exit: 1 = actionable (findings/drift), 2 = incomplete (servers errored, checks never completed,
+ * nothing exercised, or a hidden catalog not fully probed — nothing can be claimed), 0 = clean.
+ *
+ * DERIVED from `summary.status` via {@link exitCodeForStatus} — never computed independently. Until
+ * 2026-08-02 this function re-derived its own answer from a different set of fields, so `incomplete`
+ * could exit 0 and `clean` could exit 2: no single output field was trustworthy alone. `actionable`
+ * (findings OR baseline drift) is the one input `status` cannot see, and it only ever escalates. */
 export function exitCode(report, actionable) {
     if (actionable)
         return 1;
-    // A dynamic-dispatch server whose hidden catalog was never enumerated makes the run INCOMPLETE —
-    // weighed the same as a server error / checkErrors: 0 findings here is NOT a clean pass (F4).
-    if (report.errors.length > 0 ||
-        report.summary.checkErrors > 0 ||
-        report.summary.dynamicDispatch > 0)
-        return 2;
-    return 0;
+    return exitCodeForStatus(report.summary.status);
 }
 /** Render a finding's evidence into a short human line, whatever check produced it. */
 function summarise(evidence) {
@@ -465,8 +462,10 @@ export function egressClusterLines(egressFindings) {
     }
     return lines;
 }
-/** The human-readable terminal report (default output when --json is not given). */
-function printText(report, log) {
+/** The human-readable terminal report (default output when --json is not given). Exported so the
+ * prose can be asserted against the other renderers in one cross-artefact agreement test — the
+ * surfaces disagreeing with each other is the defect this file was fixed for. */
+export function printText(report, log) {
     for (const s of report.servers) {
         log(`\n${s.server} [${s.transport}]: checked ${s.toolsChecked} tool(s)`);
         if (s.transport !== "stdio") {
@@ -538,9 +537,11 @@ function printText(report, log) {
                     "throwaway environment to exercise them.");
                 continue;
             }
-            log(s.checkErrors.length > 0
-                ? "  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced IN THE CHECKS THAT COMPLETED — see the incomplete check(s) above"
-                : "  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced");
+            // The green tick belongs ONLY to a server that completed. Anything else says incomplete
+            // first — it is the same derived field the JSON/HTML/SARIF/JUnit and the exit code use.
+            log(s.complete
+                ? "  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced"
+                : `  ⊘ INCOMPLETE (${s.checksCompleted}/${s.checksPlanned} check(s) completed) — nothing reproduced in the checks that DID complete, which is not a clean result: ${s.incompleteReasons.join("; ")}`);
             continue;
         }
         // Undeclared-egress findings are clustered BY HOST here (not one line per tool): on a server
@@ -570,9 +571,25 @@ function printText(report, log) {
     const suppressedNote = report.summary.suppressed > 0
         ? ` (${report.summary.suppressed} suppressed, marked ~ above)`
         : "";
-    log(report.summary.findings > 0
-        ? `\nmcpgawk verify: CONVICTED ${report.summary.findings} finding(s) — status ${report.summary.status}.${partial}${suppressedNote}`
-        : `\nmcpgawk verify: no findings reproduced.${partial}${suppressedNote}`);
+    // The prose verdict is the SAME derived field as the JSON, the HTML banner, SARIF and the exit
+    // code (1A) — never a separately-worded judgement. A run that did not complete says so first:
+    // "no findings reproduced" over an examination that never happened is the central lie this fixes.
+    if (report.summary.findings > 0) {
+        log(`\nmcpgawk verify: CONVICTED ${report.summary.findings} finding(s) — status ${report.summary.status}.${partial}${suppressedNote}`);
+    }
+    else if (!report.summary.complete) {
+        const why = report.summary.incompleteReasons.slice(0, 6).join("; ");
+        const more = report.summary.incompleteReasons.length > 6
+            ? `; +${report.summary.incompleteReasons.length - 6} more`
+            : "";
+        log(`\nmcpgawk verify: INCOMPLETE — status ${report.summary.status}. ` +
+            `${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed. ` +
+            `NOT a clean pass: ${why}${more}.${suppressedNote}`);
+    }
+    else {
+        log(`\nmcpgawk verify: no findings reproduced — status ${report.summary.status} ` +
+            `(${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed).${suppressedNote}`);
+    }
     log(`\nCoverage: ${report.coverage}`);
 }
 // Compare REAL paths, not raw ones: on macOS /var is a symlink to /private/var, so a CLI invoked

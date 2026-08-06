@@ -19,7 +19,7 @@ export async function loadTimeline(limit = 100) {
                     runs: [],
                     reason: missing
                         ? `\`${command}\` is not on PATH — install mcpgawk, or set GAWK_MCPGAWK_CMD.`
-                        : (stderr.trim().split("\n").pop() || err.message),
+                        : stderr.trim().split("\n").pop() || err.message,
                 });
                 return;
             }
@@ -68,7 +68,14 @@ export function formatDuration(seconds) {
  * a reader — `session_id` is a join key, not a fact about the run, so it is deliberately excluded.
  */
 const SUMMARY_KEYS = [
-    "findings", "alerts", "blocked", "calls", "tools", "servers", "failed_backends", "exit_code",
+    "findings",
+    "alerts",
+    "blocked",
+    "calls",
+    "tools",
+    "servers",
+    "failed_backends",
+    "exit_code",
 ];
 export function summaryChips(run) {
     const out = [];
@@ -119,7 +126,9 @@ export function groupByDay(runs) {
 }
 /** Counts for the header strip. `open` is called out because an open run is not a result. */
 export function timelineTotals(runs) {
-    let findings = 0, errors = 0, open = 0;
+    let findings = 0;
+    let errors = 0;
+    let open = 0;
     for (const r of runs) {
         if (r.status === "findings")
             findings++;

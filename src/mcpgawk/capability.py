@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import shutil
 
+from .node_runtime import find_node, install_hint
+
 
 def behavioural_checking() -> tuple[bool, list[str]]:
     """(available, what is missing). Available means both halves of the free behavioural tier can
@@ -21,8 +23,8 @@ def behavioural_checking() -> tuple[bool, list[str]]:
     the sandbox requires — `SubprocessSandbox` REFUSES to run unsandboxed by design, and that
     refusal must stay a refusal rather than become a silent fallback."""
     missing: list[str] = []
-    if shutil.which("node") is None:
-        missing.append("Node.js (runs the verify engine)")
+    if find_node() is None:
+        missing.append(f"Node.js (runs the verify engine) — {install_hint()}")
     if shutil.which("docker") is None:
         missing.append("a container runtime (docker — the sandbox refuses to run unsandboxed)")
     return not missing, missing

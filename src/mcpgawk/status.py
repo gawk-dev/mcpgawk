@@ -15,6 +15,7 @@ Read-only by construction: it opens stores, never writes them, and never starts 
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,10 @@ HOOK_CAPABLE = _hook_capable()
 
 #: Display names for the client ids `discover` attributes servers to.
 CLIENT_LABELS = {
+    "antigravity": "Antigravity",
     "claude-code": "Claude Code",
     "claude-desktop": "Claude Desktop",
+    "claude-desktop-extension": "Claude Desktop extension",
     "cursor": "Cursor",
     "codex": "Codex",
     "gemini-cli": "Gemini CLI",
@@ -45,6 +48,15 @@ CLIENT_LABELS = {
     "windsurf": "Windsurf",
     "zed": "Zed",
     "vscode": "VS Code",
+    "amp": "Amp",
+    "cline": "Cline",
+    "continue": "Continue",
+    "goose": "Goose",
+    "junie": "Junie",
+    "lmstudio": "LM Studio",
+    "opencode": "opencode",
+    "roo": "Roo Code",
+    "warp": "Warp",
 }
 
 
@@ -63,11 +75,35 @@ def agents_on_this_machine(entries: dict[str, Any] | None) -> dict[str, int]:
     return counts
 
 
-def render(*, guard_installed: bool, guard_path: Path | None,
+def hook_health_by_client() -> dict[str, str]:
+    """{client id: "absent"|"broken"|"ok"} — asked of EACH agent's own config.
+
+    One global "the guard is installed" boolean used to be applied to every hook-capable client, so
+    installing into Claude Code alone printed Cursor and Gemini CLI as ON — "every MCP call
+    checked" — for agents that had never been wired. Protection is per-agent because the config
+    file is per-agent; there is no machine-wide answer to give.
+    """
+    try:
+        from . import guard
+        from .agents import ADAPTERS
+    except Exception:                              # noqa: BLE001
+        return {}
+    out: dict[str, str] = {}
+    for key, adapter in ADAPTERS.items():
+        try:
+            out[key] = guard.hook_health_for(adapter)
+        except Exception:                          # noqa: BLE001
+            # An unreadable config is not "protected". Degrade THAT agent, never the whole answer.
+            out[key] = "absent"
+    return out
+
+
+def render(*, hook_health: dict[str, str], guard_path: Path | None,
            agents: dict[str, int], baseline_total: int, pending: list[str],
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
-           muted_total: int = 0, behavioural_unavailable: str | None = None) -> str:
+           muted_total: int = 0, behavioural_unavailable: str | None = None,
+           monitor_open: int | None = None, baseline_error: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
@@ -83,23 +119,35 @@ def render(*, guard_installed: bool, guard_path: Path | None,
     width = max((len(_label(c)) for c in agents), default=0)
     for client, count in sorted(agents.items(), key=lambda kv: -kv[1]):
         name = _label(client)
-        if client in HOOK_CAPABLE and guard_installed:
+        health = hook_health.get(client, "absent")
+        if client in HOOK_CAPABLE and health == "ok":
             # Since B4 the hook checks the DECLARED surface and, where verify has recorded
             # observations, OBSERVED behaviour — say both, or the stronger free tier reads as
             # if it did not exist (the old wording pre-dated Task 0's answer).
             out.append(f"      {name:<{width}}  ON   every MCP call checked against your baseline "
                        f"+ observed behaviour (where recorded)")
+        elif client in HOOK_CAPABLE and health == "broken":
+            # Configured but unrunnable. This must NOT read as ON (nothing is checked) and must
+            # NOT read as OFF (the user did install it, and `run mcpgawk` is not the fix).
+            out.append(f"      {name:<{width}}  BROKEN  hook installed but cannot run — "
+                       f"{count} server(s) going UNCHECKED; `mcpgawk guard install` repairs it")
         elif client in HOOK_CAPABLE:
             out.append(f"      {name:<{width}}  OFF  {count} server(s) unchecked — run `mcpgawk`")
         else:
             # The honest one. Saying nothing here is how a gap becomes a belief of safety.
             out.append(f"      {name:<{width}}  --   no hook point; {count} server(s) reachable "
                        f"without a check")
-    if guard_installed and guard_path:
+    if any(h != "absent" for h in hook_health.values()) and guard_path:
         out.append(f"      hook: {guard_path}")
 
     out += ["", "  EXPECTED BEHAVIOUR"]
-    out.append(f"      {baseline_total} server(s) at an approved baseline (what they may expose)")
+    if baseline_error:
+        # Say it INSTEAD of the count, not beside it: printing "0 server(s)" next to a warning
+        # still invites the reader to take the 0 at face value, and 0 is not what we know.
+        out.append(f"      ⚠ could not read your approved baseline ({baseline_error}) — the "
+                   f"number of approved servers is UNKNOWN, not zero.")
+    else:
+        out.append(f"      {baseline_total} server(s) at an approved baseline (what they may expose)")
     if behavioural_unavailable:
         # B5 — never a silent fallback: the missing dependency is named BEFORE any name-only
         # posture is described, and no dead command (`mcpgawk verify` cannot run here) is offered.
@@ -130,11 +178,38 @@ def render(*, guard_installed: bool, guard_path: Path | None,
         out.append("      available — mcpgawk enforce install")
     else:
         out.append("      not installed in this environment (part of gawk Platform)")
+    # Monitor de-duplicates alerts, so "0 new" is not "nothing wrong". An UNACKNOWLEDGED alert is
+    # an open question about a server you trusted, and it belongs on the screen that answers
+    # "am I protected?" — this surface did not read monitor at all.
+    if monitor_open is None:
+        if enforce_available:
+            out.append("      monitor: no record on this machine — nothing is re-checking your "
+                       "servers between scans")
+    elif monitor_open:
+        out.append(f"      ⚠ {monitor_open} OPEN monitor alert(s) — a watched server changed or "
+                   f"stopped answering and nobody has accepted it")
+        out.append("        `mcpgawk monitor status` lists them")
+    else:
+        out.append("      monitor: no open alerts")
 
     out += ["", "  WHAT IT HAS ACTUALLY SEEN"]
     if activity and activity.get("calls"):
-        out.append(f"      {activity['calls']} MCP call(s) checked across "
+        # SEEN and CHECKED are different numbers. Reporting the total as "checked" is what let a
+        # machine with 801 declines and one deny announce "802 MCP call(s) checked" at exit 0.
+        # `checked` is absent from rows written before the distinction existed — say so rather
+        # than inferring it, since inferring it either way restates the same false claim.
+        checked = activity.get("checked")
+        deferred = activity.get("deferred") or 0
+        out.append(f"      {activity['calls']} MCP call(s) seen across "
                    f"{activity['sessions']} agent session(s), {activity['servers']} server(s)")
+        if checked is None:
+            out.append("      how many were actually CHECKED is not recorded in this log "
+                       "(written before the distinction existed)")
+        else:
+            out.append(f"      {checked} actually checked against an approved baseline")
+        if deferred:
+            out.append(f"      ⚠ {deferred} call(s) NOT checked — the guard declined (no or stale "
+                       f"baseline projection) and let them through. Run `mcpgawk scan`.")
         denied = activity.get("denied") or 0
         out.append(f"      {denied} denied" if denied else "      none denied")
         no_session = activity.get("no_session") or 0
@@ -168,12 +243,14 @@ def collect_and_render() -> str:
     from . import history
 
     try:
-        from .guard import CLAUDE_USER_SETTINGS, status as guard_status
-        guard_text = guard_status()
-        guard_installed = "NOT installed" not in guard_text
+        from .guard import CLAUDE_USER_SETTINGS
+        # Per-agent, and asked of each agent's own config — not one boolean sniffed out of the
+        # prose of `guard status` ("NOT installed" not in text), which could not distinguish a
+        # broken hook from a working one and knew nothing about any agent but Claude Code.
+        hook_health = hook_health_by_client()
         guard_path: Path | None = CLAUDE_USER_SETTINGS
     except Exception:                              # noqa: BLE001
-        guard_installed, guard_path = False, None
+        hook_health, guard_path = {}, None
 
     try:
         from .discover import discover_servers
@@ -184,15 +261,21 @@ def collect_and_render() -> str:
         agents = {}
 
     try:
-        store = history.load(history.default_path())
+        # load_checked, not load: `load` degrades an unreadable store to {"servers": {}}, which is
+        # byte-for-byte the answer a fresh machine gives — so a CORRUPT trust store rendered as a
+        # calm "0 server(s) at an approved baseline" while status still reported protection ON.
+        # Nothing raised, so the except below never fired either. Eval Tier 4; the panel's copy of
+        # this defect was fixed separately, and this is the same store read from the other surface.
+        store, baseline_error = history.load_checked(history.default_path())
         servers = store.get("servers") or {}
         pending_keys = history.pending(store)
         baseline_total = len([k for k in servers if k not in pending_keys])
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
-    except Exception:                              # noqa: BLE001
+    except Exception as exc:                       # noqa: BLE001
         pending, baseline_total, muted_total = [], 0, 0
+        baseline_error = f"{type(exc).__name__}: {exc}"
 
     behaviour_tools: int | None = None
     try:
@@ -210,6 +293,31 @@ def collect_and_render() -> str:
         enforce_available = importlib.util.find_spec("gawk_platform") is not None
     except Exception:                              # noqa: BLE001
         enforce_available = False
+
+    # OPEN alerts, not new ones. Monitor de-duplicates, so a permanently dead or drifted server
+    # raises its alert once and reports "0 new" for ever after; `mcpgawk status` did not read
+    # monitor at all, so an unacknowledged alert was invisible on the one screen that claims to
+    # answer "am I protected?". None = we could not look (monitor absent or unreadable), which is
+    # rendered differently from zero.
+    monitor_open: int | None = None
+    try:
+        from pathlib import Path as _P
+
+        import sqlite3
+        db = os.environ.get("GAWK_MONITOR_DB") or str(_P.home() / ".gawk" / "monitor.db")
+        if _P(db).is_file():
+            # READ-ONLY, deliberately, and NOT through SqliteMonitorStore. This module's contract
+            # is that it opens stores and never writes them; the store class applies schema
+            # migrations and enables WAL on open, which would have `mcpgawk status` — a query —
+            # modifying the operator's monitoring database as a side effect of being run.
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM open_alerts").fetchone()
+                monitor_open = int(row[0]) if row else 0
+            finally:
+                conn.close()
+    except Exception:                              # noqa: BLE001
+        monitor_open = None
 
     last_activity = None
     try:
@@ -233,8 +341,10 @@ def collect_and_render() -> str:
     except Exception:                              # noqa: BLE001
         behavioural_unavailable = None
 
-    return render(guard_installed=guard_installed, guard_path=guard_path, agents=agents,
+    return render(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   baseline_total=baseline_total, pending=pending,
+                  baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
-                  behavioural_unavailable=behavioural_unavailable)
+                  behavioural_unavailable=behavioural_unavailable,
+                  monitor_open=monitor_open)

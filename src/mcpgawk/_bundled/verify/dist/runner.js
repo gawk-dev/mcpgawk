@@ -61,7 +61,16 @@ function stdioTransport(server, extraEnv = {}, spawnOverride) {
     const transport = new StdioClientTransport({
         command: spawnOverride?.command ?? server.command ?? "",
         args: spawnOverride?.args ?? [...(server.args ?? [])],
-        env: { ...process.env, ...server.env, ...extraEnv },
+        // `spawnOverride.env` is how a containerizing backend hands back the target's OWN secrets: it
+        // names them in argv (`-e KEY`) and relies on THIS process's environment to hold the values,
+        // because argv is readable by every local process. Merging it here is what closes that; drop
+        // it and the container starts with its credentials unset.
+        env: {
+            ...process.env,
+            ...server.env,
+            ...extraEnv,
+            ...(spawnOverride?.env ?? {}),
+        },
         // Capture instead of inherit. Without this the child owns the operator's terminal.
         stderr: "pipe",
     });

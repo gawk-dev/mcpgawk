@@ -20,10 +20,12 @@ delegates the launching here rather than keeping a second copy of it.
 from __future__ import annotations
 
 import os
-import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+from .node_runtime import find_node, install_hint
 
 #: Where the compiled engine lives once installed. A checkout's dev build wins over it — see
 #: `resolve_cli_js`.
@@ -54,10 +56,10 @@ def unavailable_reason() -> str | None:
     A free tier that silently falls back to name-only checking would be the "capability that looks
     present and does nothing" pattern this whole decision was made to avoid.
     """
-    if shutil.which("node") is None:
+    if find_node() is None:
         return ("node is not installed, so a server cannot be run and watched. Checks fall back to "
                 "what servers DECLARE, which cannot see a tool that keeps its name and changes "
-                "what it does. Install Node 20+ to enable behavioural verification.")
+                f"what it does. To enable behavioural verification, {install_hint()}.")
     if resolve_cli_js() is None:
         return ("the verification engine is not present in this install "
                 "(expected at mcpgawk/_bundled/verify). Reinstall mcpgawk, or run "
@@ -80,7 +82,7 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
     reason = unavailable_reason()
     if reason is not None:
         return 3, f"mcpgawk verify: {reason}"
-    node = shutil.which("node")
+    node = find_node()
     cli_js = resolve_cli_js()
     try:
         proc = subprocess.run([node, str(cli_js), *argv], env={**os.environ}, timeout=timeout,
@@ -111,15 +113,38 @@ def run(argv: list[str], timeout: float | None = None) -> int:
     if reason is not None:
         print(f"mcpgawk verify: {reason}", file=sys.stderr)
         return 3
-    node = shutil.which("node")
+    node = find_node()
     cli_js = resolve_cli_js()
+    # start_new_session so the engine leads its own process GROUP. `subprocess.run`'s timeout kills
+    # only the direct child, and this child spawns `docker run` containers per server — so a
+    # timeout or a Ctrl-C left the engine reparented to PID 1, still launching containers, still
+    # writing into ~/.gawk/verify-runs, indefinitely. Observed live: two orphans and four
+    # containers survived their parents by minutes and had to be killed by hand.
+    proc = subprocess.Popen([node, str(cli_js), *argv], env={**os.environ}, start_new_session=True)
+
+    def _kill_the_whole_group() -> None:
+        """Take the containers down with the engine. Never raises: we are already on a failure
+        path, and a cleanup that explodes would replace a clear timeout with a confusing crash."""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+
     try:
-        return subprocess.run([node, str(cli_js), *argv],
-                              env={**os.environ}, timeout=timeout).returncode
+        return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_the_whole_group()
         print("mcpgawk verify: timed out — this run is INCOMPLETE, not clean", file=sys.stderr)
         return 4
     except KeyboardInterrupt:
+        _kill_the_whole_group()
         return 130
     except OSError as exc:
         print(f"mcpgawk verify: could not start the engine ({exc})", file=sys.stderr)

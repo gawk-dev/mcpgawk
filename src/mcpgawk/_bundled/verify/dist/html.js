@@ -47,9 +47,12 @@ function serverCard(s) {
       </table>`
         : s.findings.length > 0
             ? "" // egress-only findings — rendered in the cluster above, no empty table or false clean-note
-            : s.checkErrors.length > 0
-                ? `<p class="clean-note">nothing reproduced in the checks that completed across ${s.toolsChecked} tool(s) — see the incomplete check(s) below.</p>`
-                : `<p class="clean-note">nothing reproduced across ${s.toolsChecked} tool(s).</p>`;
+            : // The green "nothing reproduced" note belongs ONLY to a server that completed — it used to
+                // be printed (in --clean colour) beside a 4-failed-check run, with the warning demoted to a
+                // grey note. Derived from the same `complete` field as the pill, the exit code and SARIF.
+                s.complete
+                    ? `<p class="clean-note">nothing reproduced across ${s.toolsChecked} tool(s).</p>`
+                    : `<p class="note" style="color:var(--warn)"><strong>INCOMPLETE</strong> — ${s.checksCompleted}/${s.checksPlanned} check(s) completed. Nothing was reproduced in the checks that DID complete, which is not a clean result: ${esc(s.incompleteReasons.join("; "))}</p>`;
     const skipped = s.skipped.length
         ? `<p class="note">Not invoked (safe mode): ${s.skipped.map((k) => `${esc(k.tool)} (${esc(k.class)})`).join(", ")}</p>`
         : "";
@@ -205,7 +208,9 @@ export function renderReportBody(report) {
     <span class="big">${summary.servers === 0 && summary.errors > 0 ? "Could not verify" : STATUS_LABEL[summary.status]}</span>
     <span>${summary.servers === 0 && summary.errors > 0
         ? `${summary.errors} server(s) could not be verified — nothing was probed. See the error(s) below.`
-        : `${summary.findings} reproduced finding(s) across ${summary.servers} server(s)${summary.errors > 0 ? ` · ${summary.errors} could not be verified` : ""}.`}</span>
+        : `${summary.findings} reproduced finding(s) across ${summary.servers} server(s)${summary.errors > 0 ? ` · ${summary.errors} could not be verified` : ""}. ${summary.complete
+            ? `${summary.checksCompleted}/${summary.checksPlanned} check(s) completed.`
+            : `NOT a clean pass — only ${summary.checksCompleted}/${summary.checksPlanned} check(s) completed: ${esc(summary.incompleteReasons.join("; "))}`}`}</span>
   </div>
   <div class="chips">${chips}</div>
   <div class="tblwrap">${report.servers.map(serverCard).join("")}${errorCards}</div>

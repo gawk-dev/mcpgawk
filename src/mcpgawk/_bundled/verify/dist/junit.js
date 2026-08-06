@@ -49,13 +49,30 @@ export function toJUnit(report) {
         for (const c of server.checkErrors) {
             cases.push(`    <testcase name="${esc(`${c.tool} :: ${c.code}`)}" classname="${esc(server.server)}">\n      <error message="${esc(c.detail)}">check did not complete — infra failure, not a verdict</error>\n    </testcase>`);
         }
+        // An INCOMPLETE server with no checkError to show for it (nothing exercised at all, a hidden
+        // catalog never enumerated) must not fall through to the synthetic pass either — that is the
+        // same green-for-nothing this file already refuses for checkErrors. One `<error>` carrying the
+        // derived reasons, so JUnit agrees with the status/exit code like every other renderer.
+        let serverErrors = server.checkErrors.length;
+        if (!server.complete && server.checkErrors.length === 0) {
+            cases.push(`    <testcase name="verification completeness" classname="${esc(server.server)}">\n      <error message="${esc(server.incompleteReasons.join("; "))}">verification INCOMPLETE (${server.checksCompleted}/${server.checksPlanned} check(s) completed) — not a verdict, not a clean pass</error>\n    </testcase>`);
+            serverErrors += 1;
+        }
         if (cases.length === 0) {
             cases.push(`    <testcase name="no findings" classname="${esc(server.server)}"/>`);
         }
         totalTests += Math.max(cases.length, 1);
         totalFailures += active.length;
-        totalErrors += server.checkErrors.length;
-        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length}" errors="${server.checkErrors.length}" skipped="${suppressed.length}">\n${cases.join("\n")}\n  </testsuite>`);
+        totalErrors += serverErrors;
+        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length}" errors="${serverErrors}" skipped="${suppressed.length}">\n${cases.join("\n")}\n  </testsuite>`);
+    }
+    // A run with no server suites at all (empty config, every server failed to start) would otherwise
+    // render as a green, empty test tree — "0 tests, 0 failures" reads as success in every CI UI.
+    if (suites.length === 0) {
+        const why = report.summary.incompleteReasons.join("; ") || "no server was verified — nothing was checked";
+        suites.push(`  <testsuite name="gawk-verify" tests="1" failures="0" errors="1" skipped="0">\n    <testcase name="verification completeness" classname="gawk-verify">\n      <error message="${esc(why)}">verification INCOMPLETE — nothing was checked, this is not a clean pass</error>\n    </testcase>\n  </testsuite>`);
+        totalTests += 1;
+        totalErrors += 1;
     }
     return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="gawk-verify" tests="${totalTests}" failures="${totalFailures}" errors="${totalErrors}">\n${suites.join("\n")}\n</testsuites>\n`;
 }

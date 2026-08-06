@@ -102,6 +102,18 @@ export function discoverFleet(timeoutMs = 60_000, launchLocal = false) {
         });
     });
 }
+/** Every fleet state this maps deliberately. Exported so the browser's copy can be GENERATED from
+ * `stateStatus` rather than hand-written — serve.ts held a second, already-drifted transcription
+ * of this table, and a table maintained twice is a table that disagrees with itself. */
+export const FLEET_STATES = [
+    "CLEAN",
+    "REVIEW",
+    "VULNERABLE",
+    "AUTH",
+    "SKIPPED",
+    "UNREACHABLE",
+    "NOT-SCANNABLE",
+];
 /** mcpgawk state → the report's status vocabulary + a colour role, so the fleet and a verify report
  * speak the same visual language. */
 export function stateStatus(state) {
@@ -121,7 +133,10 @@ export function stateStatus(state) {
         case "NOT-SCANNABLE":
             return { label: "remote", role: "muted" };
         default:
-            return { label: state.toLowerCase(), role: "muted" };
+            // A state we do not recognise is UNKNOWN, which is `incomplete` — not `muted`. `muted` is
+            // the deliberate "we chose not to scan this" role (auth needed, unreachable, remote); using
+            // it as the fallback quietly filed anything new or unexpected under "nothing to see here".
+            return { label: state.toLowerCase(), role: "incomplete" };
     }
 }
 //# sourceMappingURL=fleet.js.map

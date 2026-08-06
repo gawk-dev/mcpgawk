@@ -5,7 +5,7 @@
  * Python dispatcher (`gawk_platform.cli.require_license`). package.json exposes a `gawk-verify` bin
  * and the wheel ships `_bundled/verify/dist/cli.js`, so anyone holding the file ran the strongest
  * paid pillar unlicensed — the same standalone-entry-point class of hole that was already found and
- * closed for gawk-enforce / gawk-monitor / finix on the Python side.
+ * closed for mcpgawk enforce / mcpgawk monitor / finix on the Python side.
  *
  * The cache format and its HMAC are deliberately byte-compatible with
  * src/gawk_platform/licensing.py — one file, two readers, one signature. See the honest-scope note
@@ -177,7 +177,7 @@ export async function checkLicense(key, opts = {}) {
     return { ok: result, reason: result ? "ok" : "invalid" };
 }
 const REMEDY = {
-    "not-set": "no licence key found. Run `gawk login <key>` (your key is in your purchase email), or export GAWK_LICENSE_KEY=... for CI — see https://mcp.gawk.dev/activate.html",
+    "not-set": "no licence key found. Run `mcpgawk login <key>` (your key is in your purchase email), or export GAWK_LICENSE_KEY=... for CI — see https://mcp.gawk.dev/activate.html",
     invalid: "your licence key was rejected by Lemon Squeezy — check for a typo, or your subscription may have expired or been cancelled. See https://mcp.gawk.dev/activate.html",
     "unreachable-no-cache": "couldn't reach Lemon Squeezy to verify your key, and there's no recent successful check to fall back on. Check your connection and try again.",
     ok: "",

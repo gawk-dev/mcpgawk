@@ -23,6 +23,8 @@ SAFETY, and it is not incidental — this server is itself an MCP server that ot
 """
 from __future__ import annotations
 
+import os
+
 import asyncio
 import json
 from typing import Any
@@ -73,6 +75,18 @@ async def _scan_one(url: str | None, command: str | None) -> dict[str, Any]:
         parts = (command or "").split()
         if not parts:
             raise ValueError("give either `url` or `command`")
+        # DEFAULT DENY. This tool is called by an AGENT, and running a launch command starts a
+        # process on the user's machine with the user's credentials. `scan` gates exactly this
+        # behind an interactive prompt; here there is no human in the loop at all, so an agent —
+        # or a prompt injection that reaches one — could spawn anything it named. An annotation
+        # saying "this is not read-only" informs a client; it does not stop one that auto-approves.
+        if os.environ.get("MCPGAWK_MCP_ALLOW_LAUNCH") != "1":
+            raise ValueError(
+                "refusing to launch a local command from an agent-facing tool. Running it would "
+                "start that process on this machine with this user's credentials, and nobody is "
+                "here to approve it. Scan a remote server with `url`, or run "
+                "`mcpgawk scan --stdio \"<command>\"` yourself, where the consent gate applies. "
+                "Set MCPGAWK_MCP_ALLOW_LAUNCH=1 to allow it deliberately.")
         snap = await probe_stdio("requested", parts[0], parts[1:])
     label = _label_of(snap)
     return {"report": render_cli(label), "label": label}

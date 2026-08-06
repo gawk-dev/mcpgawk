@@ -224,10 +224,17 @@ def summarise(limit: int = 5000, path: str | None = None) -> dict:
     can be answered with observed activity rather than with configuration."""
     rows = read(limit=limit, path=path)
     denied = sum(1 for r in rows if r.get("decision") == "deny")
+    # A `defer` is a call we DECLINED to check. Counting it as checked is how a machine with 801
+    # declines and zero enforcements reported "802 MCP call(s) checked". `calls` stays the total
+    # seen — the two answer different questions and both have to be available to say either.
+    deferred = sum(1 for r in rows if r.get("decision") == "defer")
+    checked = sum(1 for r in rows if r.get("decision") in ("allow", "deny"))
     sessions = {r.get("session") for r in rows if r.get("session")}
     servers = {r.get("server") for r in rows if r.get("server")}
     return {
         "calls": len(rows),
+        "checked": checked,
+        "deferred": deferred,
         "denied": denied,
         "sessions": len(sessions),
         "servers": len(servers),

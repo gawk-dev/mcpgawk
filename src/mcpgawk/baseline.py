@@ -24,8 +24,6 @@ Shape (stable, and the contract other runtimes read through `mcpgawk baseline --
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any
 
 from . import history
@@ -34,42 +32,14 @@ from . import history
 SCHEMA = "gawk.baseline/1"
 
 
-#: Environment markers set by coding agents. Their presence means the process was started by an
-#: agent, so whoever is "typing" is a model — not the human whose trust decision this is.
-AGENT_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AI_AGENT", "CURSOR_TRACE_ID")
-
-#: The deliberate escape hatch for CI, which legitimately has no TTY and no human. Deliberately NOT
-#: mentioned in any blocked-call message: the whole point is that an agent reading a denial cannot
-#: learn the bypass from it.
-APPROVE_OVERRIDE_ENV = "MCPGAWK_APPROVE_NONINTERACTIVE"
-
-
-def approval_blocked_reason() -> str | None:
-    """Why this process must not be allowed to move the trusted baseline, or None if it may.
-
-    THE HOLE THIS CLOSES (found 2026-07-27 by running the product as an agent would): the guard
-    blocked a malicious tool, and the denial text told the agent to run `mcpgawk approve <server>`
-    to accept the change. The agent has a shell. It ran it, and the malicious tool was allowed on
-    the retry — the control handed its own bypass to the audience most likely to be acting on an
-    injected instruction.
-
-    Approval is the one operation that must come from the human. It is the moment trust moves, so
-    it is gated on evidence a human is present: an interactive terminal, and no agent-session
-    marker in the environment. Both, because either alone is weak — an agent can run without a TTY
-    marker set, and a human can be inside an agent's terminal.
-    """
-    agent = [m for m in AGENT_ENV_MARKERS if os.environ.get(m)]
-    if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
-        return None
-    if agent:
-        return (f"this looks like an agent session ({', '.join(agent)} set). Moving the trusted "
-                f"baseline is a decision for the person at the keyboard, not for the assistant — "
-                f"a blocked tool call is exactly when an agent would be asked to approve its way "
-                f"past one. Run this yourself in your own terminal.")
-    if not sys.stdin.isatty():
-        return ("no interactive terminal. Approving a changed server is a trust decision and needs "
-                "a human present; refusing rather than assuming consent.")
-    return None
+# The human-presence gate now lives in `history`, beside the write it guards — a gate defined next
+# to ONE of its callers is how `mcpgawk monitor approve` came to move the baseline without it. Kept as
+# names here because every existing caller and the gate's own tests import them from `baseline`.
+AGENT_ENV_MARKERS = history.AGENT_ENV_MARKERS
+APPROVE_OVERRIDE_ENV = history.APPROVE_OVERRIDE_ENV
+ApprovalBlocked = history.ApprovalBlocked
+approval_blocked_reason = history.approval_blocked_reason
+require_human_approval = history.require_human_approval
 
 
 def approved_record(key: str, path: str | None = None) -> dict[str, Any] | None:
@@ -121,6 +91,23 @@ def approved_annotations(key: str, path: str | None = None) -> dict[str, dict[st
     return out
 
 
+def annotations_recorded(key: str, path: str | None = None) -> bool:
+    """Did the approval that produced this record CAPTURE the tools' safety annotations?
+
+    The distinction `approved_annotations` cannot make, and the one that matters: it returns `{}`
+    both for "this server declares no safety hints" and for "whoever wrote this record never looked".
+    Those are opposite facts. The first is a real, enforceable observation. The second is missing
+    data — and a policy derived from missing data granted every scope, including `delete_invoice`
+    (found 2026-08-02).
+
+    The evidence is already in the store and needs no migration: `drift.build_record` ALWAYS writes
+    an `annotations` key, empty or not, so its presence means somebody measured. `baseline.publish`
+    wrote no such key, which is why every monitor-published approval was unenforceable.
+    """
+    rec = approved_record(key, path) or {}
+    return isinstance(rec.get("annotations"), dict)
+
+
 def export(path: str | None = None) -> dict[str, Any]:
     """The whole approved baseline, in the shape other runtimes read.
 
@@ -149,29 +136,58 @@ def export(path: str | None = None) -> dict[str, Any]:
     return {"schema": SCHEMA, "servers": out}
 
 
+#: Re-exported so every pillar raises and catches ONE exception type, and so this stays a single
+#: definition. The gate itself lives beside the write it guards, in `history.server_entry` — a rule
+#: enforced in one file is not a rule; see tests/test_server_key_gate_invariant.py.
+InvalidServerKey = history.InvalidServerKey
+validated_server_key = history.validated_server_key
+
+
 def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
-            alias: str | None = None, path: str | None = None) -> None:
+            alias: str | None = None, path: str | None = None,
+            annotations: dict[str, dict[str, Any]] | None = None) -> None:
     """Write an approval INTO the spine from another pillar.
 
     The read path (`export`) alone makes the spine a one-way mirror: verify and monitor could see
-    what scan approved, but an operator approving a drift in `gawk-monitor approve` left scan still
+    what scan approved, but an operator approving a drift in `mcpgawk monitor approve` left scan still
     reporting it. A shared baseline that only one pillar can move is three memories again, with
     extra steps.
 
     Deliberately narrow — pin, per-tool hashes, when. A monitor Snapshot carries more (grade,
     signals, verification state) and that stays in monitor's own store: the spine is the answer to
     "what surface did we agree to trust", not a general-purpose replica.
+
+    Gated like `history.approve`, and for the reason this function is the proof of: a second way in
+    to the trust store is a second way past whatever guards the first. `mcpgawk monitor approve`
+    reached this write with no human present and exited 0, while `mcpgawk approve` — the same
+    decision, the same file — correctly refused at exit 4.
     """
+    history.require_human_approval()
     p = path or history.default_path()
     with history.locked(p):
         store = history.load(p)
-        entry = store.setdefault("servers", {}).setdefault(key, {})
-        entry["approved"] = {
+        # Not `setdefault(key, {})`: this was the writer that minted the junk `s`/`srv` rows in the
+        # real store from a bare monitor server_id. `server_entry` validates on creation.
+        entry = history.server_entry(store, key)
+        record = {
             **(entry.get("approved") or {}),
             "measured_at": approved_at,
             "pin": pin,
             "tools": dict(tools),
         }
+        # Explicit, and explicitly ABSENT when the caller has none. `annotations_recorded` reads
+        # this key's presence to tell "the server declares no safety hints" from "nobody measured";
+        # writing `{}` here to look tidy would erase that difference and re-open the hole, because
+        # `{}` is a legitimate measurement. A caller with no annotations must leave a gap that
+        # `policy_from_baseline` can SEE, not a plausible-looking empty answer.
+        if annotations is not None:
+            record["annotations"] = {f"tool.{name}": dict(ann) for name, ann in annotations.items()}
+        else:
+            # And DROP any annotations a previous approval left behind. They were measured against
+            # the old surface; this call is replacing the pin and the tool set. Carrying them over
+            # would enforce yesterday's labels on today's tools, which reads as coverage and is not.
+            record.pop("annotations", None)
+        entry["approved"] = record
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
         history.save(store, p)
@@ -189,6 +205,12 @@ def resolve(name: str, path: str | None = None) -> str | None:
     servers = store.get("servers") or {}
     if name in servers:
         return name
+    # The asserted-identity form of a bare name, matching `history.resolve`. Without it the two
+    # resolvers disagree: every key is now written `<scheme>:<name>`, so a caller holding only the
+    # configured name (`derive_scopes`, `spine.approved_pin`) would miss a record that IS there and
+    # fall back to "nothing approved" — absence rendered as safety, from a naming mismatch.
+    if f"mcp:{name}" in servers:
+        return f"mcp:{name}"
     for key, entry in servers.items():
         if isinstance(entry, dict) and name in (entry.get("aliases") or []):
             return key

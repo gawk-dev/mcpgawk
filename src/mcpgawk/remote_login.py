@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,7 +36,17 @@ from urllib.parse import urlparse
 #: Launchers that proxy to a remote server behind an interactive browser sign-in.
 _WRAPPERS = ("mcp-remote", "mcp_remote")
 
-_STORE_DIR = Path.home() / ".gawk" / "oauth"
+
+def _store_dir() -> Path:
+    """Where `oauth_login` really put the tokens — resolved at CALL time, honouring the override.
+
+    This used to be `Path.home() / ".gawk" / "oauth"` bound at import: it duplicated the path
+    without duplicating `GAWK_OAUTH_STORE`. An operator who relocated their token store therefore
+    had this reader look in the empty default and return "" — which `stored_access_token` documents
+    as "no login available". A relocated login reported as no login is the ambiguity rule again:
+    the swallowed miss returns a value that reads as a real answer.
+    """
+    return Path(os.environ.get("GAWK_OAUTH_STORE") or (Path.home() / ".gawk" / "oauth"))
 
 
 def wrapped_remote_url(entry: dict[str, Any]) -> str:
@@ -54,7 +65,7 @@ def wrapped_remote_url(entry: dict[str, Any]) -> str:
 def _token_path(url: str) -> Path:
     """Same derivation as oauth_login.FileTokenStorage — one owner of the scheme would be better,
     but duplicating a sha256 prefix is safer than importing the login machinery into a read path."""
-    return _STORE_DIR / f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.json"
+    return _store_dir() / f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.json"
 
 
 def stored_access_token(url: str) -> str:
@@ -71,6 +82,69 @@ def stored_access_token(url: str) -> str:
     if not isinstance(tokens, dict):
         return ""
     return str(tokens.get("access_token") or "")
+
+
+def _auth_needed_path() -> Path:
+    """Servers a scan found to be REFUSING us for lack of credentials, so the panel can offer
+    sign-in on evidence instead of on a launcher's name. Written by scan, read by any surface.
+
+    Resolved at CALL time from `MCPGAWK_AUTH_NEEDED`, because it was previously a constant bound at
+    import with NO override — the third time that exact shape has been found here (behaviour.json,
+    config.json, now this). The consequence was live: every full pytest run rewrote the founder's
+    real ~/.mcpgawk/auth-needed.json, and nothing noticed until the suite's real-home tripwire was
+    extended to cover ~/.mcpgawk on 2026-08-02. A test that quietly edits the operator's own state
+    is the same defect as the product doing it.
+    """
+    override = os.environ.get("MCPGAWK_AUTH_NEEDED")
+    return Path(override) if override else Path.home() / ".mcpgawk" / "auth-needed.json"
+
+
+def record_auth_needed(found: dict[str, str], path: Path | None = None) -> None:
+    """Remember `{server name: url}` for every server whose scan came back `auth-required`.
+
+    WHY THIS EXISTS. A failed probe is never written to history (`should_record` drops it), so the
+    one fact that would let a UI say "this needs your sign-in" — the server answered 401/403 —
+    was thrown away the moment the scan ended. The panel could then only guess from the launch
+    command, which meant a plain remote server that our own engine can authenticate
+    (`scan --http <url> --login`) got no button at all.
+
+    Rewritten wholesale each scan, deliberately: a server that no longer refuses us must stop
+    being listed, or the offer outlives the problem.
+    """
+    target = path or _auth_needed_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(found, sort_keys=True), encoding="utf-8")
+        tmp.replace(target)
+    except OSError:
+        pass                                  # a read-only HOME must never break a scan
+
+
+def auth_needed(path: Path | None = None) -> dict[str, str]:
+    """{server name: url} recorded by the last scan. Empty when unknown — and "unknown" is not
+    "fine": callers must not render an empty result as "nothing needs a login"."""
+    try:
+        doc = json.loads((path or _auth_needed_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in doc.items() if v} if isinstance(doc, dict) else {}
+
+
+def login_url(entry: dict[str, Any], name: str = "", path: Path | None = None) -> str:
+    """Where a browser sign-in for this server would go, or "".
+
+    Two shapes, both real: a local wrapper (mcp-remote) proxying to a remote URL, and a plain
+    remote server that answered 401/403 on the last scan. The engine has always been able to
+    OAuth the second (`oauth_login.build_login_provider`); only the panel's gating was narrower.
+    """
+    wrapped = wrapped_remote_url(entry)
+    if wrapped:
+        return wrapped
+    url = str(entry.get("url") or "")
+    if url and name and name in auth_needed(path):
+        return url
+    return ""
 
 
 def has_stored_login(entry: dict[str, Any]) -> bool:
