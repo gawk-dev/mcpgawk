@@ -919,6 +919,39 @@ def _action_buttons(token: str, action: dict | None) -> str:
 </form>"""
 
 
+def _connect_card() -> str:
+    """The one-paste enrolment moment (founder, 2026-08-07 — Natoma's Get Config, applied
+    local-first): hand any MCP client mcpgawk's OWN read-only server as one copied block, so the
+    agent can ask this machine's scanner before it trusts a server.
+
+    HONESTY, per the design-integrity rule: this connects the agent to the scanner's ANSWERS.
+    It enforces nothing — call-time blocking is the pre-execution hook (Protect) — and the card
+    says so in its first breath. Static HTML, no token, no state: `mcpgawk-mcp` is a console
+    script in every install, stdio, keyless, read-only by construction (mcp_server.py)."""
+    return """
+<div class="card"><div class="chead"><h1>Connect your agent</h1></div>
+  <div class="note">One paste, like adding any MCP server: your agent gets two read-only tools
+  (<code>scan_mcp_fleet</code>, <code>scan_mcp_server</code>) and can ask this machine's scanner
+  before trusting a server. This does <b>not</b> block anything by itself — call-time blocking is
+  the pre-execution hook (the Protect action above).</div>
+  <div class="gwrap">
+    <input type="radio" name="cfg" id="c0" checked aria-label="Claude Code config"><label class="gl" for="c0">Claude Code</label>
+    <input type="radio" name="cfg" id="c1" aria-label="Claude Desktop config"><label class="gl" for="c1">Claude Desktop</label>
+    <input type="radio" name="cfg" id="c2" aria-label="Cursor config"><label class="gl" for="c2">Cursor</label>
+    <input type="radio" name="cfg" id="c3" aria-label="VS Code config"><label class="gl" for="c3">VS Code</label>
+    <div class="cs" id="cs0"><div class="snip">claude mcp add gawk -- mcpgawk-mcp</div>
+      <div class="note">Run in any terminal. Remove later with <code>claude mcp remove gawk</code>.</div></div>
+    <div class="cs" id="cs1"><div class="snip">{ "mcpServers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+      <div class="note">Merge into <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>, then restart Claude Desktop.</div></div>
+    <div class="cs" id="cs2"><div class="snip">{ "mcpServers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+      <div class="note">Merge into <code>~/.cursor/mcp.json</code>.</div></div>
+    <div class="cs" id="cs3"><div class="snip">{ "servers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+      <div class="note">Merge into VS Code's <code>mcp.json</code> (Command Palette → "MCP: Open User Configuration").</div></div>
+    <div class="note">Any other MCP client: the command is <code>mcpgawk-mcp</code> — stdio, no arguments, no key. It refuses to launch stdio servers unless the caller asks; scanning stays consent-gated.</div>
+  </div>
+</div>"""
+
+
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
            q: str = "", tier_filter: str = "", sel: str = "", tl: str = "") -> str:
     """The panel.
@@ -1862,6 +1895,12 @@ border-radius:8px;margin:0 5px 10px 0;color:var(--mut);cursor:pointer}}
 #g0:checked~#gt0,#g1:checked~#gt1,#g2:checked~#gt2{{display:table}}
 #g0:checked~label[for=g0],#g1:checked~label[for=g1],#g2:checked~label[for=g2]
 {{color:var(--ink);border-color:var(--acc)}}
+.cs{{display:none}}
+#c0:checked~#cs0,#c1:checked~#cs1,#c2:checked~#cs2,#c3:checked~#cs3{{display:block}}
+#c0:checked~label[for=c0],#c1:checked~label[for=c1],#c2:checked~label[for=c2],
+#c3:checked~label[for=c3]{{color:var(--ink);border-color:var(--acc)}}
+.cs .note{{margin:8px 0 0;padding:8px 10px}}
+.cs .snip{{margin:0}}
 .barcell span{{display:block;height:6px;background:var(--acc);opacity:.45;border-radius:999px}}
 .fr{{padding:20px 16px 24px;max-width:620px}}
 .fr h2{{margin:0 0 7px;font-size:19px;font-weight:640;letter-spacing:-.02em;text-transform:none;
@@ -1951,6 +1990,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
   <section class="pane" id="p0">
     {journey}
     {firstrun}
+    {_connect_card()}
     <div class="card">
       <div class="chead"><h1>Servers</h1><div class="tools">
         <a class="gbtn" href="/export/servers.csv">Export .csv</a>
