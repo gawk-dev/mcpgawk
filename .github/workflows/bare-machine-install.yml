@@ -1,0 +1,140 @@
+# Does the documented install actually work on a machine that has nothing?
+#
+# This replaces a manual ritual. The acceptance run of 2026-08-03 was walked by hand on a fresh
+# macOS Standard account, took an evening, produced seven defects and no pass/fail — and the one
+# question it existed to answer was STILL failing afterwards: `mcpgawk` worked only in the terminal
+# that installed it. Close that window and the command was gone by name.
+#
+# So this job asks exactly that question, on every documented route, on a schedule, with an exit
+# code. The install happens in ONE login shell; the check happens in a SECOND, started from
+# scratch. That separation is the whole point — a tool that only works in the shell that installed
+# it is broken for everyone who closes their laptop.
+#
+# The user is created WITHOUT a shell profile (`useradd -M`, hand-made home) because that was the
+# real macOS finding: /Users/demo had no .zshrc, no .zprofile, no .bash_profile at all, so the
+# installer's "add this to your profile" guidance had nothing to edit and nothing that could
+# persist. No files are deleted to achieve this; the home is simply never populated from /etc/skel.
+#
+# Scope honesty: a Linux container CANNOT reproduce every macOS stopper — stock python3 3.9.6, the
+# GNU-awk name collision, or a Standard user with no admin rights. Those need the companion macOS
+# script, which is not built yet. What this DOES cover is the class that broke every route in the
+# acceptance run: where the binary lands, and whether a new shell can find it.
+name: Bare-machine install
+
+on:
+  schedule:
+    - cron: "17 6 * * *"          # daily: PyPI is live infrastructure and rot here is silent
+  workflow_dispatch: {}
+  workflow_run:
+    workflows: ["Publish to PyPI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    # Only after a publish that actually succeeded — a failed publish leaves the previous version
+    # live, and this job would otherwise report on a release that never happened.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+    strategy:
+      fail-fast: false            # one broken route must not hide the state of the other two
+      matrix:
+        # The commands the beta page ACTUALLY gives a tester, verbatim. Its first run found that two
+        # of the three routes it then documented installed successfully and left `mcpgawk: command
+        # not found` in a fresh shell: `pip --user` and bare `pipx` both drop a binary into
+        # ~/.local/bin and touch nothing else, while uv's installer writes a profile, which is the
+        # entire reason it works. The page now leads with uv and carries `pipx ensurepath` as a
+        # required second line — so this matrix tests the instructions as published.
+        route:
+          - name: uv-tool
+            install: uv tool install mcpgawk
+          - name: pipx
+            install: pipx install mcpgawk && pipx ensurepath
+    name: ${{ matrix.route.name }}
+    steps:
+      - name: What a real machine already has, and nothing more
+        run: |
+          set -euxo pipefail
+          apt-get update -qq
+          # python3 and curl only. No node, no build tools, no shell profile.
+          apt-get install -y -qq --no-install-recommends python3 curl ca-certificates
+          case "${{ matrix.route.name }}" in
+            pipx) apt-get install -y -qq --no-install-recommends pipx ;;
+          esac
+
+      - name: A user with NO shell profile of any kind
+        run: |
+          set -euxo pipefail
+          # -M plus a hand-made home: nothing is copied from /etc/skel, so there is no .bashrc and
+          # no .profile for an installer's PATH advice to edit. This is the macOS finding.
+          useradd -M -d /home/tester -s /bin/bash tester
+          mkdir -p /home/tester
+          chown tester:tester /home/tester
+          test ! -e /home/tester/.bashrc
+          test ! -e /home/tester/.profile
+          echo "confirmed: the account starts with no shell profile"
+
+      - name: Install exactly the way the beta page tells a tester to
+        run: |
+          set -euxo pipefail
+          su - tester -c '
+            set -eux
+            if [ "${{ matrix.route.name }}" = "uv-tool" ]; then
+              curl -LsSf --connect-timeout 15 https://astral.sh/uv/install.sh | sh
+              export PATH="$HOME/.local/bin:$PATH"
+            fi
+            ${{ matrix.route.install }}
+          '
+
+      - name: THE QUESTION — does a NEW login shell find it?
+        run: |
+          set -euo pipefail
+          # A brand-new `su -` login shell inherits nothing from the step above: no exported PATH,
+          # no sourced profile. This is "open a second terminal window".
+          if ! out=$(su - tester -c 'mcpgawk --version' 2>&1); then
+            echo "::error::mcpgawk is NOT on PATH in a fresh login shell after ${{ matrix.route.name }}"
+            echo "The install reported success and the command cannot be found by name. A tester who"
+            echo "closes their terminal has lost the tool. Output was:"
+            echo "$out"
+            su - tester -c 'echo "PATH was: $PATH"; ls -a $HOME' || true
+            exit 1
+          fi
+          echo "$out"
+          echo "INSTALLED=$(echo "$out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" >> "$GITHUB_ENV"
+
+      - name: It must be the version PyPI actually serves
+        run: |
+          set -euo pipefail
+          # Compared against PyPI, never against this checkout: between a version bump and a publish
+          # the repo is legitimately ahead, and a check that failed then would be crying wolf.
+          published=$(python3 -c "
+          import json, urllib.request
+          with urllib.request.urlopen('https://pypi.org/pypi/mcpgawk/json', timeout=30) as r:
+              print(json.load(r)['info']['version'])")
+          echo "installed=$INSTALLED published=$published"
+          [ "$INSTALLED" = "$published" ] || {
+            echo "::error::installed $INSTALLED but PyPI serves $published — the documented command"
+            echo "does not give a tester the current release."
+            exit 1; }
+
+      - name: The shipped --help must list the free commands
+        run: |
+          set -euo pipefail
+          # Regression guard for 0.1.23. verify, login and logout are intercepted before argparse,
+          # so they were absent from the subcommand list for every release until then — and the beta
+          # guide ended up telling testers verify was missing from the build. Asserted on the
+          # INSTALLED artefact, the only copy a tester ever reads.
+          help=$(su - tester -c 'mcpgawk --help')
+          echo "$help"
+          for cmd in verify login logout scan panel; do
+            echo "$help" | grep -qE "\{[^}]*\b$cmd\b[^}]*\}" || {
+              echo "::error::the installed CLI's --help does not list '$cmd'. A capability absent"
+              echo "from --help does not exist as far as a user is concerned."
+              exit 1; }
+          done
+          echo "all listed"
