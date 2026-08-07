@@ -1647,7 +1647,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
    a tinted row, two-line primary cell, fully-rounded tinted tags. Royal blue #2A33C2 stays ours.
    No script — the CSP is `default-src 'none'` and the tabs are pure CSS. */
 :root{{--page:#F7F7F8;--card:#FFF;--rail:#F1F1F3;--line:#E6E6EA;
---ink:#15161A;--mut:#5B5D66;--fai:#8A8D97;--acc:#2A33C2;--acc-soft:#EEEFFB;
+--ink:#15161A;--mut:#5B5D66;--fai:#8A8D97;--acc:#2A33C2;--accent:#2A33C2;--acc-soft:#EEEFFB;
 --ok:#157A40;--ok-bg:#E7F4EC;--warn:#B26A00;--warn-bg:#FBF1E3;
 --bad:#C0392B;--bad-bg:#FBEBE9;--unv:#6B7280;--unv-bg:#F0F1F3;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
@@ -1657,15 +1657,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 *{{box-sizing:border-box}}
 body{{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);font-size:14px;
 line-height:1.5}}
-.sheet{{max-width:1160px;margin:0 auto;padding:26px 22px 90px}}
+/* Natoma-grammar shell (founder, 2026-08-07): grouped left sidebar + one content column.
+   Pure CSS grid — the radio-tab mechanics and the `~ .sheet` selectors are untouched. Direct
+   children that are neither the sidebar nor a pane (header, banners, errors) span both columns. */
+.sheet{{max-width:1280px;margin:0 auto;padding:22px 22px 90px;
+display:grid;grid-template-columns:196px minmax(0,1fr);gap:0 26px;align-items:start}}
+.sheet>:not(.rail):not(.pane){{grid-column:1/-1}}
 .bhead{{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
+.ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12.5px;
+border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
+.ngrp{{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+color:var(--fai);font-weight:500;margin:16px 10px 4px}}
+.ngrp:first-child{{margin-top:2px}}
 .brand{{font-weight:700;letter-spacing:-.02em;font-size:15px}}
 .bsub{{font-family:var(--mono);font-size:10px;color:var(--fai)}}
 input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}#n0:focus-visible ~ .sheet label.pill[for=n0]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n1:focus-visible ~ .sheet label.pill[for=n1]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n2:focus-visible ~ .sheet label.pill[for=n2]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n3:focus-visible ~ .sheet label.pill[for=n3]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n4:focus-visible ~ .sheet label.pill[for=n4]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n5:focus-visible ~ .sheet label.pill[for=n5]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n6:focus-visible ~ .sheet label.pill[for=n6]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n7:focus-visible ~ .sheet label.pill[for=n7]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n8:focus-visible ~ .sheet label.pill[for=n8]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}
-.rail{{display:flex;gap:4px;background:var(--rail);border:1px solid var(--line);
-border-radius:10px;padding:4px;margin-bottom:14px;flex-wrap:wrap}}
-.pill{{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--mut);
-padding:6px 13px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
+.rail{{grid-column:1;display:flex;flex-direction:column;gap:2px;background:none;border:none;
+padding:0;margin:0;position:sticky;top:18px}}
+.pane{{grid-column:2}}
+.pill{{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut);
+padding:7px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
+.pill .ct{{margin-left:auto}}
 .pill .dot{{width:6px;height:6px;border-radius:50%;background:var(--fai)}}
 .pill .ct{{font-size:11.5px;color:var(--fai)}}
 .ct.alert{{color:var(--bad);font-weight:600}}
@@ -1673,9 +1685,8 @@ padding:6px 13px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
 #n2:checked~.sheet label[for=n2],#n3:checked~.sheet label[for=n3],
 #n4:checked~.sheet label[for=n4],#n5:checked~.sheet label[for=n5],
 #n8:checked~.sheet label[for=n8],
-#n6:checked~.sheet label[for=n6],#n7:checked~.sheet label[for=n7]{{background:var(--card);
-color:var(--ink);font-weight:600;
-border-color:var(--line);box-shadow:0 1px 2px rgba(20,22,30,.06)}}
+#n6:checked~.sheet label[for=n6],#n7:checked~.sheet label[for=n7]{{background:var(--acc-soft);
+color:var(--acc);font-weight:600;border-color:transparent}}
 #n0:checked~.sheet label[for=n0] .dot,#n1:checked~.sheet label[for=n1] .dot,
 #n2:checked~.sheet label[for=n2] .dot,#n3:checked~.sheet label[for=n3] .dot,
 #n4:checked~.sheet label[for=n4] .dot,#n5:checked~.sheet label[for=n5] .dot,
@@ -1892,6 +1903,12 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
   .gbtn:active,.act-btn:active,.act-sm:active,.filter-btn:active{{transform:none}}
 }}
 @media (max-width:840px){{
+  .sheet{{display:block}}
+  .rail{{flex-direction:row;flex-wrap:wrap;position:static;background:var(--rail);
+  border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:14px}}
+  .ngrp{{display:none}}
+  .pill{{display:inline-flex}}
+  .pill .ct{{margin-left:0}}
   .thead,.row{{grid-template-columns:minmax(140px,1.5fr) .8fr 1fr auto}}
   .thead.s3,.row.s3{{grid-template-columns:minmax(140px,1.5fr) .9fr .5fr}}
   .cl-agents,.cl-num{{display:none}}
@@ -1910,16 +1927,25 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
          correctly, because that process predated the changes. -->
     <span class="bsub" title="when the code being served was last modified, and when this process started">
       local · this machine only · code {_esc(_CODE_AT)} · started {_esc(_STARTED)}</span></div>
+  {'' if token else
+   '<div class="ronote">Read-only view — this page holds the state but none of the controls. '
+   'The action buttons live only on the tokened link (ending <code>?t=…</code>) that '
+   '<code>mcpgawk panel</code> printed in your terminal. Reopen from there to act. '
+   'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}
   <div class="rail">
+    <span class="ngrp">Oversee</span>
     <label class="pill" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified)}</span></label>
     <label class="pill" for="n6"><span class="dot"></span>Findings {_ct_fnd}</label>
     <label class="pill" for="n4"><span class="dot"></span>Activity</label>
-    <label class="pill" for="n1"><span class="dot"></span>Agents {_ct_agt}</label>
+    <span class="ngrp">Decide</span>
     <label class="pill" for="n3"><span class="dot"></span>Decisions {_ct_dec}</label>
-    <label class="pill" for="n5"><span class="dot"></span>Trust</label>
-    <label class="pill" for="n2"><span class="dot"></span>Evidence</label>
+    <label class="pill" for="n1"><span class="dot"></span>Agents {_ct_agt}</label>
+    <span class="ngrp">Platform</span>
     <label class="pill" for="n7"><span class="dot"></span>Gateway</label>
     <label class="pill" for="n8"><span class="dot"></span>Monitor{_ct_mon}</label>
+    <span class="ngrp">System</span>
+    <label class="pill" for="n2"><span class="dot"></span>Evidence</label>
+    <label class="pill" for="n5"><span class="dot"></span>Trust</label>
   </div>
   {errs}
   <section class="pane" id="p0">
