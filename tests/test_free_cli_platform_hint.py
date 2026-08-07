@@ -71,3 +71,54 @@ def test_free_scan_is_unaffected_by_the_paid_dispatch(no_platform):
     with pytest.raises(SystemExit) as exc:
         free_cli.main(["scan", "--help"])
     assert exc.value.code == 0
+
+
+# `verify --audit-source` was SILENTLY IGNORED on a free install: the flags belong to the paid
+# source auditor (Python), the engine is TS, and the free wrapper passed them straight through to
+# an engine that had never heard of them. Worse than absence: `--source-dir <path>` made the PATH
+# read as the positional config argument, so the run looked normal while auditing nothing.
+@pytest.mark.parametrize("argv", [
+    ["verify", "servers.json", "--audit-source"],
+    ["verify", "--source-dir", "/tmp/src", "servers.json"],
+    ["verify", "--source-dir=/tmp/src", "servers.json"],
+])
+def test_verify_audit_flags_on_a_free_install_exit_3_not_silently_ignored(
+    argv, no_platform, capsys
+):
+    rc = free_cli.main(argv)
+
+    assert rc == 3, "same 'not available' code as every other paid entry point"
+    err = capsys.readouterr().err
+    assert "gawk Platform" in err
+    assert "pricing" in err
+    assert "free" in err.lower(), "must say behavioural verify itself still works"
+    assert "Traceback" not in err
+
+
+def test_push_on_a_free_install_exits_3_with_one_actionable_line(no_platform, capsys):
+    """`push` was stranded when the paid `gawk` binary was retired: pillars and account commands
+    were carried into this dispatch, `push` was not, so NO install could run it."""
+    rc = free_cli.main(["push"])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "gawk Platform" in err
+    assert "Traceback" not in err
+
+
+def test_push_is_advertised_in_free_help():
+    help_text = free_cli.build_parser().format_help()
+    assert "push" in help_text
+
+
+def test_panel_help_admits_it_is_a_control_surface(capsys):
+    """The help said 'Read-only — every action lives in `mcpgawk decide`' long after the panel
+    grew re-scan/verify/sign-in/approve/protect. Same class as the beta page describing fixed
+    things as broken: the words drifted from the running thing."""
+    with pytest.raises(SystemExit) as exc:
+        free_cli.main(["panel", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out.lower()
+    assert "read-only — every action lives" not in out
+    for word in ("re-scan", "verify", "approve", "token"):
+        assert word in out, f"panel help should name its actions and the token model ({word})"

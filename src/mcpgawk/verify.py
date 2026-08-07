@@ -100,6 +100,25 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
         return 3, f"mcpgawk verify: could not start the engine ({exc})"
 
 
+#: Flags that belong to gawk Platform's SOURCE AUDITOR, not to the TS engine. They are handled on
+#: the Python side (the auditor is Python). Before 2026-08-07 the free wrapper passed them
+#: straight through to an engine that had never heard of them: `--audit-source` was silently
+#: ignored, and `--source-dir <path>`'s PATH was read as the positional config argument — a run
+#: that looked normal while auditing nothing. Silent-and-wrong is the exact shape the exit-3
+#: vocabulary exists to prevent.
+def _wants_source_audit(argv: list[str]) -> bool:
+    return any(a in ("--audit-source", "--source-dir") or a.startswith("--source-dir=")
+               for a in argv)
+
+
+_AUDIT_NEEDS_PLATFORM = (
+    "mcpgawk verify --audit-source: source audit is a gawk Platform capability and the Platform "
+    "isn't installed in this environment.\n"
+    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "Behavioural verification itself is free: re-run without --audit-source / --source-dir."
+)
+
+
 def run(argv: list[str], timeout: float | None = None) -> int:
     """Exec the bundled engine. Returns its exit code, or 3 when it cannot run, or 4 on timeout.
 
@@ -109,6 +128,15 @@ def run(argv: list[str], timeout: float | None = None) -> int:
     distinct from 3 for the same reason: a run that STARTED and was cut off is incomplete, and an
     incomplete run must never be read as either clean or impossible.
     """
+    if _wants_source_audit(argv):
+        try:
+            from gawk_platform.cli import run_source_audit
+        except ImportError:
+            print(_AUDIT_NEEDS_PLATFORM, file=sys.stderr)
+            return 3
+        argv, rc = run_source_audit(argv)
+        if rc is not None:
+            return rc
     reason = unavailable_reason()
     if reason is not None:
         print(f"mcpgawk verify: {reason}", file=sys.stderr)

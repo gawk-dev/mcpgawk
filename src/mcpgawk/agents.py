@@ -226,16 +226,3 @@ def deny_payload(fmt: str, reason: str) -> dict:
         if adapter.fmt == fmt:
             return adapter.deny(reason)
     return _deny_claude(reason)
-
-
-def installed_agents() -> dict[str, bool]:
-    """{agent key: is our hook present}. Only reports agents whose config actually exists —
-    claiming coverage for an agent that is not on this machine would be noise, and claiming a gap
-    for one would be a false alarm."""
-    from . import guard
-
-    out: dict[str, bool] = {}
-    for key, adapter in ADAPTERS.items():
-        if adapter.config.is_file():
-            out[key] = guard.is_installed_for(adapter)
-    return out

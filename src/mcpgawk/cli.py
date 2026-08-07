@@ -308,7 +308,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="the control panel — every agent, server, call and decision on this machine",
         description="One window over the whole machine: which agents are covered, every MCP "
                     "server and its state, what the runtime guard has actually seen, and anything "
-                    "waiting on you. Read-only — every action lives in `mcpgawk decide`.")
+                    "waiting on you. A control surface, not a viewer: re-scan, verify, sign-in, "
+                    "approve and protect all live here — but only on the tokened URL this command "
+                    "prints. A bare 127.0.0.1:7718 (bookmark, restored tab) renders read-only "
+                    "with no buttons, by design. Drift decisions also live in `mcpgawk decide`.")
     pn.add_argument("--port", type=int, default=7718, help="local port (default: 7718)")
     pn.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
@@ -358,6 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the server and observe it — the behavioural check. FREE. Its flags belong "
                     "to the verify engine, so run `mcpgawk verify` with no arguments to see them.")
     for _name, _help in ACCOUNT_COMMANDS.items():
+        sub.add_parser(_name, help=_help)
+    for _name, _help in PLATFORM_COMMANDS.items():
         sub.add_parser(_name, help=_help)
     return p
 
@@ -633,6 +638,38 @@ def _run_account_command(command: str, rest: list[str]) -> int:
         print(_ACCOUNT_NEEDS_PLATFORM.format(cmd=command), file=sys.stderr)
         return 3
     return run_account(command, rest)
+
+
+#: Platform commands that are neither pillars nor account commands. `push` was STRANDED when the
+#: paid `gawk` binary was retired (GNU-awk collision): the pillars and the account commands were
+#: carried into this dispatch and `push` was not — so the dashboard referenced a command that no
+#: install, free or paid, could actually run. Same optional-import delegation as everything paid.
+PLATFORM_COMMANDS = {
+    "push": "send a scan receipt to your hosted fleet view (gawk Platform)",
+}
+
+_PLATFORM_COMMAND_UNAVAILABLE = (
+    "mcpgawk {cmd}: {desc}.\n"
+    "This is a gawk Platform command and the Platform isn't installed in this environment.\n"
+    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "The free scanner (`mcpgawk scan`) stays free and open-source either way."
+)
+
+
+def _run_platform_command(command: str, rest: list[str]) -> int:
+    """Delegate a non-pillar Platform command, or explain honestly that it isn't here.
+
+    Delegation goes through gawk_platform's own `main` so `push` keeps its deliberate routing
+    there: top-level, NOT licence-pre-checked — the ingest endpoint is the authority on whether
+    a receipt is accepted, and a Lemon Squeezy pre-check would block the request before it left.
+    """
+    try:
+        from gawk_platform.cli import main as platform_main
+    except ImportError:
+        print(_PLATFORM_COMMAND_UNAVAILABLE.format(cmd=command, desc=PLATFORM_COMMANDS[command]),
+              file=sys.stderr)
+        return 3
+    return platform_main([command, *rest])
 
 
 #: `verify` is NOT here any more. Task 0 (2026-07-28) made behavioural verification free, and
@@ -981,6 +1018,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return _run_platform_capability(raw[0], raw[1:])
     if raw and raw[0] in ACCOUNT_COMMANDS:
         return _run_account_command(raw[0], raw[1:])
+    if raw and raw[0] in PLATFORM_COMMANDS:
+        return _run_platform_command(raw[0], raw[1:])
     # THE FRONT DOOR. Typing the tool's own name used to print a usage block and exit 2 — an error
     # message as the first thing a new user sees. A usage block is what you print when you cannot
     # tell what someone wants; here we can: they want to be protected. See protect.py.
