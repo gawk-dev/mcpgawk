@@ -40,3 +40,11 @@ def test_the_card_is_static_and_token_free():
 def test_render_actually_places_the_card_on_the_hub():
     """A card that exists but is never rendered is the dead-code pattern; pin the call site."""
     assert "_connect_card()" in inspect.getsource(panel.render)
+
+
+def test_the_setup_prompt_lets_the_agent_do_the_plumbing():
+    """The Kerno-pattern paste-to-your-agent prompt: it must name the real binary and the real
+    tool, and ask for a summary — value on the first call, not just registration."""
+    assert "paste this prompt" in CARD
+    assert 'command "mcpgawk-mcp", stdio transport' in CARD
+    assert "scan_mcp_fleet" in CARD

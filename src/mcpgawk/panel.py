@@ -948,6 +948,8 @@ def _connect_card() -> str:
     <div class="cs" id="cs3"><div class="snip">{ "servers": { "mcpgawk": { "command": "mcpgawk-mcp" } } }</div>
       <div class="note">Merge into VS Code's <code>mcp.json</code> (Command Palette → "MCP: Open User Configuration").</div></div>
     <div class="note">Any other MCP client: the command is <code>mcpgawk-mcp</code> — stdio, no arguments, no key. It refuses to launch stdio servers unless the caller asks; scanning stays consent-gated.</div>
+    <div class="ddh">Or let your agent set itself up — paste this prompt into it</div>
+    <div class="snip">Add an MCP server named "mcpgawk" to your own configuration: command "mcpgawk-mcp", stdio transport, no arguments, no environment variables. Then call its scan_mcp_fleet tool and summarise which of my MCP servers are unverified or changed since approval.</div>
   </div>
 </div>"""
 
