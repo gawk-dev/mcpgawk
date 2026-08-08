@@ -175,6 +175,10 @@ class _Sandbox:
 
 
 def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
+    # The demo is a scripted walkthrough; the CLI's own "a newer build is out" nag would print
+    # after the closing line and undercut it. The sandbox subprocesses already suppress it; this
+    # covers the parent process too. setdefault, so a user who set it stays in control.
+    os.environ.setdefault("MCPGAWK_NO_UPDATE_CHECK", "1")
     root = (Path(sandbox).expanduser().resolve() if sandbox
             else Path(tempfile.mkdtemp(prefix="mcpgawk-demo-")))
     if root.exists() and any(root.iterdir()):
