@@ -57,17 +57,23 @@ jobs:
             install: pipx install mcpgawk && pipx ensurepath
     name: ${{ matrix.route.name }}
     steps:
+      # The container's default step shell is `sh` (dash), and dash rejects `set -o pipefail` —
+      # which killed every step of every run at line 1 until 2026-08-08: three runs, zero installs
+      # actually attempted. So the first step is POSIX-only and installs bash; every later step
+      # declares `shell: bash` explicitly rather than trusting the runner's fallback.
       - name: What a real machine already has, and nothing more
         run: |
-          set -euxo pipefail
+          set -eux
           apt-get update -qq
-          # python3 and curl only. No node, no build tools, no shell profile.
-          apt-get install -y -qq --no-install-recommends python3 curl ca-certificates
+          # python3, curl and bash only (bash for the LATER STEPS' shell, not for the tester's
+          # account — the login-shell question below is unchanged). No node, no build tools.
+          apt-get install -y -qq --no-install-recommends python3 curl ca-certificates bash
           case "${{ matrix.route.name }}" in
             pipx) apt-get install -y -qq --no-install-recommends pipx ;;
           esac
 
       - name: A user with NO shell profile of any kind
+        shell: bash
         run: |
           set -euxo pipefail
           # -M plus a hand-made home: nothing is copied from /etc/skel, so there is no .bashrc and
@@ -80,6 +86,7 @@ jobs:
           echo "confirmed: the account starts with no shell profile"
 
       - name: Install exactly the way the beta page tells a tester to
+        shell: bash
         run: |
           set -euxo pipefail
           su - tester -c '
@@ -92,6 +99,7 @@ jobs:
           '
 
       - name: THE QUESTION — does a NEW login shell find it?
+        shell: bash
         run: |
           set -euo pipefail
           # A brand-new `su -` login shell inherits nothing from the step above: no exported PATH,
@@ -108,6 +116,7 @@ jobs:
           echo "INSTALLED=$(echo "$out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" >> "$GITHUB_ENV"
 
       - name: It must be the version PyPI actually serves
+        shell: bash
         run: |
           set -euo pipefail
           # Compared against PyPI, never against this checkout: between a version bump and a publish
@@ -123,6 +132,7 @@ jobs:
             exit 1; }
 
       - name: The shipped --help must list the free commands
+        shell: bash
         run: |
           set -euo pipefail
           # Regression guard for 0.1.23. verify, login and logout are intercepted before argparse,
