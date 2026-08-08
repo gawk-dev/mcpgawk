@@ -24,7 +24,7 @@ def test_the_card_names_the_real_binary_not_an_aspiration():
 def test_every_named_client_gets_a_block():
     for client in ("Claude Code", "Claude Desktop", "Cursor", "VS Code"):
         assert client in CARD, f"{client} lost its config block"
-    assert "claude mcp add gawk -- mcpgawk-mcp" in CARD
+    assert "claude mcp add mcpgawk -- mcpgawk-mcp" in CARD
 
 
 def test_the_card_admits_it_enforces_nothing():

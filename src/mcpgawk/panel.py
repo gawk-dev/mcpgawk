@@ -939,13 +939,13 @@ def _connect_card() -> str:
     <input type="radio" name="cfg" id="c1" aria-label="Claude Desktop config"><label class="gl" for="c1">Claude Desktop</label>
     <input type="radio" name="cfg" id="c2" aria-label="Cursor config"><label class="gl" for="c2">Cursor</label>
     <input type="radio" name="cfg" id="c3" aria-label="VS Code config"><label class="gl" for="c3">VS Code</label>
-    <div class="cs" id="cs0"><div class="snip">claude mcp add gawk -- mcpgawk-mcp</div>
-      <div class="note">Run in any terminal. Remove later with <code>claude mcp remove gawk</code>.</div></div>
-    <div class="cs" id="cs1"><div class="snip">{ "mcpServers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+    <div class="cs" id="cs0"><div class="snip">claude mcp add mcpgawk -- mcpgawk-mcp</div>
+      <div class="note">Run in any terminal. Remove later with <code>claude mcp remove mcpgawk</code>.</div></div>
+    <div class="cs" id="cs1"><div class="snip">{ "mcpServers": { "mcpgawk": { "command": "mcpgawk-mcp" } } }</div>
       <div class="note">Merge into <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>, then restart Claude Desktop.</div></div>
-    <div class="cs" id="cs2"><div class="snip">{ "mcpServers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+    <div class="cs" id="cs2"><div class="snip">{ "mcpServers": { "mcpgawk": { "command": "mcpgawk-mcp" } } }</div>
       <div class="note">Merge into <code>~/.cursor/mcp.json</code>.</div></div>
-    <div class="cs" id="cs3"><div class="snip">{ "servers": { "gawk": { "command": "mcpgawk-mcp" } } }</div>
+    <div class="cs" id="cs3"><div class="snip">{ "servers": { "mcpgawk": { "command": "mcpgawk-mcp" } } }</div>
       <div class="note">Merge into VS Code's <code>mcp.json</code> (Command Palette → "MCP: Open User Configuration").</div></div>
     <div class="note">Any other MCP client: the command is <code>mcpgawk-mcp</code> — stdio, no arguments, no key. It refuses to launch stdio servers unless the caller asks; scanning stays consent-gated.</div>
   </div>
