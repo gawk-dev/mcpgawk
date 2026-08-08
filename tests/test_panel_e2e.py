@@ -350,3 +350,32 @@ def test_protect_button_writes_the_real_hook_config(panel):
                if p.is_file() and p.suffix in {".json", ".toml"}
                and p.name != "mcp.json" and "hook" in p.read_text(errors="replace").lower()]
     assert written, f"protect({agent_key}) reported success but wrote no hook config under HOME"
+
+
+@pytest.mark.verify_live
+def test_verify_button_runs_the_real_engine_and_records_a_report(panel):
+    """The one panel action the fast E2E leaves out: verify actually RUNS the server in the
+    sandbox (Node + the bundled TS engine), so it lives in its own slower CI job. The button's
+    contract is that pressing it produces a real, persisted verify report for the fleet — asserted
+    from `last-verify.json`, not the page. An INCOMPLETE verdict still writes a full report (engine
+    exit 2), so this proves the run HAPPENED and was recorded, not that the fixture came out clean.
+    """
+    from mcpgawk import verify
+    reason = verify.unavailable_reason()
+    if reason:
+        pytest.skip(f"verify engine unavailable here: {reason}")
+
+    # The engine writes its report beside the behaviour profile — here, the harness's gawk/ subdir.
+    report = panel.state / "gawk" / "last-verify.json"
+    status, _ = panel.post("verify", key="fixture")
+    assert status == 200            # 303 followed to the tokened page
+    panel.wait_for(
+        lambda: report.is_file() and json.loads(report.read_text()),
+        "the verify button's run to write last-verify.json", timeout=180)
+    data = json.loads(report.read_text())
+    assert "fixture" in json.dumps(data), \
+        "the verify report does not name the server the button was pressed for"
+    # An honest report of what actually ran — clean, findings, or incomplete — never a fabricated
+    # pass. summary.status is the engine's own word for it.
+    assert data.get("summary", {}).get("status") in {"clean", "findings", "incomplete"}, \
+        f"unexpected verify status in the report: {data.get('summary')}"

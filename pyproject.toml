@@ -67,3 +67,9 @@ exclude = ["src/mcpgawk/_bundled/**/*.d.ts", "src/mcpgawk/_bundled/**/*.map"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "journey_live: reaches mcp.gawk.dev or pypi.org (network required)",
+    # The panel verify-button E2E: needs Node + the bundled verify runtime. Deselected from the
+    # fast matrix (`-m \"not verify_live\"`) and run in its own CI job (see .github/workflows/ci.yml).
+    "verify_live: drives the real verify engine (Node + bundled runtime required)",
+]

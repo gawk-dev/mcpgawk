@@ -20,7 +20,28 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - name: Run tests (incl. the structural no-egress invariant)
-        run: pytest -q
+        # verify_live is the panel verify-button E2E: it runs the real Node engine and lives in
+        # its own job below, so the fast matrix (four Python versions) does not pay for it four
+        # times. Everything else, including the rest of the panel E2E, runs here.
+        run: pytest -q -m "not verify_live"
+
+  # The verify-button E2E on its own, with Node — the one panel action that actually launches and
+  # watches a server. Single Python version: this exercises the TS engine, not Python-version
+  # behaviour. Skips cleanly (unavailable_reason) if the bundled engine is somehow absent.
+  verify-button:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Panel verify-button E2E (real engine)
+        run: pytest -q -m verify_live -o addopts=""
 
   build:
     runs-on: ubuntu-latest
