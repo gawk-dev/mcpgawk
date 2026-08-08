@@ -17,8 +17,16 @@ from . import state
 from .probe import ServerSnapshot
 
 
+#: The store's single owner also owns the two literals that name it, so anything that must build
+#: a redirected store path (a test harness, `mcpgawk demo`) references these instead of repeating
+#: the strings — which is what the layer invariant `test_only_history_py_derives_the_history_store
+#: _path` enforces.
+STORE_ENV = "MCPGAWK_HISTORY"
+STORE_FILENAME = "history.json"
+
+
 def default_path() -> str:
-    return os.environ.get("MCPGAWK_HISTORY") or os.path.expanduser("~/.mcpgawk/history.json")
+    return os.environ.get(STORE_ENV) or os.path.expanduser(f"~/.mcpgawk/{STORE_FILENAME}")
 
 
 class InvalidServerKey(ValueError):

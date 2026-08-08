@@ -348,6 +348,18 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--prune", action="store_true",
                    help="drop finished runs older than 90 days, then report what is left")
 
+    d = sub.add_parser(
+        "demo",
+        help="watch the whole story in a throwaway sandbox — scan, approve, a rug-pull, a block",
+        description="A self-contained walkthrough: mcpgawk plants a deliberately-bad MCP server "
+                    "in a temporary sandbox, measures it, you approve it, the server turns "
+                    "hostile, and the guard blocks the tool that appeared afterwards. Nothing "
+                    "touches your real fleet, agents, or state. Offline; a few seconds.")
+    d.add_argument("--sandbox", metavar="DIR",
+                   help="use this directory for the sandbox instead of a fresh temp one")
+    d.add_argument("--clean", action="store_true",
+                   help="delete the sandbox on exit (default: keep it so you can inspect it)")
+
     # DISCOVERY ONLY — these never reach argparse at runtime. `_dispatch` intercepts `verify` and
     # the account commands before the parser is built, because each owns its own flags and the free
     # parser must not try to validate them. That interception also made them INVISIBLE: they were
@@ -1040,6 +1052,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if args.cmd == "skills":
         return _skills(args)
+
+    if args.cmd == "demo":
+        from .demo import run_demo
+        return run_demo(sandbox=args.sandbox, clean=args.clean)
 
     if args.cmd == "panel":
         from .panel import serve as panel_serve
