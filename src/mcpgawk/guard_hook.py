@@ -259,14 +259,46 @@ def _approved_from_projection(server: str,
         return None, None
     record = servers.get(server)
     if record is None:
-        # The projection may be keyed by the server's ASSERTED IDENTITY rather than the config
-        # name the agent uses in `mcp__<name>__<tool>`; `aliases` carries the mapping.
-        for candidate in servers.values():
-            if isinstance(candidate, dict) and server in (candidate.get("aliases") or []):
-                record = candidate
-                break
+        # The identity key is literally `mcp:<serverInfo.name>`, and an agent never says the prefix:
+        # it calls `mcp__<config name>__<tool>`. When the baseline came from a CLI scan
+        # (--stdio/--http) there IS no config name to alias — the only alias is "cli-stdio" — so a
+        # client whose config name matches the server's own name matched nothing and the guard
+        # DEFERRED on a server that had an approved baseline. Fail-open, on the documented
+        # single-server route the beta guide gives testers. Fixed in the READER so projections
+        # already on disk are covered without being regenerated.
+        # SAME ORDER AS `history.resolve` (exact key, then `mcp:<name>`, then aliases), and that
+        # agreement is the point. Alias-first was tried and reverted: it made the ENFORCING reader
+        # resolve a name differently from the one `mcpgawk approve <name>` uses, so an operator
+        # could approve record B while the guard enforced record A, with nothing saying so.
+        # Ordering does not decide safety here — a declared-tier DENY is only reachable when a
+        # baseline was found at all, so widening the lookup can add denials but never permissions.
+        # KNOWN GAP: the alias scan below takes the FIRST match and this codebase already documents
+        # that aliases collide (every `--stdio` scan is labelled `cli-stdio`). An ambiguous alias
+        # should DEFER rather than pick one; it currently picks. See HANDOFF.
+        record = servers.get(f"mcp:{server}")
+    if record is None:
+        matches = [c for c in servers.values()
+                   if isinstance(c, dict) and server in (c.get("aliases") or [])]
+        if len(matches) > 1:
+            # AMBIGUOUS: this name is an alias of several approved servers, and picking the first
+            # meant the ENFORCING reader silently judged a call against whichever record happened to
+            # sort first. This repo already documents that aliases collide — every `--stdio` scan is
+            # labelled `cli-stdio` — so the collision is routine, not exotic. Defer LOUDLY: never
+            # enforce a baseline we cannot show belongs to the server being called.
+            return None, (
+                f"{server!r} is an alias of {len(matches)} different approved servers — deferring "
+                f"(not enforcing) rather than guessing which baseline applies. Re-scan so each is "
+                f"keyed distinctly, or approve the one you mean by its own name.")
+        record = matches[0] if matches else None
     if not isinstance(record, dict):
         return None, None
+    if reason := record.get("unreadable"):
+        # The writer marked this baseline uninterpretable. Deferring is the only honest option — we
+        # cannot enforce hashes computed by rules we do not know — but it must be SAID, because a
+        # silent defer is indistinguishable from "this server was never approved", and the user
+        # believes an approved server is being guarded.
+        return None, (f"not enforcing {server!r}: {reason}. Re-approve it on this version, or "
+                      f"upgrade mcpgawk, to be guarded again.")
     tools = record.get("tools")
     return (dict(tools) if isinstance(tools, dict) else None), None
 

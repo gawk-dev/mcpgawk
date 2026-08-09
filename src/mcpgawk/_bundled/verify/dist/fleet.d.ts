@@ -62,7 +62,7 @@ export declare function discoverFleet(timeoutMs?: number, launchLocal?: boolean)
 /** Every fleet state this maps deliberately. Exported so the browser's copy can be GENERATED from
  * `stateStatus` rather than hand-written — serve.ts held a second, already-drifted transcription
  * of this table, and a table maintained twice is a table that disagrees with itself. */
-export declare const FLEET_STATES: readonly ["CLEAN", "REVIEW", "VULNERABLE", "AUTH", "SKIPPED", "UNREACHABLE", "NOT-SCANNABLE"];
+export declare const FLEET_STATES: readonly ["CLEAN", "REVIEW", "VULNERABLE", "AUTH", "FAILED", "TIMED-OUT", "SKIPPED", "UNREACHABLE", "NOT-SCANNABLE"];
 /** mcpgawk state → the report's status vocabulary + a colour role, so the fleet and a verify report
  * speak the same visual language. */
 export declare function stateStatus(state: string): {

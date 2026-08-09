@@ -104,6 +104,71 @@ def test_missing_or_corrupt_store_defers(tmp_path):
     assert note is not None
 
 
+def test_an_uninterpretable_baseline_stands_down_LOUDLY(tmp_path):
+    """The enforcing reader must not fail open in silence.
+
+    `drift.compare` refuses a record from a newer schema and says so in the report. The guard reads
+    a different artefact, so it needs its own copy of that refusal: enforcing hashes computed by
+    unknown rules would deny everything, and omitting the server reads as "never approved", which
+    defers — allows — while the operator believes an approved server is guarded. Neither is
+    acceptable, so the projection carries the reason and the hook repeats it.
+    """
+    from mcpgawk import drift
+    from mcpgawk.guard_hook import approved_for_detail
+
+    rec = _approved({"read": "h1"}, aliases=["notes"])
+    rec["approved"]["schema_version"] = drift.RECORD_SCHEMA + 1     # written by a later mcpgawk
+    store = _store(tmp_path, {"mcp:notes": rec})
+
+    approved, note = approved_for_detail("notes", store)
+
+    assert approved is None, "hashes from an unknown schema must never be enforced"
+    assert note, "standing down silently is the failure this exists to prevent"
+    assert "not enforcing" in note and "newer mcpgawk" in note, note
+
+
+def test_an_ambiguous_alias_defers_loudly_instead_of_picking_one(tmp_path):
+    """Two approved servers sharing an alias must not be resolved by iteration order.
+
+    This repo already documents that aliases collide — every `--stdio` scan is labelled
+    `cli-stdio`, and `mcpgawk approve cli-stdio` is called a coin flip. The reporting side can
+    afford to guess; the ENFORCING side cannot, because guessing means judging one server's call
+    against another server's approved tools and recording it as checked.
+    """
+    store = _store(tmp_path, {
+        "mcp:alpha": _approved({"read": "h1"}, aliases=["cli-stdio"]),
+        "mcp:beta": _approved({"write": "h2"}, aliases=["cli-stdio"]),
+    })
+
+    from mcpgawk.guard_hook import approved_for_detail
+
+    approved, note = approved_for_detail("cli-stdio", store)
+
+    assert approved is None, "an ambiguous alias must not resolve to one of the candidates"
+    assert note and "2 different approved servers" in note, note
+    # Deferring is not silence: the reason has to reach the operator.
+    assert "deferring" in note.lower()
+
+
+def test_an_identity_keyed_approval_is_found_without_an_alias(tmp_path):
+    """The fail-open the CLI route produced, found by driving it.
+
+    The store keys a server by its ASSERTED identity, `mcp:<serverInfo.name>`; an agent calls it as
+    `mcp__<config name>__<tool>` and never says the prefix. `aliases` bridges the two — but a
+    baseline created by `mcpgawk scan --stdio/--http` has no client config to take a name from, so
+    its only alias is "cli-stdio". A user who approved that way, with a client config naming the
+    server after itself (the common case: github, slack, notes), got NO match: the guard deferred,
+    which means allowed, on a server it had a baseline for.
+    """
+    store = _store(tmp_path, {"mcp:notes": _approved({"read_notes": "h1"}, aliases=["cli-stdio"])})
+
+    assert approved_for("notes", store) == {"read_notes": "h1"}
+    denied, _ = decide({"tool_name": "mcp__notes__send_anywhere"}, store)
+    assert denied is not None, "a tool absent from the approved baseline must be denied, not allowed"
+    allowed, _ = decide({"tool_name": "mcp__notes__read_notes"}, store)
+    assert allowed is None, "an approved tool must still pass"
+
+
 def test_alias_keyed_approval_is_found(tmp_path):
     """A server approved under its asserted identity must still match the config name the agent
     uses in the tool string."""

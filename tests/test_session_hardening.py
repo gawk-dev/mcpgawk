@@ -7,8 +7,6 @@ pinned here, including the eviction scenario that used to fail.
 """
 from __future__ import annotations
 
-import importlib
-import json
 
 from mcpgawk import spool
 from mcpgawk import guard_hook

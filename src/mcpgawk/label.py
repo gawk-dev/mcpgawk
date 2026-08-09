@@ -362,6 +362,18 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         # 401 that "a docs URL is not an MCP endpoint" sends them to debug a URL that was right.
         if x.get("error_kind") == "auth-required":
             lines.append("      The endpoint is real — it needs credentials, not a different URL.")
+        elif x.get("error_kind") == "timed-out":
+            # There is no error text to read here — the server said nothing at all — so the hint has
+            # to name where the answer actually lives, which is the server's own side.
+            lines.append("      It accepted the connection and never answered — the address is "
+                         "right, the server is not responding.")
+            lines.append("      Check its own logs: a hang here is usually a missing credential it "
+                         "is waiting on, a lock, or a slow first-run install.")
+        elif x.get("error_kind") == "server-failed":
+            # It launched and printed a reason (already in `detail` above). Asking whether the URL
+            # is really an MCP endpoint would be absurd here — there is no URL, and the server ran.
+            lines.append("      The server started and then failed — the message above is its own.")
+            lines.append("      Fix what it reports, then re-scan; the launch command itself is fine.")
         else:
             lines.append("      Is it a live MCP endpoint? A docs / repo / package URL is not one.")
             lines.append("      A local server needs:  mcpgawk scan --stdio \"<launch command>\"")
@@ -469,10 +481,11 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
 
 
 def render_summary(labels: list[dict[str, Any]], local_servers: int = 0) -> str:
-    tools = sum(l["x-mcpgawk"]["tool_count"] for l in labels)
-    toks = sum(l["x-mcpgawk"]["cost_index_tokens"] for l in labels)
-    flagged = sum(1 for l in labels for t in l["x-mcpgawk"]["tools"] if t["write"] or t["exfil_capable"])
-    exfil = sum(1 for l in labels for t in l["x-mcpgawk"]["tools"] if t["exfil_capable"])
+    tools = sum(lab["x-mcpgawk"]["tool_count"] for lab in labels)
+    toks = sum(lab["x-mcpgawk"]["cost_index_tokens"] for lab in labels)
+    flagged = sum(1 for lab in labels for t in lab["x-mcpgawk"]["tools"]
+                  if t["write"] or t["exfil_capable"])
+    exfil = sum(1 for lab in labels for t in lab["x-mcpgawk"]["tools"] if t["exfil_capable"])
     ns = len(labels)
     out = ("─" * 64 + f"\n{ns} server{'s' if ns != 1 else ''} · {tools} tools · "
            f"{toks:,} tokens loaded into every session · {flagged} can change or send data.\n"

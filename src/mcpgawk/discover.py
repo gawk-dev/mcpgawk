@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import credentials
+
 _MAX_CONFIG_BYTES = 20 * 1024 * 1024  # hostile-fs cap: never read a 2GB "config"
 
 # Per-OS config locations. Each: (client, relative-path-from-home, shape). `shape` picks how to pull
@@ -504,9 +506,21 @@ def _identity(entry: dict[str, Any]) -> tuple[Any, ...] | None:
         return None
     if entry.get("command"):
         args = entry.get("args") or []
-        return ("stdio", entry["command"], tuple(args) if isinstance(args, list) else (args,))
+        # ENV IS PART OF THE IDENTITY. Same binary, different credentials is a DIFFERENT server: two
+        # GitHub orgs, two Slack workspaces, dev vs prod tokens — all the same command and args,
+        # pointed at different data. Collapsing them scanned the first and left the rest invisible:
+        # never measured, never baselined, and therefore never guarded, while the fleet list implied
+        # they were covered. Found by planting 33 servers that differed only by env and watching
+        # them render as one. Values are only ever compared here, never printed or persisted.
+        return ("stdio", entry["command"],
+                tuple(args) if isinstance(args, list) else (args,), credentials.material(entry))
     if entry.get("url"):
-        return ("remote", entry["url"])
+        # THE SAME REASONING APPLIES TO REMOTE ENTRIES, and it is the common shape for hosted
+        # servers: one URL, two accounts, told apart only by the token in `headers`. Keyed on the
+        # URL alone, the second was deduped away — never scanned, never baselined, never guarded,
+        # while the fleet list implied it was covered. Same helper as history's identity, so the
+        # count of servers you have and the baseline a call is judged against cannot disagree.
+        return ("remote", entry["url"], credentials.material(entry))
     return None
 
 
@@ -576,6 +590,12 @@ def discover_report(home: Path | str | None = None, platform: str | None = None,
     # configured in?" is the first question anyone asks of a fleet list, especially when they want
     # to go and remove it.
     clients_of: dict[tuple[Any, ...], list[str]] = {}
+    # …and what each client CALLS it. Attribution without the name is only half the answer: a fleet
+    # row showed the first-seen name under every client, so Gemini's group listed a server Gemini's
+    # config does not contain, and `--only <the name that client uses>` matched nothing at all.
+    # "Which of my tools is this in?" is useless if the row does not use the name you will find there.
+    names_of: dict[tuple[Any, ...], dict[str, str]] = {}
+    aliases_of: dict[tuple[Any, ...], set[str]] = {}
     def sweep(base: Path, _client: str, rel: str, shape: str, label: str | None = None) -> None:
         # A location may be a GLOB (`Claude Extensions/*/manifest.json`) — some clients install each
         # server in its own directory rather than listing them in one config file. For a glob the
@@ -611,6 +631,13 @@ def discover_report(home: Path | str | None = None, platform: str | None = None,
                 row["servers"] += 1
                 if _client not in clients_of.setdefault(ident, []):
                     clients_of[ident].append(_client)   # recorded even on a duplicate sighting
+                # First name wins PER CLIENT, so a client that lists the same server twice keeps the
+                # name it showed first, and every other client keeps its own.
+                names_of.setdefault(ident, {}).setdefault(_client, str(name))
+                # …and EVERY name any config gives it, for lookup. A client can list the same
+                # server twice under two names; only one can be displayed, but both are names the
+                # user can reasonably type at `--only`.
+                aliases_of.setdefault(ident, set()).add(str(name))
                 if ident in by_identity:
                     continue
                 by_identity[ident] = (str(name), entry)
@@ -637,7 +664,9 @@ def discover_report(home: Path | str | None = None, platform: str | None = None,
             disp, i = f"{name}#{i}", i + 1
         # Attribution rides along under a reserved key. `probe` ignores unknown keys, and _identity
         # never reads it, so this cannot affect what gets scanned or how it dedupes.
-        out[disp] = {**entry, "_clients": sorted(clients_of.get(ident, []))}
+        out[disp] = {**entry, "_clients": sorted(clients_of.get(ident, [])),
+                     "_names": dict(sorted(names_of.get(ident, {}).items())),
+                     "_aliases": sorted(aliases_of.get(ident, set()))}
     return out, sources
 
 

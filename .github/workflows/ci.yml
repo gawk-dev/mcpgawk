@@ -19,6 +19,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
+      - name: Lint
+        # This repo publishes the wheel, so the lint that matters most has to run HERE — the
+        # canonical repo's copy cannot fail a hand-edit made in this one. PINNED for the reason
+        # the platform CI records: an unpinned ruff shipped new rules and turned 14 pushes red,
+        # which hid seven real defects behind noise.
+        run: |
+          python -m pip install "ruff==0.15.21"
+          ruff check src/mcpgawk
       - name: Run tests (incl. the structural no-egress invariant)
         # verify_live is the panel verify-button E2E: it runs the real Node engine and lives in
         # its own job below, so the fast matrix (four Python versions) does not pay for it four

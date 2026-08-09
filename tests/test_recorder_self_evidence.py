@@ -5,7 +5,6 @@ and `status` renders it loudly. None of it may ever raise into the hook's hot pa
 """
 from __future__ import annotations
 
-import json
 import os
 import stat
 

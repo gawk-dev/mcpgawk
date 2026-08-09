@@ -31,6 +31,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
+from .credentials import fingerprint as credential_fingerprint
 from .servercard import fetch_card
 from .transport import Candidate as _Candidate
 
@@ -64,6 +65,13 @@ class ServerSnapshot:
     # was declared (see transport.py). None means "the declaration was right" — the common case.
     resolved_url: str | None = None
     declared_transport: str | None = None
+    # WHICH LOGIN this entry uses, as a digest (see credentials.py) — None when it carries none.
+    # Carried on the SNAPSHOT rather than passed to `history.key_for` as an argument, deliberately:
+    # an optional argument is a rule that every call site has to remember, and a call site that
+    # forgets it silently reverts to conflating two accounts as one server. A field is correct by
+    # construction everywhere, and a snapshot built without one (a CLI --stdio scan, a test) keeps
+    # exactly the old identity.
+    credential_fingerprint: str | None = None
 
     @property
     def transport_corrected(self) -> bool:
@@ -144,35 +152,73 @@ def _unwrap(exc: BaseException) -> BaseException:
     return exc
 
 
-async def _bounded(coro_factory, name: str, transport: str, timeout: float) -> ServerSnapshot:
+def _status_recorder() -> tuple[dict[str, int | None], Any]:
+    """A response hook that remembers the last HTTP status the transport actually saw.
+
+    Needed because the streamable-HTTP client converts a refused handshake into
+    `MCPError("Server returned an error response")` — a JSON-RPC-shaped error carrying no status,
+    no response and no `__cause__`. The 401 is simply not in the exception, so a 'needs a token'
+    server is indistinguishable from a dead host unless we record the status at the moment it
+    arrives. (The SSE client does raise the real status error; this is the streamable path's gap.)
+    """
+    seen: dict[str, int | None] = {"status": None}
+
+    async def hook(response) -> None:
+        seen["status"] = response.status_code
+
+    return seen, hook
+
+
+async def _bounded(coro_factory, name: str, transport: str, timeout: float,
+                   status_hint: Any = None) -> ServerSnapshot:
     try:
         return await asyncio.wait_for(coro_factory(), timeout)
     except (asyncio.TimeoutError, TimeoutError) as e:
+        # NOT "unreachable": something accepted the connection and then never answered. That is a
+        # different fault with a different fix — look at the server's own logs, not at the address —
+        # and it is the one the beta page describes as "sits there doing nothing".
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
                               error=f"no MCP response within {timeout:.0f}s: {type(e).__name__}",
-                              error_kind="unreachable")
+                              error_kind="timed-out")
     except Exception as e:  # noqa: BLE001 — surface, never crash the scan
         real = _unwrap(e)
+        status = status_hint() if status_hint is not None else None
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
-                              error=f"{type(real).__name__}: {real}", error_kind=_kind_of(real))
+                              error=f"{type(real).__name__}: {real}",
+                              error_kind=_kind_of(real, status))
 
 
-def _kind_of(exc: BaseException) -> str:
+def _kind_of(exc: BaseException, status: int | None = None) -> str:
     """Classify a probe failure by EXCEPTION TYPE, never by message text (F2's lesson). An
     HTTPStatusError means the host answered HTTP and then refused to speak MCP — that is a live URL
     that isn't an MCP endpoint (a docs page, a 404, a 405 on the wrong path), which is a different
-    user action ("check the URL") from a dead host ("check the server is running")."""
-    try:
-        import httpx
-    except ImportError:                                   # pragma: no cover - httpx is an mcp dep
-        return "unreachable"
-    if isinstance(exc, httpx.HTTPStatusError):
+    user action ("check the URL") from a dead host ("check the server is running").
+
+    BOTH httpx and httpx2 are checked, and that is load-bearing. SDK v2's transports run on the
+    httpx2 fork (see `_no_redirect_http_client`), so every status error raised by an actual MCP
+    connection is an `httpx2.HTTPStatusError` — a type whose `__name__` is also "HTTPStatusError",
+    which is why the ladder's error text looked right while the classification silently fell
+    through to "unreachable". Only our own non-MCP fetches (the Server Card) raise the plain httpx
+    type. Checking one fork is the same as checking neither."""
+    types: list[type] = []
+    for module in ("httpx", "httpx2"):
+        try:
+            types.append(__import__(module).HTTPStatusError)
+        except ImportError:                               # pragma: no cover - both are mcp deps
+            continue
+    if types and isinstance(exc, tuple(types)):
         # 401/403 is the endpoint telling us it IS there and we are not allowed in. Reporting that
         # as "not an MCP endpoint" sends the user to check their URL when the real fix is a token —
         # observed live against a real hosted server, which is why this case is split out.
         if exc.response is not None and exc.response.status_code in (401, 403):
             return "auth-required"
         return "not-an-mcp-endpoint"
+    # Nothing in the exception, but the transport SAW a refusal (see `_status_recorder`). Only
+    # 401/403 is read this way: those are the one case where the endpoint is provably live and the
+    # user's next move is a credential, not a different URL. Any other recorded status is left to
+    # the type-based rules above rather than guessed at from a number.
+    if status in (401, 403):
+        return "auth-required"
     return "unreachable"
 
 
@@ -201,7 +247,19 @@ async def probe_stdio(name: str, command: str, args: list[str] | None = None,
         if snap.error:
             detail = _stderr_tail(errlog)
             if detail:
-                snap = replace(snap, error=f"{snap.error} — the server said: {detail}")
+                # A server that PRINTED something before dying is a different animal from silence at
+                # an address: it launched, it ran, and it told us what was wrong (missing module,
+                # missing credential). Typing it separately is what lets the fleet row and the
+                # next-step hint stop calling it "no MCP endpoint found" and pointing at URLs.
+                # A HANG that also printed a startup banner is still a hang. Overwriting the kind
+                # unconditionally relabelled it `server-failed` — "started, then failed … the launch
+                # command itself is fine" — when the right advice is the timeout one (check its logs;
+                # it may be waiting on a credential or a lock). Almost every real server prints
+                # something on startup, so this hit the common case. Keep what it managed to say
+                # either way: the words are useful, the CLASSIFICATION is what must not change.
+                kind = "timed-out" if snap.error_kind == "timed-out" else "server-failed"
+                snap = replace(snap, error=f"{snap.error} — the server said: {detail}",
+                               error_kind=kind)
         return snap
 
 
@@ -256,6 +314,8 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
     `auth` is an optional httpx.Auth (e.g. the SDK's OAuthClientProvider from `--login`) that drives
     an interactive OAuth flow; the token it obtains stays on this machine. When `auth` is present we
     force a no-redirect client so an OAuth credential can't leak across a redirect (see factory)."""
+    seen, record = _status_recorder()
+
     async def _do():
         # SDK v2: headers/auth no longer ride the transport call — they live on a caller-owned
         # http client. The auth path keeps the no-redirect client for the same credential-leak
@@ -264,13 +324,16 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
             http_client = _no_redirect_http_client(headers=headers or {}, auth=auth)
         else:
             http_client = create_mcp_http_client(headers=headers or {})
+        # Watch the wire, because the exception won't tell us (see `_status_recorder`).
+        http_client.event_hooks["response"] = [
+            *http_client.event_hooks.get("response", []), record]
         async with http_client:
             async with streamable_http_client(url, http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     snap = await _snapshot(session, name, "http")
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
-    return await _bounded(_do, name, "http", timeout)
+    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["status"])
 
 
 async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
@@ -354,6 +417,11 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         kind = "auth-required"
     elif "not-an-mcp-endpoint" in kinds:
         kind = "not-an-mcp-endpoint"
+    elif "timed-out" in kinds:
+        # Above "unreachable" for the same reason as the two before it: a candidate that ACCEPTED
+        # the connection and went quiet says more than the ones that refused outright, and sends
+        # the user somewhere different.
+        kind = "timed-out"
     else:
         kind = "unreachable"
 
@@ -364,11 +432,15 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         why = ("endpoint found, it needs credentials" if kind == "auth-required"
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
         lines.append(f"  - not attempted ({why}): " + ", ".join(skipped))
-    head = ("authentication required — the endpoint is live but refused this scan; "
-            "retry with `--login` or `--header \"Authorization: Bearer …\"`"
-            if kind == "auth-required" else
-            f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
-            f"{'s' if len(attempts) != 1 else ''}")
+    if kind == "auth-required":
+        head = ("authentication required — the endpoint is live but refused this scan; "
+                "retry with `--login` or `--header \"Authorization: Bearer …\"`")
+    elif kind == "timed-out":
+        head = ("no answer within the time budget — the connection was accepted and the server "
+                "never replied")
+    else:
+        head = (f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
+                f"{'s' if len(attempts) != 1 else ''}")
     return ServerSnapshot(name=name, transport=declared, protocol_version=None,
                           error="\n".join([head + ":", *lines]), error_kind=kind)
 
@@ -391,7 +463,17 @@ def _missing_program(command: str) -> bool:
 
 
 async def probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
-    """Dispatch a config entry (mcp.json shape) to the right transport."""
+    """Dispatch a config entry (mcp.json shape) to the right transport.
+
+    This is the ONE place a config entry becomes a snapshot, so it is the one place that can say
+    which login the entry uses — stamped on every snapshot it returns, error paths included, so
+    identity does not depend on whether the probe succeeded.
+    """
+    snap = await _probe(entry, name)
+    return replace(snap, credential_fingerprint=credential_fingerprint(entry))
+
+
+async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     if entry.get("command"):
         command = entry["command"]
         if _missing_program(command):

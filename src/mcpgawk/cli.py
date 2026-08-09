@@ -17,11 +17,12 @@ import shlex
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
+from typing import Any
 
 from . import drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
-from .discover import detect_unscannable, discover_report, discover_servers
+from .discover import detect_unscannable, discover_report
 from .label import build_label, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
@@ -60,6 +61,12 @@ def _headers(pairs: list[str] | None) -> dict[str, str]:
         k, _, v = p.partition(":")
         out[k.strip()] = v.strip()
     return out
+
+
+class _NoMatchingServers(Exception):
+    """`--only` named nothing that exists. Carries no message: `_run` has already told the user
+    what it looked for and what was there. Exists so that outcome can leave `_run` without
+    violating its 3-tuple return contract."""
 
 
 async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[str, dict]]]:
@@ -106,7 +113,28 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         # Module-level name on purpose: tests stub `cli.discover_report` to inject a fleet, the
         # same seam they used on discover_servers before the report existed.
         cfg, sources = discover_report()
-    targets = [(n, e) for n, e in cfg.items() if not only or n in only]
+    def _selected(name: str, entry: dict) -> bool:
+        # Match the display name OR any name a client actually uses for this server. After dedup the
+        # display name is one client's; asking for the name YOUR client shows you matched nothing at
+        # all — not even an "unknown server" — so the server was unreachable by the only name you had.
+        if not only:
+            return True
+        return bool(only & ({name} | set((entry.get("_names") or {}).values())
+                            | set(entry.get("_aliases") or ())))
+
+    targets = [(n, e) for n, e in cfg.items() if _selected(n, e)]
+    if only and not targets:
+        # "Nothing matched what you asked for" and "you have nothing" are different answers, and
+        # printing the empty-fleet copy for the first one told a user with 30 servers that they had
+        # none. Name what was actually there so a typo is obvious.
+        print(f"mcpgawk: no server matches --only {','.join(sorted(only))}.", file=sys.stderr)
+        if cfg:
+            print(f"  configured here: {', '.join(sorted(cfg))}", file=sys.stderr)
+        # RAISE, never `return 2`: this function's contract is a 3-tuple and its caller unpacks it
+        # unconditionally, so returning an int crashed the CLI on any --only typo. The caller turns
+        # this into exit 2, which also keeps it out of main()'s catch-all — a typo is a normal
+        # outcome, not a tool ERROR to be recorded in the run log as one.
+        raise _NoMatchingServers
     if is_discovery and not targets:
         # "Nothing was found" and "nothing was looked at" must never render alike: say what WAS
         # examined, and name every source that existed but yielded nothing readable — an empty
@@ -544,6 +572,16 @@ def _approve(args) -> int:
 
     targets = waiting if args.all else [k for k in [history.resolve(store, args.server)] if k]
     if not targets:
+        # Ambiguity gets its own message. "No tracked server matches" would be a lie when the
+        # problem is that SEVERAL do, and approving the wrong one moves a baseline the operator
+        # never looked at.
+        candidates = history.resolve_all(store, args.server)
+        if len(candidates) > 1:
+            print(f"{args.server!r} matches {len(candidates)} tracked servers — refusing to guess "
+                  f"which baseline to move. Approve one by its own key:", file=sys.stderr)
+            for key in candidates:
+                print(f"    mcpgawk approve {key}", file=sys.stderr)
+            return 2
         print(f"No tracked server matches {args.server!r}. "
               f"Try `mcpgawk approve --list`.", file=sys.stderr)
         return 2
@@ -1093,7 +1131,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     # No args at all is VALID: it means "discover and scan everything on this machine". _run handles
     # the nothing-found message and default-deny consent before launching any discovered stdio server.
-    snaps, entries, skipped = asyncio.run(_run(args))
+    try:
+        snaps, entries, skipped = asyncio.run(_run(args))
+    except _NoMatchingServers:
+        return 2        # a typo at --only, already explained on stderr; not a tool failure
     measurements = [measure(sn) for sn in snaps]
     # Cross-server signals need all snapshots together; merge into each involved server's signals.
     # Two DISTINCT techniques, both requiring the whole inventory:
@@ -1155,21 +1196,30 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # a load()/save() pair, two concurrent scans each diff against a baseline the other has
             # already replaced, and one server's drift history is silently lost.
             #
-            # `migrate_from` carries every legacy `transport:name` key (B3), so both switching to the
-            # server-asserted identity AND switching transport on a nameless server adopt an existing
-            # baseline instead of orphaning it — the fix for silent baseline resets must not itself
-            # cause one, in either direction.
+            # `migrate_from` carries every key this server could already be recorded under — the
+            # legacy `transport:name` variants (B3) and, once the login is part of the identity, the
+            # un-discriminated `mcp:<asserted>` — so switching to the server-asserted identity,
+            # switching transport on a nameless server, and gaining a credential discriminator all
+            # adopt an existing baseline instead of orphaning it. The fix for silent baseline resets
+            # must not itself cause one, in any direction.
             current = drift.build_record(sn, m, measured_at=now)
+            migrate_keys = history.legacy_identity_keys(sn)
             asserted = history.key_for(sn)
             key = history.legacy_key_for(sn) if asserted in collided else asserted
             # C2 — a server that changes the name it ASSERTS gets a new key, and a new key is a
             # first sighting, which is silence. Check before recording, or the entry we would be
             # comparing against is the one we just created.
             was = history.identity_change(history.load(), key, sn.name)
+            if was in migrate_keys:
+                # OUR key scheme changed, the server did not. `record` adopts that exact record
+                # below, so the baseline DOES carry over — announcing "identifies itself as a
+                # DIFFERENT server … its baseline does not carry over" would be a false alarm that
+                # fires once for every credentialled server on upgrade, and it would be untrue.
+                was = None
             if was:
                 reidentified[sn.name] = was
             previous = history.record(key, current,
-                                      migrate_from=history.transport_variant_keys(sn),
+                                      migrate_from=migrate_keys,
                                       alias=sn.name)
             if previous is None:
                 new_baselines.append(sn.name)
@@ -1186,6 +1236,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
             d = asdict(rep)
             d["rug_pull"] = bool(rep.changed)   # same item, rewritten description — the signature
             d["hostile"] = rep.hostile          # injection signature or capability escalation
+            # A refused baseline has EMPTY diff lists, so `rug_pull`/`hostile` both read false —
+            # calm, for a server nothing was compared against. A CI gate keying on those fields
+            # would pass while the exit code says otherwise. Say plainly that no comparison
+            # happened, so a consumer can distinguish "checked, clean" from "not checked".
+            d["compared"] = rep.unreadable is None
             lab["x-mcpgawk"]["drift"] = d
         if lab["name"] in reidentified:
             # No DriftReport exists for a re-identification, so a JSON consumer would see nothing
@@ -1272,7 +1327,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print()
             # A server that only became measurable after sign-in can carry findings — those must
             # count towards the exit code exactly as if the first pass had seen them.
-            any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE")
+            any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE",
+                                                     "FAILED", "TIMED-OUT")
                                          for r in refreshed.values())
         _behavioural_capability_note()
         return 1 if (any_error or failed) else 0
@@ -1415,7 +1471,7 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
         label = _label_for(snap, measure(snap), entry, args)
         state, detail = fleet.state_of(label)
         refreshed[row.name] = FleetRow(name=row.name, state=state, detail=detail, url=row.url,
-                                       clients=row.clients)
+                                       clients=row.clients, names=row.names)
         print(f"  {row.name}: signed in — {detail}", file=sys.stderr)
     return refreshed
 

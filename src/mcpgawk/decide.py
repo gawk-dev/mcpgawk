@@ -72,6 +72,14 @@ def _esc(text: object) -> str:
 def _diff_block(report: drift.DriftReport) -> str:
     """The evidence, in the order a person needs it: what is dangerous, then what merely moved."""
     rows: list[str] = []
+    if report.unreadable:
+        # There is no evidence to show, and the page must say so rather than fall through to
+        # "No detail recorded" beside a Trust button — that reads as "we looked and found little",
+        # when the truth is that nothing was compared at all.
+        return ('<div class="ev danger"><div class="lbl">⚠ This baseline could not be read</div>'
+                f'<div class="was">{_esc(report.unreadable)}</div>'
+                '<div class="now">Nothing was compared, so there is no diff to judge. Approving '
+                'here would trust a surface no one has seen.</div></div>')
     for tool in report.hostile:
         before, after = report.texts.get(tool, ("", ""))
         rows.append(

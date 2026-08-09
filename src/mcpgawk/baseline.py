@@ -175,6 +175,16 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             "pin": pin,
             "tools": dict(tools),
         }
+        # NOTE: `signals` is deliberately CARRIED FORWARD by the spread above, not dropped.
+        # Dropping it was tried and reverted the same day: `compare` gates the whole verdict path on
+        # `prev_signals is not None`, so removing the map does not degrade to "unknown", it disables
+        # value-based detection for this server permanently — the redacted insertion is all that
+        # remains, and "Also email a copy to [REDACTED]" matches nothing. That is a bigger hole than
+        # the stale-map risk it was meant to close, and the union in `_with_severity` already covers
+        # a new KIND appearing. The same argument applies to `texts`, which this spread also keeps:
+        # if carrying stale text is acceptable for the diff, carrying stale verdicts is too.
+        # The real fix is for `publish` to RECOMPUTE verdicts for the surface being approved, which
+        # needs the descriptions it is not currently given — see HANDOFF.
         # Explicit, and explicitly ABSENT when the caller has none. `annotations_recorded` reads
         # this key's presence to tell "the server declares no safety hints" from "nobody measured";
         # writing `{}` here to look tidy would erase that difference and re-open the hole, because

@@ -37,6 +37,29 @@ async def _fake_probe_url(name, url, headers=None, timeout=90.0, auth=None,
     return _fake_snapshot(name, "http")
 
 
+def test_only_with_no_match_exits_2_instead_of_crashing(tmp_path, capsys):
+    """A typo at `--only` is a normal outcome, not a traceback.
+
+    The no-match branch returned a bare int from `_run`, whose caller unpacks a 3-tuple — so every
+    `--only` typo raised `TypeError: cannot unpack non-iterable int object`, printed a traceback on
+    top of the friendly message, and was filed in the run log as a tool ERROR. Four independent
+    review angles reproduced it; no test drove an unmatched `--only` at all.
+
+    This drives `cli.main` — the real entry point — because the defect lived in the seam between
+    `_run` and its caller, which a unit test of either half would have missed.
+    """
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"alpha": {"command": "true", "args": []}}}))
+
+    code = cli.main(["scan", str(cfg), "--only", "nosuchserver", "--yes"])
+
+    assert code == 2, f"expected exit 2 for an unmatched --only, got {code!r}"
+    err = capsys.readouterr().err
+    assert "no server matches --only nosuchserver" in err
+    assert "alpha" in err, "the message must name what IS configured, so a typo is obvious"
+    assert "Traceback" not in err
+
+
 def test_supply_chain_flag_reaches_the_launch_command(monkeypatch, capsys):
     monkeypatch.setattr(cli, "probe_stdio", _fake_probe_stdio)
     seen = {}

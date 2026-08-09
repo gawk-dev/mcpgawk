@@ -13,7 +13,6 @@ put a first-time user off turned up immediately, and neither was visible from an
 from __future__ import annotations
 
 import asyncio
-import os
 
 from mcpgawk import consent
 from mcpgawk.probe import _stderr_tail, probe_stdio

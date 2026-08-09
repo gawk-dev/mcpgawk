@@ -110,6 +110,8 @@ export const FLEET_STATES = [
     "REVIEW",
     "VULNERABLE",
     "AUTH",
+    "FAILED",
+    "TIMED-OUT",
     "SKIPPED",
     "UNREACHABLE",
     "NOT-SCANNABLE",
@@ -126,6 +128,13 @@ export function stateStatus(state) {
             return { label: "vulnerable", role: "vuln" };
         case "AUTH":
             return { label: "needs auth", role: "muted" };
+        case "FAILED":
+            // It launched and died. NOT `muted` — muted means "we chose not to look", and presenting a
+            // crashed server as a deliberate omission is the specific lie the default branch below was
+            // written to stop. It was not measured, so it is `incomplete`; the LABEL carries the reason.
+            return { label: "failed to start", role: "incomplete" };
+        case "TIMED-OUT":
+            return { label: "no answer", role: "incomplete" };
         case "SKIPPED":
             return { label: "skipped", role: "incomplete" };
         case "UNREACHABLE":

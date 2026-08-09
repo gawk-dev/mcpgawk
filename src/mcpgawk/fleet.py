@@ -15,7 +15,7 @@ here is a function of the labels, so the states a user sees are directly testabl
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -56,11 +56,14 @@ def redact_url(url: str | None) -> str | None:
 #: The states a server can be in, in the order a human should deal with them. Ordering is a product
 #: decision, not cosmetics: the things that BLOCK a scan (needs credentials, unreachable) come before
 #: findings, because an unscanned server is an unknown, and an unknown outranks a known risk.
-STATES = ("AUTH", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW", "INCOMPLETE", "CLEAN")
+#: FAILED sits above UNREACHABLE on purpose: both block a scan, but a server that ran and printed
+#: a reason has a fix the user can act on today, while "nothing answered" still needs diagnosing.
+STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW",
+          "INCOMPLETE", "CLEAN")
 
 _MARK = {
-    "AUTH": "●", "UNREACHABLE": "●", "SKIPPED": "○", "NOT-SCANNABLE": "◌",
-    "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
+    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "SKIPPED": "○",
+    "NOT-SCANNABLE": "◌", "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
 }
 
 
@@ -71,6 +74,10 @@ class FleetRow:
     detail: str
     url: str | None = None          # set for remote servers, so the auth step knows where to go
     clients: tuple[str, ...] = ()   # which IDE / AI tool(s) this server is configured in
+    # What each of those clients CALLS it. One server can be configured under a different name in
+    # every client, and `name` above can only be one of them — so a group rendered the first-seen
+    # name under clients that use a different one, and the user could not find it or `--only` it.
+    names: dict[str, str] = field(default_factory=dict)
     # The launch spec (command/args/env, or url/headers) a front-end needs to VERIFY this server by
     # click. Populated ONLY when the caller asks (build_rows(with_spec=True)); it can carry secrets
     # from the user's own config (an `env` API key), so it is never in the default fleet-json — see
@@ -105,6 +112,16 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
             return "UNREACHABLE", "responds, but does not speak MCP"
+        if x.get("error_kind") == "timed-out":
+            # The beta page's "sits there doing nothing", named. It is NOT "no endpoint found":
+            # the server is there, it took the connection, and it never spoke.
+            return "TIMED-OUT", "accepted the connection, then never answered"
+        if x.get("error_kind") == "server-failed":
+            # Deliberately NOT the server's own text — see the note below about the 2026-07-28
+            # attempt that had to be backed out. The row's job is to separate "it ran and failed"
+            # from "nothing answered", which are different user actions; the message itself is one
+            # flag away and stays where redaction and trimming cannot make it read worse.
+            return "FAILED", "started, then failed — see its own message with --detail"
         if x.get("error_kind") == "command-missing":
             # Deliberately NOT phrased as "dead". The entry is still configured and still approved,
             # so anything that later appears at that path is executed without being asked about
@@ -157,9 +174,9 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
         return FleetRow(
             name=name, state="UNREACHABLE",
             detail=f"`{cmd}` no longer exists — still configured, so anything at that path would run",
-            clients=tuple(entry.get("_clients") or ()))
+            clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
     return FleetRow(name=name, state="SKIPPED", detail=f"local `{cmd}` — not launched (needs --yes)",
-                    clients=tuple(entry.get("_clients") or ()))
+                    clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
 
 
 def unscannable_row(item: dict[str, str]) -> FleetRow:
@@ -184,7 +201,7 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
         state, detail = state_of(lab)
         entry = entries.get(lab["name"]) or {}
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
-                             clients=tuple(entry.get("_clients") or ()),
+                             clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
                              spec=_spec_of(entry) if with_spec else None))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
@@ -222,7 +239,8 @@ _CLIENT_TITLE = {
 }
 
 
-def _group_by_client(rows: list[FleetRow]) -> list[tuple[str, list[FleetRow]]]:
+def _group_by_client(rows: list[FleetRow],
+                     localise: bool = True) -> list[tuple[str, list[FleetRow]]]:
     """(client, rows) sections. A server present in several tools is listed under EACH — it really
     is configured in each, and hiding it from all but one would send the reader to the wrong config
     file when they try to remove it. Sections are ordered by their most urgent row, so the tool that
@@ -230,7 +248,20 @@ def _group_by_client(rows: list[FleetRow]) -> list[tuple[str, list[FleetRow]]]:
     groups: dict[str, list[FleetRow]] = {}
     for r in rows:
         for client in (r.clients or ("",)):
-            groups.setdefault(client, []).append(r)
+            # Under each client, call it what THAT client calls it. One server can be configured
+            # under a different name in every tool, and `r.name` can only be one of them — printing
+            # it everywhere sent the reader to a config file to look for a name that is not in it.
+            # Substituted here rather than in the renderer: the section already knows the client,
+            # and every caller of _group_by_client gets the fix for free.
+            # `localise` is False for the JSON, and that is load-bearing: `groups[].servers` is a
+            # JOIN KEY into the top-level `servers` array, which is keyed by the canonical name.
+            # Substituting there made the key miss, and the extension's `byName.get(n)` returns
+            # nothing on a miss — so a client's tree silently omitted a server it does contain,
+            # which is exactly the "renders like it isn't there" failure this rename set out to fix.
+            # The front-end gets the local label from each server's `names` map instead.
+            local = r.names.get(client) if localise else None
+            groups.setdefault(client, []).append(
+                replace(r, name=local) if local and local != r.name else r)
     order = {s: i for i, s in enumerate(STATES)}
     return sorted(
         ((c, sort_rows(g)) for c, g in groups.items()),
@@ -301,7 +332,15 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
 
 #: Bumped only on a BREAKING change to the payload below. The IDE extension pins it, so an older
 #: extension talking to a newer CLI fails loudly instead of silently mis-rendering someone's fleet.
-FLEET_SCHEMA = "mcpgawk.fleet/1"
+#: Bumped to /2 on 2026-08-09 when FAILED and TIMED-OUT joined STATES. Adding a state IS a breaking
+#: payload change for an already-installed client: the extension types STATE_ICON as
+#: `Record<FleetState, …>` and destructures the lookup, so an unknown state threw
+#: `Cannot destructure property 'icon' of undefined` and killed the WHOLE tree, not just that row.
+#: The pin exists precisely to turn that into the loud "update one side or the other" refusal, and
+#: shipping new states under the old number walked around it. Bump whenever the payload gains
+#: anything an older client would have to understand — a new state, a renamed field, a changed
+#: meaning. Purely additive fields a client can ignore (`names`) do not need it.
+FLEET_SCHEMA = "mcpgawk.fleet/2"
 
 
 def to_json(rows: list[FleetRow]) -> dict[str, Any]:
@@ -318,6 +357,9 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
         "servers": [
             {"name": r.name, "state": r.state, "detail": r.detail, "url": redact_url(r.url),
              "clients": list(r.clients), "can_authenticate": r.needs_auth,
+             # What each client calls it, so a front-end can label a row the way the reader's own
+             # config does without the name ceasing to work as the join key. Omitted when empty.
+             **({"names": dict(r.names)} if r.names else {}),
              # `spec` present only under --with-spec; `scannable` is the safe, secret-free signal a
              # front-end uses to decide whether to offer a "verify by click" action.
              **({"spec": r.spec, "scannable": True} if r.spec else {})}
@@ -325,7 +367,8 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
         ],
         "groups": [{"client": c, "title": _CLIENT_TITLE.get(c, c.upper()),
                     "servers": [r.name for r in g]}
-                   for c, g in _group_by_client(rows)],
+                   # localise=False: these names are the join key into `servers[]` above.
+                   for c, g in _group_by_client(rows, localise=False)],
         "summary": {
             "counts": {s: n for s, n in counts.items() if n},
             "scannable": len(rows) - counts["NOT-SCANNABLE"],

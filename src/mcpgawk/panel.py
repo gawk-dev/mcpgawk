@@ -1182,7 +1182,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # not, and "scroll and squint" is the friction this removes.
         if tier_filter and tier != tier_filter:
             continue
-        if q and q.lower() not in f"{name} {key or ''} {clients}".lower():
+        # Search the names each CLIENT uses too, not only the display name. One server can be
+        # configured under a different name in every tool, so a reader typing the name their own
+        # config shows them found NOTHING for a server sitting on the page under another name —
+        # the same defect already fixed for `--only` and the terminal fleet view.
+        aliases = " ".join((entry.get("_names") or {}).values()) + " " + \
+                  " ".join(entry.get("_aliases") or [])
+        if q and q.lower() not in f"{name} {key or ''} {clients} {aliases}".lower():
             continue
         words = [w for w in re.split(r"[^0-9A-Za-z]+", name) if w]
         mark = ((words[0][0] + (words[1][0] if len(words) > 1 else (words[0][1:2] or ""))).upper()

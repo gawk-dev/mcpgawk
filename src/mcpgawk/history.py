@@ -267,6 +267,8 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
     Best-effort but never silent: a failure here means the hook will (loudly) defer until the next
     successful save, which is the safe direction — it must not fail the scan/approve that called us.
     """
+    from . import drift     # local: keeps the module graph acyclic, as drift does for signals
+
     try:
         st = os.stat(path)
         servers: dict[str, Any] = {}
@@ -276,8 +278,31 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             rec = entry.get("approved")
             if not isinstance(rec, dict) or not isinstance(rec.get("tools"), dict):
                 continue
-            servers[key] = {"tools": dict(rec["tools"]),
-                            "aliases": list(entry.get("aliases") or [])}
+            # NOT skipped on an unreadable `schema_version`. That was tried and reverted the same
+            # day: omitting a server makes the hook read "never approved", which DEFERS — i.e.
+            # allows every call on it — where the previous behaviour denied (hashes from another
+            # algorithm cannot match). Worse, the omission is undetectable: this function stamps
+            # `source` with the current store stat, so the staleness check passes and the hook
+            # trusts a projection it cannot know is partial. A loud refusal in the report path plus
+            # a silent fail-open in the enforce path is the worst combination available.
+            # Covering the enforcing reader properly needs the projection to CARRY the refusal
+            # (so the hook can deny loudly rather than infer from absence) — see HANDOFF.
+            row = {"tools": dict(rec["tools"]),
+                   "aliases": list(entry.get("aliases") or [])}
+            # CARRY the refusal rather than implying it by absence. A record this build cannot
+            # interpret must neither be enforced (its hashes were computed by rules we do not know)
+            # nor silently omitted (absent reads as "never approved", which DEFERS = allows, and the
+            # hook cannot tell a partial projection from a complete one because `source` still
+            # stamps fresh). Emitting the server with an explicit reason and NO tools lets the hook
+            # say why it is standing down.
+            stored = rec.get("schema_version")
+            if stored is not None and (not isinstance(stored, int)
+                                       or stored > drift.RECORD_SCHEMA):
+                row = {"tools": {}, "aliases": row["aliases"],
+                       "unreadable": (f"its approved record was written by a newer mcpgawk "
+                                      f"(record schema {stored!r}; this build reads "
+                                      f"{drift.RECORD_SCHEMA})")}
+            servers[key] = row
         projection = {"schema": PROJECTION_SCHEMA,
                       "source": {"mtime_ns": st.st_mtime_ns, "size": st.st_size},
                       "servers": servers}
@@ -361,11 +386,20 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     path = path or default_path()
     with locked(path):
         store = load(path)
-        _migrate(store, key, migrate_from)
+        adopted = _migrate(store, key, migrate_from, alias)
         base = approved(store, key)
         entry = server_entry(store, key)
         if base is None:
             entry["approved"] = rec          # trust-on-first-use
+        if adopted:
+            # AN ADOPTED RECORD'S ALIASES MAY NAME OTHER SERVERS. A record conflated under the old
+            # identity carries the config name of EVERY entry that shared it — so keeping them here
+            # would let the bug survive its own fix: until the sibling entry is itself re-scanned,
+            # the guard's alias lookup would single-match this record and enforce a baseline the
+            # sibling's owner never reviewed. Only the entry actually claiming the record keeps its
+            # name; a claim with no alias to attribute keeps none, because a name we cannot
+            # attribute is exactly the thing that must not resolve.
+            entry["aliases"] = [alias] if alias else []
         if alias:
             # The key is the server's asserted identity; the user thinks in config names. Remember
             # every name this server has been configured under so `approve <name>` resolves.
@@ -447,16 +481,28 @@ def resolve(store: dict[str, Any], wanted: str) -> str | None:
 
     They know the name in their `mcp.json`; the store is keyed by the identity the server asserts.
     Accepts the exact key, a recorded config-name alias, or the bare asserted name.
+
+    None when nothing matches AND when the name is AMBIGUOUS — an alias of several records. This
+    used to take the first match, which is the write-side twin of the bug the enforcing reader
+    already defers on: an operator typing `mcpgawk approve billing` would move the approved baseline
+    of whichever record happened to sort first, and nothing would say so. Aliases are known to
+    collide in this codebase (every `--stdio` scan is labelled `cli-stdio`), so this is routine, not
+    exotic. Callers that need to explain the ambiguity use `resolve_all`.
     """
+    matches = resolve_all(store, wanted)
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_all(store: dict[str, Any], wanted: str) -> list[str]:
+    """Every stored key `wanted` could mean. Same order as `resolve`: exact key, then the bare
+    asserted name, then config-name aliases. An exact match is unambiguous by construction — only
+    the alias scan can return several."""
     servers = store.get("servers", {})
     if wanted in servers:
-        return wanted
+        return [wanted]
     if f"mcp:{wanted}" in servers:
-        return f"mcp:{wanted}"
-    for key, entry in servers.items():
-        if wanted in entry.get("aliases", []):
-            return key
-    return None
+        return [f"mcp:{wanted}"]
+    return [key for key, entry in servers.items() if wanted in (entry.get("aliases") or [])]
 
 
 def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str | None:
@@ -531,20 +577,44 @@ def approved(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     return hist[0] if hist else None
 
 
-def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...]) -> None:
+def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...],
+             alias: str | None = None) -> bool:
     """Move a pre-existing baseline onto `key` when the identity scheme changed underneath it.
 
     Without this, shipping the server-asserted identity would itself orphan every user's baseline on
     upgrade — the exact silent-reset this ADR exists to prevent, caused by the fix for it."""
     servers = store.get("servers") or {}
     if key in servers:
-        return
+        return False
     for old in legacy_keys:
-        if old in servers:
-            # Creates the new key, so it goes through the same gate as any other creation — a
-            # migration must not be the one path that can mint an entry nothing validated.
-            server_entry(store, key).update(servers.pop(old))
-            return
+        if old not in servers:
+            continue
+        if not _may_adopt(servers[old], old, alias):
+            continue
+        # Creates the new key, so it goes through the same gate as any other creation — a
+        # migration must not be the one path that can mint an entry nothing validated.
+        server_entry(store, key).update(servers.pop(old))
+        return True
+    return False
+
+
+def _may_adopt(record: dict[str, Any], old_key: str, alias: str | None) -> bool:
+    """May this entry take over `old_key`'s record — or does that record belong to someone else?
+
+    A `{transport}:{name}` key is scoped to ONE config name, so adopting it can only ever reclaim
+    this entry's own history (B3). `mcp:<asserted>` is not: once the login is part of the identity,
+    an entry WITHOUT credentials keeps that bare key as its live, current identity. A credentialled
+    sibling asserting the same name would otherwise walk off with it — destroying a real baseline
+    and inheriting an approval granted to a different account, which is both halves of the bug this
+    identity change exists to close, reintroduced by its own migration.
+
+    So a bare `mcp:` record is adoptable only when it names this entry as one of its aliases. A
+    genuinely conflated pre-upgrade record does (every `--track` scan records `alias=sn.name`); a
+    stranger's live record does not.
+    """
+    if not old_key.startswith("mcp:"):
+        return True
+    return bool(alias) and alias in (record.get("aliases") or [])
 
 
 def should_record(snap: ServerSnapshot) -> bool:
@@ -566,10 +636,20 @@ def key_for(snap: ServerSnapshot) -> str:
     Falls back to the old `transport:name` when a server declares nothing. Note the asserted name is
     server-controlled: changing it is itself a re-identification, which surfaces as a first sighting
     rather than as silence. That is a deliberate trade — see ADR-0012.
+
+    THE LOGIN IS PART OF THE IDENTITY when the entry carries one (ADR-0012 addendum, 2026-08-10).
+    The asserted name alone made the same server configured twice with different credentials — a
+    work GitHub and a personal one — collapse onto one baseline, so approving the tools on one made
+    the guard wave calls through on the other, a server the user never reviewed. Reproduced, then
+    fixed here. The discriminator is appended ONLY when the entry has an `env`/`headers` login, so
+    every credential-free server keys exactly as before and no existing baseline is disturbed.
     """
     asserted = (snap.server_info or {}).get("name")
     if isinstance(asserted, str) and asserted.strip():
-        return f"mcp:{asserted.strip()}"
+        key = f"mcp:{asserted.strip()}"
+        # A nameless server already keys by its CONFIG name (`transport:name`), which is distinct
+        # per entry — the conflation is only possible under a shared asserted name.
+        return f"{key}#{snap.credential_fingerprint}" if snap.credential_fingerprint else key
     return legacy_key_for(snap)
 
 
@@ -592,6 +672,25 @@ def transport_variant_keys(snap: ServerSnapshot) -> tuple[str, ...]:
     key adopt the old baseline instead. Harmless for a NAMED server: its `mcp:name` key already exists
     (transport-independent), so `_migrate` no-ops rather than adopting anything."""
     return tuple(f"{t}:{snap.name}" for t in _TRANSPORTS)
+
+
+def legacy_identity_keys(snap: ServerSnapshot) -> tuple[str, ...]:
+    """Every key this server could ALREADY be recorded under, for `record(..., migrate_from=...)`.
+
+    The transport variants (B3), plus — for an entry that now carries a credential discriminator —
+    the un-discriminated `mcp:<asserted>` it was keyed under before that change. Without this the
+    fix for credential conflation would orphan every existing approval on upgrade, which is the
+    silent baseline reset ADR-0012 exists to prevent, caused by the fix for a different one.
+
+    Where two entries shared a conflated record, the FIRST one re-scanned adopts it and the other
+    gets an honest first sighting. Which one wins is scan order; both keep working, and only the
+    loser re-approves.
+    """
+    keys = list(transport_variant_keys(snap))
+    asserted = (snap.server_info or {}).get("name")
+    if snap.credential_fingerprint and isinstance(asserted, str) and asserted.strip():
+        keys.append(f"mcp:{asserted.strip()}")
+    return tuple(keys)
 
 
 def last(store: dict[str, Any], key: str) -> dict[str, Any] | None:
