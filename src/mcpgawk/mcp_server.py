@@ -99,6 +99,11 @@ def build_server() -> Server:
     # the kind of quiet inventory error this product exists to catch in other people's servers.
     # SDK v2: handlers are `(ctx, params) -> result model` constructor kwargs; decorator
     # registration is gone and results are wrapped explicitly.
+    # FIELD names, not wire names. The MCP SDK v2 models are snake_case with camelCase aliases and
+    # serialise by alias, so the JSON on the wire is unchanged — `inputSchema`, `readOnlyHint` and
+    # the rest still go out exactly as the protocol specifies. Constructing by alias also worked,
+    # which is why this drifted; using the real field names is what lets a type checker see these
+    # calls at all. Safe because this package requires `mcp>=2,<3`, where the field names exist.
     async def list_tools(ctx: Any, params: Any) -> ListToolsResult:
         return ListToolsResult(tools=[
             Tool(
@@ -116,7 +121,7 @@ def build_server() -> Server:
                 # it spawns every configured local server, i.e. runs their code. A tool that can do
                 # that is not read-only, whatever it does when the flag is false.
                 #
-                # This was readOnlyHint=True until 2026-07-21, and scanning THIS server with our own
+                # This was read_only_hint=True until 2026-07-21, and scanning THIS server with our own
                 # scanner proved why that is indefensible: `_is_write` treats a declared
                 # readOnlyHint as authoritative, so mcpgawk reported mcpgawk's own tools as
                 # write=False. We would have handed ourselves the clean bill of health this product
@@ -125,9 +130,9 @@ def build_server() -> Server:
                 #
                 # openWorld: it talks to remote servers. NOT idempotent: launching servers has
                 # whatever side effects those servers have.
-                annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
-                                            idempotentHint=False, openWorldHint=True),
-                inputSchema={
+                annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                                            idempotent_hint=False, open_world_hint=True),
+                input_schema={
                     "type": "object",
                     "properties": {
                         "launch_local": {
@@ -150,9 +155,9 @@ def build_server() -> Server:
                 # false statement in the manifest, and the client's approval prompt is exactly the
                 # defence it would disable. destructiveHint is left False because scanning does not
                 # itself destroy anything — but the caller must be asked, so readOnly must be False.
-                annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
-                                            idempotentHint=False, openWorldHint=True),
-                inputSchema={
+                annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                                            idempotent_hint=False, open_world_hint=True),
+                input_schema={
                     "type": "object",
                     "properties": {
                         "url": {"type": "string", "description": "Remote MCP endpoint."},

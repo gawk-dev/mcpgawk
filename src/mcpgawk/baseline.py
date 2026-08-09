@@ -145,7 +145,8 @@ validated_server_key = history.validated_server_key
 
 def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             alias: str | None = None, path: str | None = None,
-            annotations: dict[str, dict[str, Any]] | None = None) -> None:
+            annotations: dict[str, dict[str, Any]] | None = None,
+            signals: dict[str, list[str]] | None = None) -> None:
     """Write an approval INTO the spine from another pillar.
 
     The read path (`export`) alone makes the spine a one-way mirror: verify and monitor could see
@@ -183,8 +184,16 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         # the stale-map risk it was meant to close, and the union in `_with_severity` already covers
         # a new KIND appearing. The same argument applies to `texts`, which this spread also keeps:
         # if carrying stale text is acceptable for the diff, carrying stale verdicts is too.
-        # The real fix is for `publish` to RECOMPUTE verdicts for the surface being approved, which
-        # needs the descriptions it is not currently given — see HANDOFF.
+        # `signals` CLOSES that: a caller holding the live text computes the verdicts for the
+        # surface being approved and passes them, so today's pin no longer carries yesterday's
+        # judgement. This function cannot compute them itself — by the time it runs, the only prose
+        # left is the redacted copy on disk, which is exactly the hole `_item_signals` exists to
+        # avoid. Absent, the spread above still carries the old map forward, for the reason stated:
+        # a MISSING map disables value-based detection for this server permanently, which is worse
+        # than a stale one. `texts` is still inherited either way — a stale redacted diff can be
+        # wrong about what changed, but it cannot make an unreviewed surface read as clean.
+        if signals is not None:
+            record["signals"] = {k: sorted(v) for k, v in signals.items() if v}
         # Explicit, and explicitly ABSENT when the caller has none. `annotations_recorded` reads
         # this key's presence to tell "the server declares no safety hints" from "nobody measured";
         # writing `{}` here to look tidy would erase that difference and re-open the hole, because

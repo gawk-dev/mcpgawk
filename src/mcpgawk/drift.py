@@ -108,15 +108,35 @@ def _item_signals(snap: ServerSnapshot) -> dict[str, list[str]]:
     Only non-empty entries are stored, so absence of a KEY means "clean" while absence of the whole
     map (an older record) means "unknown" — `_with_severity` distinguishes the two.
     """
+    out: dict[str, list[str]] = {}
+    for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
+        out.update(signals_for_items(kind, items))
+    return out
+
+
+def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
+    """`{kind}.{name}` -> detector verdicts, judged on LIVE description text.
+
+    Public because the verdicts must be computed wherever the live text still exists, and that is
+    not only in a scan. `baseline.publish` (the monitor's way into the shared trust store) inherited
+    the PREVIOUS record's verdicts for the surface an operator was approving — so approving a
+    changed server carried yesterday's judgement forward under today's pin. It cannot recompute them
+    itself: by then the text is gone, and what remains on disk is redacted, which is the whole reason
+    `_item_signals` exists. So the caller computes them at measurement time and passes them in.
+
+    Same contract as `_item_signals`: only non-empty entries, so a missing KEY means clean while a
+    missing MAP means nobody looked.
+    """
     from .signals import _scan_text     # local import: keeps drift's module graph acyclic
 
     out: dict[str, list[str]] = {}
-    for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
-        for it in items:
-            ident = it.get("name") or it.get("uri") or "?"
-            key = f"{kind}.{ident}"
-            if found := _scan_text(it.get("description") or "", key):
-                out[key] = sorted({f.kind for f in found})
+    for it in items or ():
+        if not isinstance(it, dict):
+            continue
+        ident = it.get("name") or it.get("uri") or "?"
+        key = f"{kind}.{ident}"
+        if found := _scan_text(it.get("description") or "", key):
+            out[key] = sorted({f.kind for f in found})
     return out
 
 

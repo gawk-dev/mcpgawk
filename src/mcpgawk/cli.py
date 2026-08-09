@@ -76,7 +76,11 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     VISIBLE, so the summary can never imply coverage it doesn't have."""
     if args.stdio:
         parts = shlex.split(args.stdio)
-        entry = {"command": parts[0], "args": parts[1:]}
+        # An mcp.json entry is heterogeneous by definition — a command string beside an args list,
+        # or a url beside a headers mapping. Declared once here so the http branch below is the same
+        # variable and the same shape, rather than mypy inferring `Sequence[str]` from whichever
+        # branch it saw first and then rejecting the other one's headers dict.
+        entry: dict[str, Any] = {"command": parts[0], "args": parts[1:]}
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}, []
     if args.http or args.sse:
         url = args.http or args.sse
@@ -808,6 +812,12 @@ def _protect() -> int:
                 choice = protect.REMOTE_ONLY
             else:
                 protect.save_consent(choice)
+        else:
+            # No local servers, so there is nothing to ask about — but the answer must still be
+            # SAID. Leaving it None let a "no consent recorded" value flow into code that only ever
+            # compares against LAUNCH_ALL: it happens to behave like remote-only today, and would
+            # diverge silently the moment anything compared against REMOTE_ONLY instead.
+            choice = protect.REMOTE_ONLY
     if choice == protect.LAUNCH_ALL:
         scan_args.append("--yes")
         # We just asked, with more detail than the scan's own gate gives. Tell it not to ask again.
@@ -1013,10 +1023,15 @@ def main(argv: list[str] | None = None) -> int:
     # is how a bare `mcpgawk` came to look like it hung in total silence while it had in fact
     # printed the banner and the entire scan table: 3376 bytes, sitting in an 8 KiB buffer that
     # was never flushed. Work done but not shown is indistinguishable from work not done.
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except (AttributeError, ValueError):  # a replaced/detached stdout (tests, embedding)
-        pass
+    # `reconfigure` is TextIOWrapper-only: a replaced or detached stdout (tests, embedding) may not
+    # have it at all. Asked for by name rather than caught after the fact, so the absence is a
+    # branch the reader and the type checker can both see.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(line_buffering=True)
+        except ValueError:                # a detached buffer — nothing to line-buffer
+            pass
 
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw or raw[0] != "scan":
