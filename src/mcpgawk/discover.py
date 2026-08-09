@@ -317,7 +317,7 @@ def _toml_loads(text: str) -> dict[str, Any] | None:
         import tomllib as _toml
     except ImportError:                       # pragma: no cover - 3.10 only
         try:
-            import tomli as _toml             # type: ignore[no-redef]
+            import tomli as _toml             # type: ignore[no-redef,import-not-found]  # 3.10 only
         except ImportError:
             return None
     try:

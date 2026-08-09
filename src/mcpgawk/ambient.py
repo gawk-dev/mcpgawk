@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -75,7 +76,7 @@ def detect_ambient(home: Path | None = None, environ: dict[str, str] | None = No
     """Enumerate inheritable credential sources. Pure and injectable, so it is testable without
     touching the real home directory of whoever runs the tests."""
     home = home or Path.home()
-    environ = os.environ if environ is None else environ
+    env: Mapping[str, str] = os.environ if environ is None else environ
 
     files: list[tuple[str, str]] = []
     for rel, grants in CREDENTIAL_FILES:
@@ -88,7 +89,7 @@ def detect_ambient(home: Path | None = None, environ: dict[str, str] | None = No
 
     # Sorted so two runs of the same machine produce the same report; an inventory that reshuffles
     # cannot be diffed, and diffing is the point.
-    env_names = sorted(k for k in environ if _CREDENTIAL_NAME.search(k))
+    env_names = sorted(k for k in env if _CREDENTIAL_NAME.search(k))
     return AmbientExposure(files=files, env_names=env_names)
 
 

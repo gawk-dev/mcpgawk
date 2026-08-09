@@ -255,13 +255,14 @@ def list_runs(*, kind: str | None = None, limit: int = 100, since: str | None = 
               path: str | None = None) -> list[Run]:
     """Most recent first. The timeline's read path."""
     sql = "select * from runs"
-    where, args = [], []
+    where: list[str] = []
+    args: list[Any] = []          # query parameters: strings here, an int for the limit below
     if kind:
         where.append("kind=?")
         args.append(kind)
     if since:
         where.append("started_at>=?")
-        args.append(since)
+        args.append(since)   # `args` carries whatever the placeholders take — the limit below is an int
     if where:
         sql += " where " + " and ".join(where)
     sql += " order by started_at desc limit ?"

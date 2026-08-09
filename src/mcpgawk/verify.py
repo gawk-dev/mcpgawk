@@ -83,6 +83,12 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
     if reason is not None:
         return 3, f"mcpgawk verify: {reason}"
     node = find_node()
+    if node is None:
+        # `unavailable_reason` above already looks for Node, but it calls `find_node` separately —
+        # so this is a second lookup, and only this one's result is handed to subprocess. Passing
+        # None as argv[0] raises a TypeError from deep inside subprocess instead of the actionable
+        # sentence the caller is built to print.
+        return 3, f"mcpgawk verify: {install_hint()}"
     cli_js = resolve_cli_js()
     try:
         proc = subprocess.run([node, str(cli_js), *argv], env={**os.environ}, timeout=timeout,
@@ -148,6 +154,8 @@ def run(argv: list[str], timeout: float | None = None) -> int:
     # timeout or a Ctrl-C left the engine reparented to PID 1, still launching containers, still
     # writing into ~/.gawk/verify-runs, indefinitely. Observed live: two orphans and four
     # containers survived their parents by minutes and had to be killed by hand.
+    if node is None:                       # same second-lookup gap as `run` above
+        return 3
     proc = subprocess.Popen([node, str(cli_js), *argv], env={**os.environ}, start_new_session=True)
 
     def _kill_the_whole_group() -> None:

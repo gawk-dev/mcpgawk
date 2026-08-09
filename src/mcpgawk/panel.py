@@ -549,7 +549,8 @@ def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
     for tool in current:
         name = bare(tool)
         joined.add(name)
-        ann = annotations.get(tool) if isinstance(annotations.get(tool), dict) else {}
+        _ann = annotations.get(tool)
+        ann: dict[str, Any] = _ann if isinstance(_ann, dict) else {}
         ro = ann.get("readOnlyHint")
         # Report the STRONGEST thing the server said, not a flattened version of it. kite declares
         # all 22 of its tools `readOnlyHint: false` AND `destructiveHint: true` — including
@@ -562,7 +563,8 @@ def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
             declared = "destructive" if ann.get("destructiveHint") is True else "writes"
         else:
             declared = "undeclared"
-        sig = obs.get(name) if isinstance(obs.get(name), dict) else {}
+        _sig = obs.get(name)
+        sig: dict[str, Any] = _sig if isinstance(_sig, dict) else {}
         seen = [k for k in ("source", "sink") if sig.get(k) is True]
         rows.append({
             "tool": name,
@@ -590,7 +592,8 @@ def sessions_summary(rows: list[dict]) -> list[dict]:
     for r in rows:
         if not isinstance(r, dict) or not r.get("server"):
             continue
-        sid = r.get("session") if isinstance(r.get("session"), str) else "(no identity)"
+        _sid = r.get("session")
+        sid: str = _sid if isinstance(_sid, str) else "(no identity)"
         s = by.setdefault(sid, {"session": sid, "calls": 0, "denied": 0,
                                 "servers": set(), "agents": {}, "first": None, "last": None})
         s["calls"] += 1
@@ -1658,7 +1661,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     if any(st.get("state") != "done" for st in _steps):
         _items = []
         for i, st in enumerate(_steps, 1):
-            _mark = {"done": "✓", "now": str(i), "todo": "·"}.get(st.get("state"), str(i))
+            _mark = {"done": "✓", "now": str(i), "todo": "·"}.get(str(st.get("state") or ""), str(i))
             _probs = ""
             if st.get("problems"):
                 _probs = ('<span class="dim"> — ' + _esc("; ".join(st["problems"][:2])) + '</span>')
@@ -2200,8 +2203,12 @@ def state() -> dict[str, Any]:
         "servers": items,
         "tiers": [{"id": t, "label": lbl, "why": why} for t, lbl, why in TIERS],
         "counts": {t: sum(1 for i in items if i["tier"] == t) for t, _, _ in TIERS},
-        "agents": [{"label": lbl, "state": st, "servers": n, "detail": det}
-                   for lbl, st, n, det in _agent_rows(d)],
+        # FIVE values: `_agent_rows` yields (client_key, label, state, count, detail). Unpacking
+        # four raised ValueError on any machine that has an agent at all — which is every machine
+        # this payload is for. The client key is carried rather than dropped: it is what a Protect
+        # action has to send back, and labels are display-only.
+        "agents": [{"client": client, "label": lbl, "state": st, "servers": n, "detail": det}
+                   for client, lbl, st, n, det in _agent_rows(d)],
         "activity": d.get("activity") or {},
         "series": [by_hour[k] for k in sorted(by_hour)][-24:],
         "calls": [{k: c.get(k) for k in ("ts", "decision", "server", "tool", "adapter", "basis")}
@@ -3536,7 +3543,8 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
             function that runs a whole fleet verify is one that cannot be tested — which is how
             "clean - 0 tool(s)" shipped.
             """
-            o = ran_map.get(n) if isinstance(ran_map.get(n), dict) else {}
+            _o = ran_map.get(n)
+            o: dict[str, Any] = _o if isinstance(_o, dict) else {}
             return verify_verdict(
                 checked=o.get("toolsChecked") or 0,
                 skipped=list(o.get("skipped") or []),

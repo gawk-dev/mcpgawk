@@ -223,13 +223,13 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
         out.append("      distinguished from 'nothing was watched'. Use your agent once.")
     try:
         from . import spool as _spool
-        health = _spool.recorder_health()
+        recorder = _spool.recorder_health()
     except Exception:                              # noqa: BLE001 - status must always render
-        health = None
-    if health:
+        recorder = None
+    if recorder:
         # The recorder's own honesty: a failure note means the counts above may be incomplete,
         # and an absence of rows may be the recorder failing rather than a quiet machine.
-        out.append(f"      ⚠ RECORDER FAILURE at {health.get('ts')}: {health.get('reason')}")
+        out.append(f"      ⚠ RECORDER FAILURE at {recorder.get('ts')}: {recorder.get('reason')}")
         out.append("        the counts above may be incomplete — absence of rows is not quiet")
 
     out += ["", f"  Last run: {last_activity or 'nothing recorded yet'}", ""]

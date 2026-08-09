@@ -210,7 +210,8 @@ def _kind_of(exc: BaseException, status: int | None = None) -> str:
         # 401/403 is the endpoint telling us it IS there and we are not allowed in. Reporting that
         # as "not an MCP endpoint" sends the user to check their URL when the real fix is a token —
         # observed live against a real hosted server, which is why this case is split out.
-        if exc.response is not None and exc.response.status_code in (401, 403):
+        response = getattr(exc, "response", None)
+        if response is not None and getattr(response, "status_code", None) in (401, 403):
             return "auth-required"
         return "not-an-mcp-endpoint"
     # Nothing in the exception, but the transport SAW a refusal (see `_status_recorder`). Only
@@ -427,7 +428,11 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
 
     # One attempt per LINE: httpx errors carry a "For more information check: <mdn url>" second line
     # that turns a 5-attempt ladder into an unreadable wall. Collapse each to a single line.
-    lines = [f"  - {label}: {' '.join(snap.error.split())}" for label, snap in attempts]
+    # `or ""` is not defensive noise: this runs only when everything already failed, and an
+    # attempt that somehow carries no message must not turn a readable failure ladder into an
+    # AttributeError on the one path the user is relying on for an explanation.
+    lines = [f"  - {label}: {' '.join((snap.error or 'no detail').split())}"
+             for label, snap in attempts]
     if skipped:
         why = ("endpoint found, it needs credentials" if kind == "auth-required"
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")

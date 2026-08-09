@@ -352,7 +352,9 @@ def locked(path: str | None = None):
         except (ImportError, AttributeError, OSError):
             try:
                 import msvcrt
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                # Windows-only module: a checker running on POSIX sees no attributes on it at all,
+                # which is the same fact this branch already exists to handle.
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)   # type: ignore[attr-defined]
             except Exception:      # noqa: BLE001 — no lock available; proceed unserialised
                 pass
         yield

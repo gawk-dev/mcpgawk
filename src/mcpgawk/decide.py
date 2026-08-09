@@ -183,7 +183,25 @@ font-size:15px}}
 </div></body></html>"""
 
 
+class _DecideServer(ThreadingHTTPServer):
+    """The local server, with the two things the handler reads off it declared rather than bolted
+    on at runtime. They were assigned onto a stock `ThreadingHTTPServer` behind two
+    `type: ignore[attr-defined]`s, so nothing checked that the handler and the setup agreed about
+    their names — a rename on one side would have failed at request time, on the page that carries
+    the auth token."""
+
+    token: str = ""
+    note: str = ""
+
+
 class _Handler(BaseHTTPRequestHandler):
+    def _decide_server(self) -> "_DecideServer":
+        """`self.server` is typed as the stdlib's `BaseServer`; this one always IS a
+        `_DecideServer`, and saying so once is what lets every read of `token`/`note` below be
+        checked instead of each one carrying its own suppression."""
+        assert isinstance(self.server, _DecideServer)
+        return self.server
+
     server_version = "mcpgawk"
 
     def log_message(self, *_args):          # noqa: D102 - silence per-request stdout noise
@@ -237,8 +255,9 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         """
         store = history.load(history.default_path())
         q = parse_qs(urlparse(self.path).query)
-        shown = (self.server.token
-                 if secrets.compare_digest((q.get("t") or [""])[0], self.server.token) else "")
+        server = self._decide_server()
+        shown = (server.token
+                 if secrets.compare_digest((q.get("t") or [""])[0], server.token) else "")
         self._send(200, render_page(pending_decisions(store), shown,
                                     getattr(self.server, "note", "")))
 
@@ -253,7 +272,7 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
 
         # THE GATE. Without this, an agent with a shell approves its own unblocking by POSTing to
         # localhost — undoing baseline.approval_blocked_reason entirely.
-        if not secrets.compare_digest(form.get("token", ""), self.server.token):
+        if not secrets.compare_digest(form.get("token", ""), self._decide_server().token):
             self._refuse()
             return
 
@@ -265,11 +284,11 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
                     if rec else f"Nothing recorded for {key} yet — scan it first.")
         elif action == "keep":
             note = "Left blocked. Your agents still cannot call it."
-        self.server.note = note
+        self._decide_server().note = note
         # Carry the token back: without it the human lands on the read view and the remaining
         # decisions become unclickable after the first approval.
         self.send_response(303)
-        self.send_header("Location", f"/?t={quote(self.server.token)}")
+        self.send_header("Location", f"/?t={quote(self._decide_server().token)}")
         self.end_headers()
 
 
@@ -284,9 +303,9 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
         return 4
 
     token = secrets.token_urlsafe(24)
-    httpd = ThreadingHTTPServer((HOST, port), _Handler)
-    httpd.token = token                     # type: ignore[attr-defined]
-    httpd.note = ""                         # type: ignore[attr-defined]
+    httpd = _DecideServer((HOST, port), _Handler)
+    httpd.token = token
+    httpd.note = ""
     # The FULL token. A 6-char prefix authorised nothing, which is why the real one had to be
     # baked into every served page for the form to work — and that is how it leaked to any local
     # reader. In the URL it stays where this comment always claimed: the terminal and the browser.

@@ -613,13 +613,13 @@ def render(name: str, r: DriftReport) -> str:
         # CLAIMS it will do. Both were previously invisible unless the prose happened to change too.
         for key in [k for k in r.schema_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
-            gained, lost = r.gained_params(key), r.lost_params(key)
-            detail = ""
-            if gained:
-                detail += f" — gained parameter(s): {', '.join(gained)}"
-            if lost:
-                detail += f" — removed: {', '.join(lost)}"
-            lines.append(f"        ! {kind} input schema CHANGED: {short}{detail}")
+            added_params, dropped_params = r.gained_params(key), r.lost_params(key)
+            params = ""
+            if added_params:
+                params += f" — gained parameter(s): {', '.join(added_params)}"
+            if dropped_params:
+                params += f" — removed: {', '.join(dropped_params)}"
+            lines.append(f"        ! {kind} input schema CHANGED: {short}{params}")
         for key in [k for k in r.annotation_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
             esc = r.escalations(key)

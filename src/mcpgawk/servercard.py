@@ -55,7 +55,7 @@ def compare_to_reality(card: dict[str, Any], measured_tool_names: list[str]) -> 
     }
     ct = card.get("tools")
     if isinstance(ct, list):
-        declared = sorted({t.get("name") for t in ct if isinstance(t, dict) and t.get("name")})
+        declared = sorted({str(t["name"]) for t in ct if isinstance(t, dict) and t.get("name")})
         real = sorted(set(measured_tool_names))
         undeclared = sorted(set(real) - set(declared))   # present but hidden from the card
         phantom = sorted(set(declared) - set(real))       # claimed but not actually present

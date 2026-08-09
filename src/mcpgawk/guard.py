@@ -36,7 +36,7 @@ import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:                     # Python 3.10: tomllib landed in 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
+    import tomli as tomllib  # type: ignore[no-redef,import-not-found]  # 3.10 only, unstubbed
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +137,9 @@ _HOOK_CMD = re.compile(r'^"([^"]+)" "([^"]+)"')
 def _still_runs(command: str) -> bool:
     """True if the hook command's interpreter AND script both still exist on disk."""
     m = _HOOK_CMD.match(command)
-    return bool(m) and Path(m.group(1)).is_file() and Path(m.group(2)).is_file()
+    if m is None:
+        return False
+    return Path(m.group(1)).is_file() and Path(m.group(2)).is_file()
 
 
 def _pretooluse_groups(settings: dict[str, Any]) -> list[dict[str, Any]]:

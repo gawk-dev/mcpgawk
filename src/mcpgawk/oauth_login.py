@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from pydantic import AnyUrl
 from mcp.client.auth import OAuthClientProvider
 from mcp.shared.auth import (
     AuthorizationCodeResult,
@@ -89,8 +90,10 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             qs = parse_qs(urlparse(self.path).query)
-            captured["code"] = (qs.get("code") or [None])[0]
-            captured["state"] = (qs.get("state") or [None])[0]
+            # A cancelled or malformed callback has no code. Recorded as EMPTY, not None: the
+            # waiter checks for a value, and an absent one must read as "no code came back".
+            captured["code"] = (qs.get("code") or [""])[0]
+            captured["state"] = (qs.get("state") or [""])[0]
             body = (b"<html><body style='font:16px system-ui;padding:3rem'>"
                     b"<h2>Sign-in complete.</h2><p>You can close this tab and return to your terminal.</p>"
                     b"</body></html>")
@@ -110,7 +113,7 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     client_metadata = OAuthClientMetadata(
-        redirect_uris=[redirect_uri],
+        redirect_uris=[AnyUrl(redirect_uri)],
         token_endpoint_auth_method="none",              # public client + PKCE
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],

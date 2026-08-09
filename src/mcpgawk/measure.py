@@ -158,7 +158,11 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
     # name+description identical, so the old name+description-only pin missed it; this does not.
     pin = surface_pin(snap.tools)
     m = Measurement(
-        tokenizer=tokenizer_name, total_tokens=total, tool_count=len(tools), tools=tools,
+        # A Measurement always NAMES its tokenizer: token counts are only comparable within one,
+        # and `drift` refuses to compare a delta across two. "unknown" is a real answer here — a
+        # caller that passed an encoder without naming it — and it is a visibly wrong one, which is
+        # the point: silently storing None would make the comparison look valid.
+        tokenizer=tokenizer_name or "unknown", total_tokens=total, tool_count=len(tools), tools=tools,
         integrity_pin=pin, prompt_count=len(snap.prompts), resource_count=len(snap.resources))
     if snap.error:
         m.is_failure = True

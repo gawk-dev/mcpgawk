@@ -97,13 +97,15 @@ def _live_server(tmp_path, monkeypatch):
     rendered HTML proved nothing: deleting the token check entirely left every HTML-level
     assertion green, because the form still contained a token nobody verified."""
     import threading
-    from http.server import ThreadingHTTPServer
 
     store_path = tmp_path / "history.json"
     store_path.write_text(json.dumps(_store()), encoding="utf-8")
     monkeypatch.setenv("MCPGAWK_HISTORY", str(store_path))
 
-    httpd = ThreadingHTTPServer((decide.HOST, 0), decide._Handler)
+    # The PRODUCT's server class, not a stock ThreadingHTTPServer standing in for it. `token` and
+    # `note` used to be bolted onto whatever object the caller happened to pass, so a test could
+    # exercise a shape the shipped command never builds.
+    httpd = decide._DecideServer((decide.HOST, 0), decide._Handler)
     httpd.token = "GOOD-TOKEN"
     httpd.note = ""
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
