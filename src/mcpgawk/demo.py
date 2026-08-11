@@ -248,7 +248,11 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             _note(_c("2", "\nsandbox deleted (--clean)."))
         else:
             print(_c("2", f"\nSandbox kept at {root}"))
-            _note(_c("2", f"inspect it, or remove it with:  rm -r {root}"))
+            # Name the FLAG first, not a raw `rm -r`. The beta guide tells testers `--clean` is how
+            # this goes away, and handing a stranger an `rm -r` with an interpolated path as the
+            # headline instruction is both inconsistent with that and a worse habit to teach.
+            _note(_c("2", "inspect it, or run `mcpgawk demo --clean` to do this again and clean up"))
+            _note(_c("2", f"after itself. To remove just this one:  rm -r {root}"))
 
 
 def _fail(what: str, proc: subprocess.CompletedProcess) -> int:
