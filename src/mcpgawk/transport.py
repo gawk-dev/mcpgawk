@@ -43,7 +43,18 @@ class Candidate:
 
     @property
     def label(self) -> str:
-        return f"{self.transport} {self.url}"
+        """For DISPLAY, so the credential comes out here rather than at each consumer.
+
+        A configured URL routinely carries the key in its query string — `?apiKey=…` is how several
+        hosted MCP servers authenticate — and this label is echoed verbatim into the failure ladder
+        that `--json` prints. Measured 2026-08-11 against a canary: `scan --json` emitted the key
+        twice, in `detail` and in the caveat, while the human report and the store were clean. The
+        redactor already existed and this path simply did not call it; masking at the label fixes
+        every consumer at once instead of one at a time.
+        """
+        from .redact import redact_url
+
+        return f"{self.transport} {redact_url(self.url) or self.url}"
 
 
 def _strip_known_suffix(path: str) -> str:

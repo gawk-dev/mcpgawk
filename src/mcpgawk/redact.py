@@ -19,6 +19,7 @@ does the persisting.
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 PLACEHOLDER = "[REDACTED]"
 
@@ -76,3 +77,35 @@ def redact(text: str | None) -> str | None:
 def contains_secret(text: str | None) -> bool:
     """True when `text` still looks like it carries a credential. For assertions and tests."""
     return text is not None and any(p.search(text) for p in _ALL)
+
+
+#: Query-parameter NAMES whose value is a credential. Matched loosely on purpose: a URL is written
+#: by whoever configured the server, and `apiKey`, `api_token`, `access_key` and `sig` are all in the
+#: wild. Over-masking a display string costs nothing; under-masking prints a live key.
+_SECRET_PARAM = re.compile(r"(key|token|secret|pass|pwd|auth|sig|credential)", re.I)
+
+
+def redact_url(url: str | None) -> str | None:
+    """Mask secret-looking query-string values and any userinfo in a URL, for DISPLAY only. Returns
+    the URL unchanged when there is nothing sensitive. The un-redacted URL is kept on `FleetRow.url`
+    (for the in-process auth flow) and in the launch `spec` (server-side, for verify)."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:  # user:pass@host
+        creds, host = netloc.rsplit("@", 1)
+        user = creds.split(":", 1)[0]
+        netloc = f"{user}:***@{host}" if ":" in creds else f"***@{host}"
+        changed = True
+    query = parts.query
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if pairs:
+        masked = [(k, "***" if (v and _SECRET_PARAM.search(k)) else v) for k, v in pairs]
+        if masked != pairs:
+            query, changed = urlencode(masked, safe="*"), True
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url

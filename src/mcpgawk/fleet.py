@@ -14,44 +14,17 @@ here is a function of the labels, so the states a user sees are directly testabl
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .ambient import detect_ambient, summarize
+from .redact import redact_url
 from .probe import _missing_program
 
 #: Query-param names whose VALUE is a credential — masked before a URL is ever displayed. A security
 #: tool that renders a live API key in its own fleet view (screenshots, screen-shares) is the wrong
 #: look; the real URL still lives in the server's launch spec (server-side) for verify/auth.
-_SECRET_PARAM = re.compile(r"(key|token|secret|pass|pwd|auth|sig|credential)", re.I)
 
-
-def redact_url(url: str | None) -> str | None:
-    """Mask secret-looking query-string values and any userinfo in a URL, for DISPLAY only. Returns
-    the URL unchanged when there is nothing sensitive. The un-redacted URL is kept on `FleetRow.url`
-    (for the in-process auth flow) and in the launch `spec` (server-side, for verify)."""
-    if not url:
-        return url
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    changed = False
-    netloc = parts.netloc
-    if "@" in netloc:  # user:pass@host
-        creds, host = netloc.rsplit("@", 1)
-        user = creds.split(":", 1)[0]
-        netloc = f"{user}:***@{host}" if ":" in creds else f"***@{host}"
-        changed = True
-    query = parts.query
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    if pairs:
-        masked = [(k, "***" if (v and _SECRET_PARAM.search(k)) else v) for k, v in pairs]
-        if masked != pairs:
-            query, changed = urlencode(masked, safe="*"), True
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url
 
 #: The states a server can be in, in the order a human should deal with them. Ordering is a product
 #: decision, not cosmetics: the things that BLOCK a scan (needs credentials, unreachable) come before

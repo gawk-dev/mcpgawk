@@ -212,6 +212,36 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         history.save(store, p)
 
 
+def record_observed(key: str, *, pin: str, tools: dict[str, str], measured_at: str,
+                    alias: str | None = None, path: str | None = None,
+                    annotations: dict[str, dict[str, Any]] | None = None) -> None:
+    """Record a server we MEASURED, without claiming anybody approved it.
+
+    UNGATED, deliberately, and the distinction from `publish` is the whole point of having two
+    functions. `publish` MOVES a trusted baseline — a human decision, and gated as one. This records
+    a sighting: `history.record` adopts a first sighting as the baseline (trust on first use, the
+    same thing `scan --track` has always done) and leaves an existing approved record exactly where
+    it is. Nothing here can overwrite a decision a person already made.
+
+    WHY IT EXISTS. Monitoring discovered a server, registered it, baselined it in its own store and
+    verified it — and wrote nothing here. So `policy_from_baseline` found nothing approved, returned
+    None, and enforcement fell back to deriving policy from the annotations the SERVER declares
+    about itself: trusting the subject, which is exactly what deriving from an approved baseline
+    exists to avoid. An automatically-discovered server was therefore the LEAST governed one on the
+    machine, which is the opposite of what a person would assume.
+
+    `annotations` is passed only when they were genuinely measured. Absent means "nobody looked",
+    and `annotations_recorded` reads that difference to refuse building a policy rather than
+    granting every tool the unguarded scope — writing `{}` to look tidy would re-open that hole.
+    """
+    from . import drift  # noqa: F401  — kept out of module import time; history is the writer
+
+    rec: dict[str, Any] = {"pin": pin, "tools": dict(tools), "measured_at": measured_at}
+    if annotations is not None:
+        rec["annotations"] = {f"tool.{name}": dict(ann) for name, ann in annotations.items()}
+    history.record(key, rec, path=path, alias=alias)
+
+
 def resolve(name: str, path: str | None = None) -> str | None:
     """Map a name the user typed to the key the baseline is stored under.
 
