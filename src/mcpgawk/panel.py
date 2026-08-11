@@ -2300,7 +2300,48 @@ def _build_identity() -> tuple[str, str]:
 _CODE_AT, _STARTED = _build_identity()
 
 
-_ACTION: dict[str, Any] = {"running": False, "label": "", "message": "", "rows": [], "at": ""}
+class _ActionState(dict):
+    """The action banner's state, with URL credentials masked ON THE WAY IN.
+
+    A configured server URL can carry its own key (`…/mcp?clientId=…&apiKey=…`, the shape a hosted
+    MCP server actually uses and the shape one server on this machine has). Several action paths
+    echo that URL into a message without meaning to: `subprocess.TimeoutExpired` stringifies to the
+    WHOLE command line, and a sign-in timeout is the expected case, not an exotic one — the OAuth
+    flow waits 330s for a human who may simply walk away. That message is rendered on the page AND
+    persisted to disk by `_persist_action`, so it outlives the terminal.
+
+    The gate is on the WRITE, not on the thirteen callers. A rule that lives in one caller is not a
+    rule — this repo has paid for that shape repeatedly, most recently when the failure ladder
+    printed a key that `redact_url` already knew how to mask. Every `update()` and every item
+    assignment goes through the same scrub, including a state restored from disk, so a future
+    action inherits the redaction without having to remember it.
+    """
+
+    #: Free-text fields a human reads. Masked with `redact_urls_in_text`, which keeps the host and
+    #: the parameter names visible — an operator still has to be able to see WHICH server failed.
+    _TEXT_FIELDS = ("message", "label")
+
+    @staticmethod
+    def _scrub(key: str, value: Any) -> Any:
+        from .redact import redact_urls_in_text
+        if key in _ActionState._TEXT_FIELDS and isinstance(value, str):
+            return redact_urls_in_text(value) or ""
+        if key == "rows" and isinstance(value, list):
+            # Rows carry per-server `detail` and fix text down the same pipe to page and disk.
+            return [{k: (redact_urls_in_text(v) if isinstance(v, str) else v) for k, v in r.items()}
+                    if isinstance(r, dict) else r for r in value]
+        return value
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        super().__setitem__(key, self._scrub(key, value))
+
+    def update(self, *args: Any, **kwargs: Any) -> None:       # type: ignore[override]
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+
+_ACTION: dict[str, Any] = _ActionState(
+    {"running": False, "label": "", "message": "", "rows": [], "at": ""})
 
 
 #: The last completed action, kept ON DISK. `_ACTION` is in-memory, so restarting the panel erased

@@ -109,3 +109,23 @@ def redact_url(url: str | None) -> str | None:
         if masked != pairs:
             query, changed = urlencode(masked, safe="*"), True
     return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url
+
+
+#: A URL sitting inside free prose — an error message, a subprocess's echoed command line, a log
+#: line. Stops at whitespace and at the quote/bracket characters that delimit a URL inside a repr
+#: (`Command '[... 'https://…?apiKey=…', ...]' timed out`), so the mask lands on the URL and not on
+#: the surrounding sentence.
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>)\]}]+")
+
+
+def redact_urls_in_text(text: str | None) -> str | None:
+    """Mask credentials in every URL found inside `text`, leaving the rest of the prose intact.
+
+    `redact()` is the wrong tool for a message a human has to act on: its placeholder swallows the
+    surrounding token, and this module's own doctrine is that over-redaction destroys the evidence
+    the surface exists to show. `redact_url` keeps the host and the parameter names — `apiKey=***`
+    — so an operator can still see WHICH server failed, which is the whole point of the message.
+    """
+    if not text:
+        return text
+    return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)) or m.group(0), text)

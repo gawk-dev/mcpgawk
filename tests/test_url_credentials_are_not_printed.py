@@ -79,3 +79,73 @@ def test_userinfo_credentials_are_masked_too():
 
     masked = redact_url(f"https://user:{CANARY}@mcp.example.invalid/mcp")
     assert masked and CANARY not in masked
+
+
+def test_the_panel_action_banner_masks_a_url_in_a_failure_message(tmp_path, monkeypatch):
+    """The PANEL surface, driven through its real path — 2026-08-11, the second half of this hunt.
+
+    `subprocess.TimeoutExpired` stringifies to the WHOLE command line, so a sign-in that times out
+    put the configured URL — key and all — into the action banner, onto the rendered page and into
+    `~/.gawk/last-action.json`. And a timeout is the EXPECTED case here: the OAuth flow waits 330s
+    for a human who may simply walk away.
+
+    Driven end to end (`_run_action_bg` → `_ACTION` → `render` → the file on disk) rather than by
+    asserting on `run_login`'s return value: the scrub is a gate on the WRITE, so a test that never
+    performs the write would pass with the gate removed.
+    """
+    import subprocess
+    import sys
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"wrapped": {"command": "npx", "args": ["-y", "mcp-remote", URL]}}}),
+        encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    from mcpgawk import panel
+
+    def times_out(url: str, flag: str = "--http"):
+        raise subprocess.TimeoutExpired(
+            cmd=[sys.executable, "-m", "mcpgawk", "scan", flag, url, "--login"], timeout=330)
+
+    monkeypatch.setattr(panel, "_run_login_cli", times_out)
+    panel._ACTION.update(running=False, label="", message="", rows=[], at="")
+
+    panel._run_action_bg("login", "wrapped")
+    for _ in range(600):
+        if not panel._ACTION["running"]:
+            break
+        time.sleep(0.05)
+    assert not panel._ACTION["running"], "the action never finished"
+
+    action = dict(panel._ACTION)
+    message = action["message"]
+    assert CANARY not in message, f"the banner carries the key: {message}"
+    assert "apiKey=***" in message, f"masked, but not recognisably: {message}"
+    assert "wrapped" in message, "over-masked: the operator can no longer tell WHICH server failed"
+
+    page = panel.render(panel.collect(), token="t", action=action)
+    assert CANARY not in page, "the rendered page printed the key"
+
+    store = panel._action_store()
+    assert store.is_file(), "sanity: the action was persisted, so the disk assert is not vacuous"
+    assert CANARY not in store.read_text(encoding="utf-8"), "the key outlived the terminal"
+
+
+def test_every_action_write_goes_through_the_scrubbing_gate():
+    """A rot check that enumerates the WRITERS, not just the one in front of it.
+
+    Thirteen call sites update the action state. The gate lives on `_ActionState`, so it covers
+    them all — but only for as long as nobody swaps the state back to a plain dict or writes past
+    it. This asserts the property that makes the gate hold, rather than re-testing one caller.
+    """
+    from mcpgawk import panel
+
+    assert isinstance(panel._ACTION, panel._ActionState)
+    probe = panel._ActionState()
+    probe.update(message=f"failed: {URL}", label=f"login · {URL}",
+                 rows=[{"detail": f"attempted {URL}"}])
+    probe["message"] = f"assigned directly: {URL}"
+    assert CANARY not in json.dumps(probe), f"a write path skipped the scrub: {probe}"
