@@ -174,6 +174,33 @@ class _Sandbox:
             env=self.env(), cwd=self.root, text=True, capture_output=True, timeout=60)
 
 
+def _real(out: str, *, keep: tuple[str, ...] = (), limit: int = 14) -> None:
+    """Print what mcpgawk ITSELF said, verbatim.
+
+    The acts below already run the shipped CLI and the real guard hook, and already abort if the
+    real thing does not do the real thing. But `capture_output` meant the evidence was checked and
+    then thrown away, so the screen showed only OUR summary of it — and a viewer cannot tell a tool
+    that detected something from a script that printed a sentence claiming it did. The proof existed
+    and was binned. It is shown now, indented and labelled as the tool's own words.
+    """
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if keep:
+        picked, hit = [], False
+        for ln in lines:
+            if any(k.lower() in ln.lower() for k in keep):
+                hit = True
+            if hit:
+                picked.append(ln)
+        lines = picked or lines
+    if not lines:
+        return
+    print(_c("2", "      ─ mcpgawk's own output ─"))
+    for ln in lines[:limit]:
+        print("      " + ln)
+    if len(lines) > limit:
+        print(_c("2", f"      … {len(lines) - limit} more line(s)"))
+
+
 def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
     # The demo is a scripted walkthrough; the CLI's own "a newer build is out" nag would print
     # after the closing line and undercut it. The sandbox subprocesses already suppress it; this
@@ -200,6 +227,7 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             return _fail("the initial scan did not complete", r)
         _note(f"found and measured 1 local server: {_c('1', SERVER)} "
               f"(tool: {', '.join(box.approved_tools())}). Clean — nothing alarming yet.")
+        _real(r.stdout, keep=(SERVER,), limit=8)
 
         _act(2, "You approve it — this becomes the trusted baseline")
         r = box.cli("approve", SERVER)
@@ -220,6 +248,7 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             return _fail("the drifted scan did not report drift", r)
         _note(_c("31", "DRIFT raised: read_notes changed after approval, and its new description "
                        "trips an injection signature. Baseline stays put until a human approves."))
+        _real(r.stdout, keep=("DRIFT",), limit=16)
         if box.approved_tools() != ["read_notes"]:
             return _fail("the baseline moved without an approve", r)
 
@@ -234,7 +263,7 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             return _fail("the guard did NOT block the tool that appeared after approval", blocked)
         reason = json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
         _note(f"call to new {_c('1', 'exfiltrate_notes')}: {_c('31', 'BLOCKED')}.")
-        _note(_c("2", "  " + reason.splitlines()[0]))
+        _real(reason, limit=8)
 
         print(_c("1", "\n✓ That is the whole product in one run:") +
               " discover, measure, approve, detect drift, block the tool that arrived after you\n"
