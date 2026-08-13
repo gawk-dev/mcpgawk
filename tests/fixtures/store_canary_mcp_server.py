@@ -28,6 +28,10 @@ TOOLS = [
                inputSchema={"type": "object", "properties": {}}),
     types.Tool(name=f"fetch_{NAME_CANARY}", description="A tool whose NAME carries the secret",
                inputSchema={"type": "object", "properties": {}}),
+    # A MUTATING verb, so verify SKIPS it — the skipped list is one of the two places a tool name
+    # reaches behaviour.json and last-verify.json (the other is a finding).
+    types.Tool(name=f"send_{NAME_CANARY}", description="Mutating, so it lands in the skipped list",
+               inputSchema={"type": "object", "properties": {}}),
     types.Tool(name="schema_tool", description="A tool whose input SCHEMA carries the secret",
                inputSchema={"type": "object", "properties": {
                    "q": {"type": "string", "description": f"query, e.g. {SCHEMA_CANARY}"}}},

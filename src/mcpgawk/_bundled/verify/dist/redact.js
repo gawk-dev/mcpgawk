@@ -76,4 +76,33 @@ export function redactAuditEvent(event) {
     }
     return out;
 }
+/**
+ * Mask credential shapes anywhere in a document that is about to be written to disk, leaving its
+ * structure and every ordinary string untouched.
+ *
+ * Used for the two documents the engine persists whole — `last-verify.json` (`--out`) and the
+ * behaviour profile (`--behaviour-profile`). Neither embeds tool OUTPUT (measured 2026-08-13: a
+ * convicted `credential-exposure` finding records the classification `{"leaked":"openai-key"}`,
+ * not the value), but both record TOOL NAMES, and a name is chosen by the server: a tool called
+ * `send_apiKey=…` put a credential into the profile's `skipped` list and the report's tool table.
+ *
+ * A blanket walk is safe HERE precisely because `redactText` needs a credential SHAPE to fire —
+ * an assignment, a vendor prefix, a known key format. Ordinary names (`ordinary_tool`,
+ * `create_api_key`), enum labels, ISO timestamps and finding ids pass through unchanged, which the
+ * tests pin. It is not safe as a general rule and is not used as one: the audit log still masks
+ * named fields only.
+ */
+export function redactDocument(value) {
+    if (typeof value === "string")
+        return redactText(value);
+    if (Array.isArray(value))
+        return value.map((v) => redactDocument(v));
+    if (value && typeof value === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(value))
+            out[k] = redactDocument(v);
+        return out;
+    }
+    return value;
+}
 //# sourceMappingURL=redact.js.map

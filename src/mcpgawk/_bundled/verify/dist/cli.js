@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
-import { redactAuditEvent } from "./redact.js";
+import { redactAuditEvent, redactDocument, redactText } from "./redact.js";
 import { buildReport, exitCodeForStatus, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
@@ -205,7 +205,14 @@ licenseOpts = {}) {
             return;
         const snapshot = buildReport(currentReports, new Date().toISOString(), {}, [...currentErrors]);
         const tmpPath = `${outPath}.tmp`;
-        writeFileSync(tmpPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+        // Masked at the write: a TOOL NAME is chosen by the server, and a tool called `send_apiKey=…`
+        // put a credential into this report's tool table (measured 2026-08-13).
+        // 0600, and on the TMP file so the rename carries it: this report names every server on
+        // the machine and every tool they expose. `~/.gawk` is 0700, but a mode on the file
+        // survives a copy and a backup — same finding as `monitor.db` earlier today.
+        writeFileSync(tmpPath, `${JSON.stringify(redactDocument(snapshot), null, 2)}\n`, {
+            mode: 0o600,
+        });
         renameSync(tmpPath, outPath);
     };
     // Partial reports: a server that can't be verified is recorded as an error, not an abort.
@@ -307,7 +314,9 @@ licenseOpts = {}) {
         // Final write: the complete report (drift + suppressions included), replacing the
         // in-progress incremental snapshots.
         const tmpPath = `${outPath}.tmp`;
-        writeFileSync(tmpPath, `${JSON.stringify(report, null, 2)}\n`);
+        writeFileSync(tmpPath, `${JSON.stringify(redactDocument(report), null, 2)}\n`, {
+            mode: 0o600,
+        });
         renameSync(tmpPath, outPath);
     }
     const actionable = report.summary.findings > 0 || drifted;
@@ -379,7 +388,9 @@ licenseOpts = {}) {
         ];
         if (behaviourPath && !targets.includes(behaviourPath))
             targets.push(behaviourPath);
-        const freshProfile = behaviourProfile(report);
+        // Masked BEFORE the merge, not after: the merge compares against what is already on disk, so
+        // masking afterwards would rewrite the file on every run as the two forms disagreed.
+        const freshProfile = redactDocument(behaviourProfile(report));
         const verifiedNames = new Set(report.servers.map((s) => s.server));
         for (const target of targets) {
             const isExplicit = target === behaviourPath;
@@ -395,7 +406,16 @@ licenseOpts = {}) {
                     existing = null; // absent or corrupt — the merge treats both as nothing to retain
                 }
                 const merged = mergeBehaviourProfiles(existing, freshProfile, verifiedNames);
-                writeFileSync(target, `${JSON.stringify(merged, null, 2)}\n`);
+                // 0600 for the same reason as the report. `mode` applies only when the file is NEW, so
+                // a profile written before this fix keeps its 0644 until it is recreated — narrowed
+                // explicitly below rather than left to chance.
+                writeFileSync(target, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+                try {
+                    chmodSync(target, 0o600);
+                }
+                catch {
+                    // a profile we cannot narrow is still a profile — never lose the run over a mode
+                }
                 if (isExplicit)
                     err(`mcpgawk verify: wrote behavioural profile → ${target}`);
             }
@@ -506,7 +526,9 @@ export function printText(report, log) {
         if (s.skipped.length > 0) {
             const shown = s.skipped
                 .slice(0, 8)
-                .map((k) => `${k.tool}(${k.class})`)
+                // A tool NAME is server-chosen, and this line goes to stdout — which lands in CI logs,
+                // pasted issues and uploaded artefacts. Same reason `scan --json` had to be masked.
+                .map((k) => `${redactText(k.tool)}(${k.class})`)
                 .join(", ");
             const more = s.skipped.length > 8 ? `, +${s.skipped.length - 8} more` : "";
             log(`  - skipped ${s.skipped.length} not-read-only tool(s): ${shown}${more}`);
