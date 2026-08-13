@@ -156,7 +156,8 @@ def test_a_refusal_answers_in_the_callers_language(tmp_path, monkeypatch):
         assert "Refused" in body and "Nothing is waiting on you" not in body
         assert len(body) < 1200, "the browser refusal should be small too"
     finally:
-        httpd.shutdown(); httpd.server_close()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_a_request_without_the_token_cannot_approve(tmp_path, monkeypatch):
@@ -169,7 +170,8 @@ def test_a_request_without_the_token_cannot_approve(tmp_path, monkeypatch):
         after = json.loads(store_path.read_text())
         assert history.pending(after) == ["mcp:gitnexus"], "the server was approved anyway"
     finally:
-        httpd.shutdown(); httpd.server_close()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_an_open_read_cannot_harvest_the_token(tmp_path, monkeypatch):
@@ -198,7 +200,8 @@ def test_an_open_read_cannot_harvest_the_token(tmp_path, monkeypatch):
         # ...and the human, arriving on the tokenised URL printed in their terminal, still can.
         assert "GOOD-TOKEN" in _get("/?t=GOOD-TOKEN")
     finally:
-        httpd.shutdown(); httpd.server_close()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_a_wrong_token_cannot_approve(tmp_path, monkeypatch):
@@ -208,7 +211,8 @@ def test_a_wrong_token_cannot_approve(tmp_path, monkeypatch):
                      "token=WRONG&action=approve&key=mcp:gitnexus") == 403
         assert history.pending(json.loads(store_path.read_text())) == ["mcp:gitnexus"]
     finally:
-        httpd.shutdown(); httpd.server_close()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_the_right_token_does_approve(tmp_path, monkeypatch):
@@ -219,7 +223,8 @@ def test_the_right_token_does_approve(tmp_path, monkeypatch):
                      "token=GOOD-TOKEN&action=approve&key=mcp:gitnexus") == 303
         assert history.pending(json.loads(store_path.read_text())) == [], "approval did not land"
     finally:
-        httpd.shutdown(); httpd.server_close()
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_it_refuses_to_start_inside_an_agent_session(monkeypatch):

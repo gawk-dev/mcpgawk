@@ -65,8 +65,8 @@ def test_no_clock_read_in_library(forbid_network):
 # Stronger than a runtime socket probe: proves measure/label/signals/drift/history never even
 # import a network library, so there is no code path by which what they saw could leave the box.
 # Network lives ONLY in probe.py (talks to the scanned server) and servercard.py (public card fetch).
-import ast
-import pathlib
+import ast  # noqa: E402 - import after required path/env setup
+import pathlib  # noqa: E402 - import after required path/env setup
 
 _NETWORK_LIBS = {"httpx", "socket", "urllib", "requests", "aiohttp", "http", "ftplib", "smtplib"}
 
