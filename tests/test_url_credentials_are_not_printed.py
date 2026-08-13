@@ -60,8 +60,15 @@ def test_the_store_on_disk_does_not_contain_the_key(config, tmp_path, monkeypatc
     store = tmp_path / "history.json"
     monkeypatch.setenv("MCPGAWK_HISTORY", str(store))
     cli.main(["scan", str(config), "--track", "--yes"])
-    if store.exists():
-        assert CANARY not in store.read_text(encoding="utf-8")
+    # This asserted NOTHING until 2026-08-13: it was guarded by `if store.exists()`, and an
+    # unreachable server records no baseline, so the guard was never true and the canary was never
+    # checked — the same vacuous shape as two panel passes on 2026-08-11. The honest assertion is
+    # the actual behaviour: a server we could not reach writes no record at all. If that ever
+    # changes, this fails and the credential question has to be asked again rather than skipped.
+    assert not store.exists(), ("an unreachable server now writes a record — re-check whether the "
+                                "configured URL reaches disk")
+    # Store coverage for a server that DOES answer lives in
+    # tests/test_store_redacts_every_server_controlled_field.py, against a live fixture.
 
 
 def test_the_fleet_json_does_not_print_the_key():
