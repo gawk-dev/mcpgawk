@@ -219,13 +219,11 @@ def _mask_ident(ident: str) -> str:
     Idempotent: a masked ident carries no credential shape, so re-masking is a no-op — which is
     what lets this run at both ingress and the write without compounding.
     """
-    from .redact import redact, redact_url
+    from .redact import redact_ident
     kind, _, rest = ident.partition(".")
     if f"{kind}." in _KIND_PREFIX and rest:
         return f"{kind}.{_mask_ident(rest)}"
-    if "://" in ident:
-        return redact_url(ident) or ident
-    return redact(ident) or ident
+    return redact_ident(ident)
 
 
 def redact_record(rec: dict[str, Any]) -> dict[str, Any]:

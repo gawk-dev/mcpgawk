@@ -45,6 +45,12 @@ MAX_BYTES = 5 * 1024 * 1024
 
 SPOOL_ENV = "MCPGAWK_SPOOL"
 
+#: Fields whose values we choose from a closed vocabulary, so no server can reach them.
+_VERBATIM_FIELDS = frozenset({"ts", "decision", "basis", "adapter"})
+
+#: Cached (redact, redact_ident). See `_redactor`.
+_REDACTOR: tuple | None = None
+
 
 def spool_path() -> str:
     return os.environ.get(SPOOL_ENV) or DEFAULT_SPOOL
@@ -58,6 +64,72 @@ def _rotate_if_large(path: str) -> None:
         os.replace(path, path + ".1")
     except OSError:
         pass
+
+
+def _redactor():
+    """The redaction functions, loadable BOTH as a package module and as a bare file.
+
+    `guard_hook` imports this module by absolute path with no parent package (so that importing
+    `mcpgawk/__init__` — and the MCP SDK behind it — never happens in a PreToolUse hook). In that
+    context `from .redact import …` raises ImportError, the hook swallows it, and the spool goes
+    silent: exactly the failure `_load_sibling`'s own docstring records for `runlog`, and exactly
+    what this gate did on its first attempt before it was driven through the real hook.
+
+    So: relative import when there is a package, sibling-by-path when there is not. Cached, because
+    a PreToolUse hook runs on every single tool call.
+    """
+    global _REDACTOR
+    if _REDACTOR is not None:
+        return _REDACTOR
+    try:
+        from .redact import redact, redact_ident
+    except ImportError:                            # no package context — the hook's path
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_mcpgawk_redact", os.path.join(os.path.dirname(os.path.abspath(__file__)), "redact.py"))
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        redact, redact_ident = module.redact, module.redact_ident
+    _REDACTOR = (redact, redact_ident)
+    return _REDACTOR
+
+
+def _redacted(record: dict) -> dict:
+    """Mask credential shapes in one spool record, on the way to disk. Returns a NEW dict.
+
+    The spool's `server` and `tool` come straight off the agent's hook event — `mcp__<server>__<tool>`
+    — so they are SERVER-CONTROLLED, exactly like the item keys that were writing credentials into
+    `history.json` until 2026-08-13. Measured here rather than assumed: driving the real hook with
+    a credential-shaped tool name wrote it to `spool.jsonl` verbatim, and so did the server name,
+    which had been predicted clean on the theory that the name is normalised. It is not; the hook
+    copies what the event carries.
+
+    `redact_ident` needs an assignment shape to fire, so ordinary names (`create_api_key`,
+    `get_token_count`) are untouched — the log stays readable, which is the point of a log. The
+    closed-vocabulary fields (`decision`, `basis`, `adapter`, `ts`) are never rewritten.
+
+    A NEW dict, not in place: the caller may still be using the record (the hook logs its own
+    decision after building it), and a logger must not mutate its caller's data.
+    """
+    loaded = _redactor()
+    if loaded is None:
+        # Neither write the raw value (that is the leak) nor drop the record (that would make
+        # "nothing was watching" indistinguishable from "nothing was blocked" — the ambiguity this
+        # spool exists to remove). Keep the event, lose only the fields we cannot vouch for.
+        return {k: (v if k in _VERBATIM_FIELDS or not isinstance(v, str) else "[unredactable]")
+                for k, v in record.items()}
+    redact, redact_ident = loaded
+    out = {}
+    for key, value in record.items():
+        if not isinstance(value, str) or key in _VERBATIM_FIELDS:
+            out[key] = value
+        elif key == "reason":
+            out[key] = redact(value) or value      # free prose, written by us but not fixed text
+        else:
+            out[key] = redact_ident(value)
+    return out
 
 
 def append(record: dict, path: str | None = None) -> bool:
@@ -74,7 +146,7 @@ def append(record: dict, path: str | None = None) -> bool:
         if directory:
             os.makedirs(directory, mode=0o700, exist_ok=True)
         _rotate_if_large(target)
-        line = json.dumps(record, separators=(",", ":"), default=str) + "\n"
+        line = json.dumps(_redacted(record), separators=(",", ":"), default=str) + "\n"
         # O_APPEND makes the write atomic for a record this size, so two agent sessions writing
         # concurrently interleave whole lines rather than corrupting each other. Opened per call
         # on purpose: the hook is a fresh process, so there is no handle worth keeping.
@@ -98,6 +170,14 @@ def append(record: dict, path: str | None = None) -> bool:
 ERR_SUFFIX = ".err"
 
 
+def _redact_text(value: str) -> str:
+    """Prose redaction for the recorder's own failure note. Same dual-context loader as above —
+    this runs on the path where something has ALREADY gone wrong, so it must not add a second
+    failure."""
+    loaded = _redactor()
+    return (loaded[0](value) or value) if loaded else "[unredactable]"
+
+
 def note_failure(reason: str, path: str | None = None) -> None:
     """Record that the recorder itself failed. NEVER raises; overwrites (last failure wins)."""
     target = (path or spool_path()) + ERR_SUFFIX
@@ -107,7 +187,8 @@ def note_failure(reason: str, path: str | None = None) -> None:
             os.makedirs(directory, mode=0o700, exist_ok=True)
         line = json.dumps({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
-            "reason": str(reason)[:300],
+            # An exception message can carry a path, a URL or the value that failed to serialise.
+            "reason": (_redact_text(str(reason)) or str(reason))[:300],
         }, separators=(",", ":")) + "\n"
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:

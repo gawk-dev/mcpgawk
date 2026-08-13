@@ -2322,13 +2322,27 @@ class _ActionState(dict):
     _TEXT_FIELDS = ("message", "label")
 
     @staticmethod
+    def _mask(text: str) -> str:
+        """URL credentials first, then bare credential shapes.
+
+        Until the 2026-08-13 sweep this masked URLs ONLY. The Playground takes ARGUMENTS typed by
+        the user (`{"token": "sk-live-…"}`) and echoes a parse failure straight into this banner,
+        and a pasted agent key is not a URL — so the one shape a human is most likely to hand the
+        panel was the one shape the gate did not cover.
+
+        Order is load-bearing and safe: `redact_url` leaves `apiKey=***`, which is too short for the
+        prose redactor to re-match, so the readable masked URL survives the second pass.
+        """
+        from .redact import redact, redact_urls_in_text
+        return redact(redact_urls_in_text(text) or "") or ""
+
+    @staticmethod
     def _scrub(key: str, value: Any) -> Any:
-        from .redact import redact_urls_in_text
         if key in _ActionState._TEXT_FIELDS and isinstance(value, str):
-            return redact_urls_in_text(value) or ""
+            return _ActionState._mask(value)
         if key == "rows" and isinstance(value, list):
             # Rows carry per-server `detail` and fix text down the same pipe to page and disk.
-            return [{k: (redact_urls_in_text(v) if isinstance(v, str) else v) for k, v in r.items()}
+            return [{k: (_ActionState._mask(v) if isinstance(v, str) else v) for k, v in r.items()}
                     if isinstance(r, dict) else r for r in value]
         return value
 

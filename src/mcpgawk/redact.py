@@ -129,3 +129,22 @@ def redact_urls_in_text(text: str | None) -> str | None:
     if not text:
         return text
     return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)) or m.group(0), text)
+
+
+def redact_ident(value: str) -> str:
+    """Mask a credential inside an IDENTITY string — a tool name, a server name, a resource URI.
+
+    Identities are server-controlled and they are written to disk as map keys and log fields, where
+    a whole-blob redaction would destroy the very thing the record exists to identify. URL-shaped
+    idents keep their host and parameter names (`redact_url`); everything else goes through the
+    prose redactor, which needs an assignment shape to fire — so an ordinary name like
+    `create_api_key` is left exactly as it is.
+
+    Idempotent: a masked ident carries no credential shape, so re-masking is a no-op. That is what
+    lets the same rule run at more than one boundary without compounding.
+    """
+    if not value:
+        return value
+    if "://" in value:
+        return redact_url(value) or value
+    return redact(value) or value

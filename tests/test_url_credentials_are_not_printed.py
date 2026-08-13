@@ -156,3 +156,29 @@ def test_every_action_write_goes_through_the_scrubbing_gate():
                  rows=[{"detail": f"attempted {URL}"}])
     probe["message"] = f"assigned directly: {URL}"
     assert CANARY not in json.dumps(probe), f"a write path skipped the scrub: {probe}"
+
+
+def test_the_panel_masks_a_bare_credential_not_only_a_url():
+    """A pasted key is not a URL — and the panel takes pasted keys.
+
+    The 2026-08-13 sink sweep found the gate added on 2026-08-11 covered URL credentials ONLY. The
+    Playground form takes ARGUMENTS typed by the user and echoes a JSON parse failure straight into
+    the action banner, which is rendered and persisted — so `{"token": "sk-live-…"}` reached disk.
+    Pinned across all three shapes at once, because masking the new one while breaking the readable
+    URL mask (or mangling an ordinary message) would be a regression, not a fix.
+    """
+    from mcpgawk import panel
+
+    state = panel._ActionState()
+
+    state.update(message='arguments are not a JSON object: {"token": "sk-live-CANARYPLAY98765"}')
+    assert "CANARYPLAY98765" not in state["message"], "a pasted agent key reached the banner"
+
+    state.update(message=f"failed {URL} for server kite")
+    assert CANARY not in state["message"]
+    assert "apiKey=***" in state["message"], "the readable URL mask was lost"
+    assert "kite" in state["message"], "over-masked: the operator cannot tell which server failed"
+
+    ordinary = "sign-in for wrapped did not complete: connection refused"
+    state.update(message=ordinary)
+    assert state["message"] == ordinary, "an ordinary message was mangled"
