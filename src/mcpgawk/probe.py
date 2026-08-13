@@ -102,14 +102,33 @@ def _dump(items: list[Any]) -> list[dict[str, Any]]:
 
 
 async def _snapshot(session: ClientSession, name: str, transport: str) -> ServerSnapshot:
-    init = await session.initialize()
+    # LEGACY FIRST, modern as the fallback — deliberately, and the order matters twice over.
+    # The 2026-07-28 revision replaces `initialize` with a stateless `server/discover`, and the
+    # spec is backward-incompatible BOTH ways: a post-upgrade server may refuse `initialize`
+    # outright (measured 2026-08-13 — before this change such a server scanned as "unreachable",
+    # the exact wrong answer during the upgrade wave). But `server/discover` returns NO serverInfo,
+    # and server IDENTITY — the history key every baseline hangs off — comes from serverInfo. A
+    # discover-first policy silently changed the identity of every dual-mode SDK server and broke
+    # cross-scan continuity (caught by the suite, not by reasoning). So: the legacy handshake wins
+    # whenever the server still speaks it; `discover` is the door for servers that no longer do.
+    protocol_version: str | None
+    server_info: dict[str, Any]
+    try:
+        init = await session.initialize()
+        # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
+        # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
+        protocol_version = init.protocol_version
+        server_info = (init.server_info.model_dump(by_alias=True, mode="json")
+                       if init.server_info else {})
+    except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
+        disc = await session.discover()
+        protocol_version = (disc.supported_versions[0] if disc.supported_versions else None)
+        server_info = {}          # server/discover carries capabilities, not serverInfo
     snap = ServerSnapshot(
         name=name,
         transport=transport,
-        # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
-        # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
-        protocol_version=init.protocol_version,
-        server_info=(init.server_info.model_dump(by_alias=True, mode="json") if init.server_info else {}),
+        protocol_version=protocol_version,
+        server_info=server_info,
     )
     # tools/list is the load-bearing surface; prompts/resources are optional per server.
     snap.tools = _dump((await session.list_tools()).tools)

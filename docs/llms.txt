@@ -1,0 +1,24 @@
+# mcpgawk
+
+> A local-first CLI that measures what an MCP server can actually do (tools, token cost, write and
+> network reach), pins the surface a human approved, detects drift after approval — including a
+> server rug-pulling its own descriptions or growing new tools — and blocks unapproved tools at
+> call time. Behavioural verification runs each server in a sandbox and watches real egress.
+> Nothing leaves the machine. MCP revisions: speaks both the legacy handshake and the 2026-07-28
+> (stateless / server-discover) revision.
+
+Install: `uv tool install mcpgawk` · verify: `mcpgawk --version`
+First run: `mcpgawk` (asks consent before launching local servers)
+Panel: `mcpgawk panel` · Sandbox story: `mcpgawk demo`
+Upgrade audit (MCP 2): `mcpgawk scan --track` before and after upgrading a server; the diff against
+the approved baseline is the audit. `mcpgawk approve <server>` moves the baseline; nothing else does.
+
+## Docs
+- Beta guide: https://mcp.gawk.dev/beta.html
+- PyPI: https://pypi.org/project/mcpgawk/
+- Source (free engine): https://github.com/gawk-dev/mcpgawk
+- Agent skill: https://github.com/gawk-dev/mcpgawk/tree/main/skills/mcpgawk
+
+## Optional
+- VS Code extension: search "mcpgawk" on the Marketplace or Open VSX
+- MCP server mode: `mcpgawk-mcp` (exposes scan_mcp_fleet / scan_mcp_server over MCP)

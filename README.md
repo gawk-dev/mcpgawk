@@ -155,3 +155,15 @@ boundaries in [THREAT-MODEL.md](THREAT-MODEL.md). Security reports go through [S
 
 **Apache-2.0** — see [LICENSE](LICENSE). Part of the **nativerse** · gawk.dev family. The value is in the
 repo, not a cloud.
+
+## Use it from your agent (skill)
+
+Let your coding agent run the checks itself — whenever it adds, upgrades or audits an MCP server:
+
+```bash
+# Claude Code (similar for other agents: copy the folder into their skills directory)
+mkdir -p ~/.claude/skills && cp -r skills/mcpgawk ~/.claude/skills/mcpgawk
+```
+
+The skill teaches the agent to measure a server BEFORE trusting it, audit an MCP-2 upgrade as a
+baseline diff instead of blind re-trust, and relay every consent prompt to you verbatim.
