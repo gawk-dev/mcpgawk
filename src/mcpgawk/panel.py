@@ -876,8 +876,10 @@ def _action_banner(action: dict | None) -> str:
     running = action.get("running")
     banner = ""
     if running:
+        note = action.get("notice") or ""
+        note_html = f'<br><b>{_esc(note)}</b>' if note else ""
         banner = (f'<div class="abanner run">Running {_esc(action.get("label"))}… '
-                  'this can take a minute. This page updates itself.</div>')
+                  f'this can take a minute. This page updates itself.{note_html}</div>')
     elif action.get("message"):
         # The RESULT, per server, on the page. A one-line "done" that points at a terminal is the
         # CLI-only habit this surface replaces: the user must be able to see WHICH server produced
@@ -2319,7 +2321,7 @@ class _ActionState(dict):
 
     #: Free-text fields a human reads. Masked with `redact_urls_in_text`, which keeps the host and
     #: the parameter names visible — an operator still has to be able to see WHICH server failed.
-    _TEXT_FIELDS = ("message", "label")
+    _TEXT_FIELDS = ("message", "label", "notice")
 
     @staticmethod
     def _mask(text: str) -> str:
@@ -2421,9 +2423,16 @@ def _run_action_bg(kind: str, target: str | None = None) -> None:
         _ACTION_LOCK = threading.Lock()
     with _ACTION_LOCK:
         if _ACTION["running"]:
-            return                               # one at a time — a second click is a no-op
+            # One at a time — but NEVER silently. This was a bare `return`, so during a two-minute
+            # scan every other button did nothing with no feedback, which the founder experienced
+            # as "it is running in the background throughout whenever we click on any button"
+            # (2026-08-13). The dropped click is now SAID on the running banner.
+            wanted = f"{kind} · {target}" if target else kind
+            _ACTION.update(notice=f"'{wanted}' not started — waiting for {_ACTION['label']} "
+                                  f"to finish; click again when this banner clears")
+            return
         _ACTION.update(running=True, label=(f"{kind} · {target}" if target else kind),
-                       message="", rows=[], at=_now())
+                       message="", rows=[], notice="", at=_now())
 
     def work():
         try:
@@ -2440,7 +2449,7 @@ def _run_action_bg(kind: str, target: str | None = None) -> None:
         except Exception as exc:                  # noqa: BLE001 — an action must not kill the panel
             msg, rows = f"{type(exc).__name__}: {exc}", []
         with _ACTION_LOCK:
-            _ACTION.update(running=False, message=msg, rows=rows, at=_now())
+            _ACTION.update(running=False, message=msg, rows=rows, notice="", at=_now())
         _persist_action()
 
     threading.Thread(target=work, daemon=True).start()
