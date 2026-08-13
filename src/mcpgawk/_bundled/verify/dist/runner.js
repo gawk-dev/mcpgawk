@@ -4,6 +4,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildDispatchEnvelope } from "./dispatch.js";
 import { isRemote } from "./model.js";
+import { ModernClient } from "./modern-client.js";
 /** Untrusted tools must not be able to stall the verifier — bound every tool call. */
 function probeTimeoutMs() {
     const parsed = Number(process.env.GAWK_PROBE_TIMEOUT_MS);
@@ -103,12 +104,54 @@ function remoteTransport(server) {
 function connectTransport(server, extraEnv = {}) {
     return isRemote(server) ? remoteTransport(server) : stdioTransport(server, extraEnv);
 }
+function adaptModern(m) {
+    return {
+        listTools: () => m.listTools(),
+        callTool: (params) => m.callTool(params),
+        close: () => m.close(),
+    };
+}
+/** Build a ModernClient for this server, honouring the same sandbox spawn override and env merge
+ * as stdioTransport — a modern fallback that escaped the container would be a sandbox bypass. */
+async function modernFor(server, extraEnv = {}, spawnOverride) {
+    if (isRemote(server)) {
+        return adaptModern(await ModernClient.http(server.url ?? "", server.headers ?? {}));
+    }
+    const env = {
+        ...process.env,
+        ...server.env,
+        ...extraEnv,
+        ...(spawnOverride?.env ?? {}),
+    };
+    return adaptModern(await ModernClient.stdio(spawnOverride?.command ?? server.command ?? "", spawnOverride?.args ?? [...(server.args ?? [])], env));
+}
+/** Legacy connect with modern fallback. On a legacy failure the modern door is tried; if BOTH
+ * refuse, the error names both refusals — "unreachable" with no reason is the answer this
+ * product never gives. */
+async function connectEither(legacy, modern) {
+    try {
+        return await legacy();
+    }
+    catch (legacyErr) {
+        try {
+            return await modern();
+        }
+        catch (modernErr) {
+            const l = legacyErr?.message ?? String(legacyErr);
+            const m = modernErr?.message ?? String(modernErr);
+            throw new Error(`${l} — and it is not a 2026-07-28 server either (server/discover: ${m})`);
+        }
+    }
+}
 /** Connect once and enumerate the server's tools (works for stdio and remote). */
 export async function listTools(server) {
     const client = new Client({ name: "gawk-verify", version: "1.0.0" });
     const transport = connectTransport(server);
     try {
-        await client.connect(transport);
+        return await listToolsWith(await connectEither(async () => {
+            await client.connect(transport);
+            return client;
+        }, () => modernFor(server)));
     }
     catch (e) {
         // A server that cannot start produces a useless protocol-level message ("MCP error -32000:
@@ -119,6 +162,8 @@ export async function listTools(server) {
         const base = e?.message ?? String(e);
         throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
     }
+}
+async function listToolsWith(client) {
     try {
         const res = await client.listTools();
         return res.tools.map((t) => ({
@@ -139,9 +184,13 @@ export async function listTools(server) {
  * a discover tool's listing. */
 export async function callToolText(server, toolName, args) {
     const client = new Client({ name: "gawk-verify", version: "1.0.0" });
+    let active = client;
     try {
-        await client.connect(connectTransport(server));
-        const res = await client.callTool({ name: toolName, arguments: args }, undefined, {
+        active = await connectEither(async () => {
+            await client.connect(connectTransport(server));
+            return client;
+        }, () => modernFor(server));
+        const res = await active.callTool({ name: toolName, arguments: args }, undefined, {
             timeout: probeTimeoutMs(),
         });
         return resultText(res);
@@ -150,7 +199,7 @@ export async function callToolText(server, toolName, args) {
         return "";
     }
     finally {
-        await client.close().catch(() => { });
+        await active.close().catch(() => { });
     }
 }
 function resultText(res) {
@@ -193,6 +242,7 @@ function sandboxedProbeFresh(server, sandbox) {
         });
         try {
             const client = new Client({ name: "gawk-verify", version: "1.0.0" });
+            let active = client;
             let text = "";
             // server.env goes through wrapSpawn too: a containerized target does NOT inherit the host
             // spawn env, so merging env only into stdioTransport would silently strip it in-container.
@@ -201,21 +251,26 @@ function sandboxedProbeFresh(server, sandbox) {
             // cause exists. `listTools` has always attached it; this path did not, so every
             // containerized probe failure was reported as the bare protocol message.
             const transport = stdioTransport(server, session.envOverrides, spawnOverride);
+            active = await connectEither(async () => {
+                try {
+                    await client.connect(transport);
+                }
+                catch (e) {
+                    const cause = explainChildFailure(stderrTailOf(transport));
+                    const base = e?.message ?? String(e);
+                    throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
+                }
+                return client;
+            }, 
+            // The modern fallback runs INSIDE the same sandbox: same spawn override, same env merge.
+            () => modernFor(server, session.envOverrides, spawnOverride));
             try {
-                await client.connect(transport);
-            }
-            catch (e) {
-                const cause = explainChildFailure(stderrTailOf(transport));
-                const base = e?.message ?? String(e);
-                throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
-            }
-            try {
-                text = resultText(await client.callTool({ name: toolName, arguments: args }, undefined, {
+                text = resultText(await active.callTool({ name: toolName, arguments: args }, undefined, {
                     timeout: probeTimeoutMs(),
                 }));
             }
             finally {
-                await client.close();
+                await active.close();
             }
             await session.settle?.(); // backends with an async record pipe: let in-flight egress land
             const obs = { egress: session.nonAllowlistedEgress(), resultText: text };
@@ -251,15 +306,22 @@ export function sandboxedProbeReused(server, sandbox) {
     let client;
     let egressSeen = 0;
     const connect = async () => {
-        session = await sandbox.enter(server.allowedHosts ?? [], {
+        // Local const: TS narrowing does not survive into the async closures below, and the closures
+        // must see THIS session, not whatever the outer variable holds by the time they run.
+        const sess = await sandbox.enter(server.allowedHosts ?? [], {
             command: server.command ?? "",
             args: server.args ?? [],
         });
+        session = sess;
         egressSeen = 0;
-        const c = new Client({ name: "gawk-verify", version: "1.0.0" });
-        const spawnOverride = session.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
-        await c.connect(stdioTransport(server, session.envOverrides, spawnOverride));
-        return c;
+        const spawnOverride = sess.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
+        return await connectEither(async () => {
+            const c = new Client({ name: "gawk-verify", version: "1.0.0" });
+            await c.connect(stdioTransport(server, sess.envOverrides, spawnOverride));
+            return c;
+        }, 
+        // Same sandbox, same override — a modern fallback outside the container would be a bypass.
+        () => modernFor(server, sess.envOverrides, spawnOverride));
     };
     const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: toolName, arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
@@ -345,11 +407,14 @@ export function sandboxedProbeReused(server, sandbox) {
  */
 export function remoteProbe(server) {
     let client;
-    const connect = async () => {
+    const connect = async () => 
+    // Hosted servers are the LIKELIEST place to meet a modern-only (2026-07-28) deployment —
+    // a provider flips their fleet, and every legacy client is locked out the same morning.
+    connectEither(async () => {
         const c = new Client({ name: "gawk-verify", version: "1.0.0" });
         await c.connect(remoteTransport(server));
         return c;
-    };
+    }, () => modernFor(server));
     const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: toolName, arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
     }));

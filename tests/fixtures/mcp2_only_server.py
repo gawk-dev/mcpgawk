@@ -12,6 +12,10 @@ import sys
 
 REVISION = "2026-07-28"
 TOOLS = [{"name": "modern_tool", "description": "Only reachable over the 2026-07-28 revision",
+          "inputSchema": {"type": "object", "properties": {}}},
+         # Read-only by name, so verify's safe mode actually CALLS it — the proof that the modern
+         # path carries tool calls, not just listings.
+         {"name": "get_status", "description": "Report server status (read-only)",
           "inputSchema": {"type": "object", "properties": {}}}]
 
 

@@ -46,7 +46,7 @@ def test_a_modern_only_server_is_scanned_not_reported_unreachable():
         "modern", sys.executable, [str(FIXTURES / "mcp2_only_server.py")]))
     assert snap.error_kind is None, f"modern-only server unreachable: {snap.error}"
     assert snap.protocol_version == "2026-07-28"
-    assert [t.get("name") for t in snap.tools] == ["modern_tool"]
+    assert {t.get("name") for t in snap.tools} == {"modern_tool", "get_status"}
 
 
 def test_a_legacy_only_server_still_scans_via_the_fallback(tmp_path: Path):
@@ -70,3 +70,31 @@ def test_the_recorded_protocol_version_distinguishes_the_worlds():
     modern = asyncio.run(probe.probe_stdio(
         "m", sys.executable, [str(FIXTURES / "mcp2_only_server.py")]))
     assert modern.protocol_version == "2026-07-28"
+
+
+def test_verify_behaviourally_checks_a_modern_only_server(tmp_path: Path):
+    """The other half of dual-protocol support, through the SHIPPED engine: a 2026-07-28-only
+    server is not merely listed but behaviourally VERIFIED — tools called in the sandbox, checks
+    completed, coverage claimed. Before the engine grew its own modern client (the official TS SDK
+    has no v2 — checked npm dist-tags 2026-08-13), this exact run reported "no server was verified
+    at all"."""
+    import json
+    import subprocess
+
+    from mcpgawk import verify as verify_mod
+
+    if verify_mod.unavailable_reason() is not None:
+        pytest.skip("verify unavailable here")
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"srv": {
+        "command": sys.executable, "args": [str(FIXTURES / "mcp2_only_server.py")]}}}),
+        encoding="utf-8")
+    out = tmp_path / "report.json"
+    subprocess.run([sys.executable, "-m", "mcpgawk.cli", "verify", str(cfg), "--out", str(out)],
+                   capture_output=True, text=True, timeout=300,
+                   cwd=str(Path(__file__).parent.parent))
+    assert out.is_file(), "no report written — vacuous"
+    srv = json.loads(out.read_text(encoding="utf-8"))["servers"][0]
+    assert srv["complete"] is True, f"verify did not complete against a modern-only server: {srv}"
+    assert srv["toolsChecked"] >= 1, "no tool was exercised — the modern path carried no calls"
+    assert srv["status"] == "clean", srv["status"]

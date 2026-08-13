@@ -5,6 +5,23 @@ All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelo
 > Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
 > commit message — the note recorded at the moment that version was published — not from memory.
 
+## [0.1.28] — 2026-08-13
+
+### Added
+
+- **Full MCP 2026-07-28 ("MCP 2") support, alongside every legacy revision.** Scan reaches
+  servers that refuse the legacy handshake (`server/discover` fallback), and the verify engine
+  grew its own modern client — behavioural verification now completes against modern-only
+  servers (the official TypeScript SDK has no v2 yet). Legacy servers are unchanged: the old
+  handshake is still tried first, so identities and baselines are stable.
+- Agent-installable skill (`skills/mcpgawk`): teaches any coding agent to measure a server
+  before trusting it and to audit an MCP-2 upgrade as a baseline diff.
+
+### Fixed
+
+- The panel acknowledges a button clicked while another action runs, instead of silently
+  ignoring it.
+
 ## [0.1.27] — 2026-08-13
 
 ### Security
