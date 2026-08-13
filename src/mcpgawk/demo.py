@@ -201,6 +201,33 @@ def _real(out: str, *, keep: tuple[str, ...] = (), limit: int = 14) -> None:
         print(_c("2", f"      … {len(lines) - limit} more line(s)"))
 
 
+def _sweep_stale_sandboxes(keep: Path) -> int:
+    """Delete PRIOR demo sandboxes, so `--clean` leaves nothing behind. Returns how many.
+
+    Found by driving the beta guide's exact steps against the shipped 0.1.26 (2026-08-13): the page
+    says the sandbox is "deleted with `mcpgawk demo --clean`", but --clean only removed the sandbox
+    of the run it started — the tester's ORIGINAL sandbox, the one they were trying to delete,
+    stayed on disk.
+
+    Deletion is gated on BOTH our mkdtemp prefix AND our own marker files (`mcp.json` and
+    `fixture_server.py`) being present, so a user's unrelated `mcpgawk-demo-notes` directory is
+    never touched. `keep` is the current run's root, which the caller deletes itself.
+    """
+    removed = 0
+    try:
+        tmp = Path(tempfile.gettempdir())
+        for entry in tmp.glob("mcpgawk-demo-*"):
+            if entry == keep or not entry.is_dir():
+                continue
+            if not ((entry / "mcp.json").is_file() and (entry / "fixture_server.py").is_file()):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    except OSError:
+        pass                      # a sweep that cannot run must not fail the demo
+    return removed
+
+
 def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
     # The demo is a scripted walkthrough; the CLI's own "a newer build is out" nag would print
     # after the closing line and undercut it. The sandbox subprocesses already suppress it; this
@@ -274,7 +301,9 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
     finally:
         if clean:
             shutil.rmtree(root, ignore_errors=True)
-            _note(_c("2", "\nsandbox deleted (--clean)."))
+            stale = _sweep_stale_sandboxes(keep=root)
+            extra = f" {stale} earlier sandbox(es) removed too." if stale else ""
+            _note(_c("2", f"\nsandbox deleted (--clean).{extra}"))
         else:
             print(_c("2", f"\nSandbox kept at {root}"))
             # Name the FLAG first, not a raw `rm -r`. The beta guide tells testers `--clean` is how
