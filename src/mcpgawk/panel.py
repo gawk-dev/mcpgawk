@@ -821,7 +821,10 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     if approved:
         steps[0]["fact"] += f" · {approved} at an approved baseline"
     if calls:
-        steps[3]["fact"] += f" · {len(calls)} recent call(s) checked"
+        # SEEN, not "checked" — same defect as the Activity headline, second surface. `calls` here
+        # is the raw recent-call list; whether the guard actually checked any of them is a
+        # different question this line cannot answer, so it must not imply the answer.
+        steps[3]["fact"] += f" · {len(calls)} recent call(s) seen"
     return steps
 
 
@@ -868,6 +871,86 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
     return ("Nothing needs you right now.", "ok")
 
 
+#: A result older than this is history, not news. The banner is the panel's only feedback channel,
+#: so a stale one is actively misleading: the founder's real `last-action.json` held a "login ·
+#: kite" result from three days earlier, still rendered as the current state of the machine.
+_BANNER_MAX_AGE_S = 15 * 60
+
+
+def _ago(stamp: object) -> str:
+    """"2m ago" for an ISO-8601 Z timestamp; "just now" under a minute; the raw value if unparseable
+    (never an empty string — a result with no time is exactly what this is fixing)."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return "at an unrecorded time"
+    try:
+        when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return stamp
+    secs = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _banner_is_stale(action: dict | None, max_age_s: int = _BANNER_MAX_AGE_S) -> bool:
+    """True when a COMPLETED action is old enough that showing it would misrepresent now.
+
+    Running actions are never stale — a long verify legitimately shows for minutes.
+    """
+    if not isinstance(action, dict) or action.get("running"):
+        return False
+    from datetime import datetime, timezone
+    stamp = action.get("at")
+    if not isinstance(stamp, str) or not stamp:
+        # NOT stale: undated, which is a different thing. Suppressing it would DESTROY a result —
+        # and losing a verdict is worse than showing an ambiguous one. `_ago` labels it "at an
+        # unrecorded time" so the operator knows exactly what they are and are not being told.
+        # (Caught by an existing test when the first version hid a real "rescanned" outcome.)
+        return False
+    try:
+        when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - when).total_seconds() > max_age_s
+
+
+def _activity_headline(summary: object) -> str:
+    """seen / checked / DECLINED — never a single number labelled "checked".
+
+    The panel rendered `summary["calls"]` (every call RECORDED) under the label "calls checked".
+    On the founder's machine that read "860 calls checked" while the CLI, from the same spool,
+    reported 41 checked and 832 declined — the guard had no baseline projection and let them
+    through. A ~20x overstatement of protection, on the screen a beta tester screenshots.
+
+    The honest numbers were already computed and sitting in the same dict (`checked`, `deferred` —
+    spool.summarise), and `spool.py` even documents this exact defect in a comment. The panel
+    simply read the wrong key. So this is not new measurement: it is the panel finally saying what
+    the engine already knew.
+
+    A declined call is styled as a WARNING and carries its remedy, because "we did not check this"
+    must never be able to read as "this was fine" — the product's oldest rule.
+    """
+    if not isinstance(summary, dict):
+        return "<b>—</b> calls seen"
+    seen = summary.get("calls") or 0
+    checked = summary.get("checked")
+    deferred = summary.get("deferred") or 0
+    if checked is None:
+        # Written before the distinction existed: say so rather than infer a number.
+        return (f"<b>{seen}</b> calls seen · <span class=\"warn\">how many were CHECKED is not "
+                f"recorded in this log</span>")
+    out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against an approved baseline"
+    if deferred:
+        out += (f" · <span class=\"warn\"><b>{deferred}</b> NOT checked — the guard declined "
+                f"(no or stale baseline) and let them through; run a scan</span>")
+    return out
+
+
 def _action_banner(action: dict | None) -> str:
     """The last action's state, full-width under the card header. Shown to EVERYONE — status is
     not an action, and gating it behind the token hid "Running verify…" from the founder's own
@@ -875,6 +958,8 @@ def _action_banner(action: dict | None) -> str:
     action = action or {}
     running = action.get("running")
     banner = ""
+    if _banner_is_stale(action):
+        return ""                      # old news is not feedback; the row pills carry the state
     if running:
         note = action.get("notice") or ""
         note_html = f'<br><b>{_esc(note)}</b>' if note else ""
@@ -900,7 +985,14 @@ def _action_banner(action: dict | None) -> str:
         worst = ("bad" if any(r.get("level") == "bad" for r in rows)
                  else "warn" if any(r.get("level") == "warn" for r in rows)
                  else (action.get("level") or "ok"))
+        # SUBJECT and TIME, always. The banner used to render the bare message — a naked "done"
+        # with no answer to "done WHAT, and WHEN", which then survived a panel restart and sat
+        # there for days claiming an outcome. Both fields were already stored on the action; they
+        # were simply never printed.
+        subject = _esc(action.get("label") or "action")
+        when = _esc(_ago(action.get("at")))
         banner = (f'<div class="abanner done {_esc(worst)}">'
+                  f'<b>{subject}</b> — finished {when}<br>'
                   f'{_esc(action.get("message"))}{detail}</div>')
     return banner
 
@@ -2013,7 +2105,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
        '(scan, verify, approve, protect) appear only through the link printed in the terminal '
        'that started the panel, which an agent that merely opens this page cannot supply. '
        'Lost the link? Restart <code>mcpgawk panel</code> and use the fresh one it prints.</div>'}
-      <div class="abar">{_action_banner(action)}</div>
+      <div class="abar" id="action">{_action_banner(action)}</div>
       {nba}
       {disc_problems}
       {cannot}
@@ -2115,8 +2207,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <div class="chead"><h1>Activity</h1>
         <div class="tools"><a class="gbtn" href="/export/calls.jsonl">Export .jsonl</a>
           <a class="gbtn" href="/export/calls.csv">Export .csv</a></div></div>
-      <div class="filters"><span class="count" style="margin-left:0">
-        <b>{act_summary.get('calls', '—') if isinstance(act_summary, dict) else '—'}</b> calls checked
+      <div class="filters"><span class="count" style="margin-left:0">{_activity_headline(act_summary)}
         · {len(notable)} denied · {_esc(_span)}</span></div>
       <h2>Needs your attention — blocked calls, with the full reason</h2>
       <table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
@@ -3835,7 +3926,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
                     _ACTION.update(message=f"approve refused — {blocked}", at=_now())
                     self.send_response(303)
-                    self.send_header("Location", f"/?t={urllib.parse.quote(token)}")
+                    self.send_header("Location",
+                                 f"/?t={urllib.parse.quote(token)}#action")
                     self.end_headers()
                     return
                 try:
@@ -3849,7 +3941,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # Carry the token back, or the redirect would land the human on a read-only page and
             # the buttons would vanish after the first click.
             self.send_response(303)
-            self.send_header("Location", f"/?t={urllib.parse.quote(token)}")
+            self.send_header("Location",
+                                 f"/?t={urllib.parse.quote(token)}#action")
             self.end_headers()
 
     try:
