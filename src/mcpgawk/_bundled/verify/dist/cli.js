@@ -192,7 +192,16 @@ licenseOpts = {}) {
     if (auditLogPath) {
         // Truncate/create fresh at the start of this run -- an audit log from a stale prior run
         // silently mixed into a new one would be worse than no audit log at all.
-        writeFileSync(auditLogPath, "");
+        // 0600: this file holds one line per reproduction attempt, including an excerpt of what each
+        // tool RETURNED. `mode` applies only when the file is new, and this call TRUNCATES an existing
+        // one — which keeps its old mode — so narrow it explicitly as well.
+        writeFileSync(auditLogPath, "", { mode: 0o600 });
+        try {
+            chmodSync(auditLogPath, 0o600);
+        }
+        catch {
+            // an audit log we cannot narrow is still an audit log — never lose the run over a mode
+        }
     }
     // Writes the report built from whatever has completed SO FAR, atomically (tmp file + rename,
     // same pattern as the Trust Index crawler's incremental flush) -- a killed/timed-out process

@@ -949,7 +949,12 @@ def _front_door_verify(choice: str) -> None:
             try:
                 run_dir = (behaviour_profile_path().parent / "verify-runs"
                            / strftime("%Y-%m-%dT%H-%M-%SZ", gmtime()))
-                run_dir.mkdir(parents=True, exist_ok=True)
+                # secure_dir, not mkdir: this directory holds every reproduction attempt's audit
+                # log. Plain mkdir left it 0755 (28 of them on the founder's machine, measured
+                # 2026-08-13) while `~/.mcpgawk` and `~/.gawk` are both 0700.
+                from .state import secure_dir
+                secure_dir(run_dir.parent)   # mkdir(parents=True) leaves PARENTS at the default mode
+                secure_dir(run_dir)
                 audit_args = ["--audit-log", str(run_dir / "audit.jsonl")]
             except OSError:
                 audit_args = []  # read-only HOME: run without the archive rather than not at all

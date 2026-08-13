@@ -3475,7 +3475,12 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         run_dir = runs_dir / _time.strftime("%Y-%m-%dT%H-%M-%SZ", _time.gmtime())
         audit_args: list[str] = []
         try:
-            run_dir.mkdir(parents=True, exist_ok=True)
+            # secure_dir, not mkdir: this directory holds every reproduction attempt's audit
+            # log. Plain mkdir left it 0755 (28 of them on the founder's machine, measured
+            # 2026-08-13) while `~/.mcpgawk` and `~/.gawk` are both 0700.
+            from .state import secure_dir, secure_file
+            secure_dir(run_dir.parent)   # mkdir(parents=True) leaves PARENTS at the default mode
+            secure_dir(run_dir)
             audit_args = ["--audit-log", str(run_dir / "audit.jsonl")]
         except OSError:
             audit_args = []  # read-only HOME: run without the archive rather than not at all
@@ -3506,7 +3511,11 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         _merge_verify_report(report_path, prev_report)
         if audit_args:
             try:                                  # the report belongs with its audit stream
-                _shutil.copyfile(report_path, run_dir / "report.json")
+                archived = run_dir / "report.json"
+                # copyfile does NOT carry the source's permissions (copy2 would), so this archive
+                # was 0644 while the report it copies is 0600. Measured 2026-08-13.
+                _shutil.copyfile(report_path, archived)
+                secure_file(archived)
             except OSError:
                 pass
             try:                                  # bounded retention: newest 30 run archives
