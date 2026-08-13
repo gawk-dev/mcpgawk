@@ -126,6 +126,35 @@ def _report(action: str, exc: Exception) -> None:
           file=sys.stderr)
 
 
+#: What a run record carries that the operator did not choose from a menu: `target` is whatever was
+#: on the command line (`--http https://host/mcp?apiKey=…` — measured leaking into `runs.db` on
+#: 2026-08-13) and `summary` routinely carries `f"{type(exc).__name__}: {exc}"`, which is exactly how
+#: the panel printed a credential from a timed-out sign-in. Masked on the way in, at both writers.
+def _mask(value: Any) -> Any:
+    """Mask credential shapes in one run-record field. Strings and nested containers; anything else
+    (ints, None, bools — exit codes, pids) passes through untouched.
+
+    Imported lazily and defensively: recording must never break the work being recorded, so a
+    redactor that cannot be imported degrades to a fixed placeholder rather than to the raw value.
+    """
+    try:
+        from .redact import redact, redact_urls_in_text
+    except ImportError:                            # pragma: no cover - defensive, see spool._redactor
+        return "[unredactable]" if isinstance(value, str) else value
+    if isinstance(value, str):
+        # `redact_urls_in_text`, NOT `redact_url`: the target is not a bare URL, it is a labelled
+        # one (`http:https://host/mcp?apiKey=…`). Handing the whole string to a URL parser produced
+        # `http:///https://…` — a mangled target column, which is over-redaction breaking the very
+        # evidence the run log exists to show. Mask the URL found INSIDE the string, then sweep for
+        # bare credential shapes; `apiKey=***` is too short to re-match the second pass.
+        return redact(redact_urls_in_text(value) or "") or value
+    if isinstance(value, dict):
+        return {k: _mask(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask(v) for v in value]
+    return value
+
+
 def start_run(kind: str, target: str | None = None, *, summary: dict[str, Any] | None = None,
               path: str | None = None) -> str | None:
     """Open a run and return its id, or None if the registry could not be written (the caller
@@ -139,6 +168,8 @@ def start_run(kind: str, target: str | None = None, *, summary: dict[str, Any] |
     if kind not in KINDS:
         raise ValueError(f"unknown run kind {kind!r}; add it to runlog.KINDS deliberately")
     run_id = uuid.uuid4().hex
+    target = _mask(target)
+    summary = _mask(summary)
     try:
         with _connect(path) as conn:
             conn.execute("begin immediate")
@@ -167,7 +198,8 @@ def finish_run(run_id: str | None, status: str, summary: dict[str, Any] | None =
         with _connect(path) as conn:
             conn.execute("begin immediate")
             conn.execute("update runs set ended_at=?, status=?, summary=? where run_id=?",
-                         (_now(), status, json.dumps(summary or {}, sort_keys=True), run_id))
+                         (_now(), status, json.dumps(_mask(summary or {}), sort_keys=True),
+                          run_id))
             conn.execute("commit")
     except Exception as exc:  # noqa: BLE001
         _report("close", exc)
