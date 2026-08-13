@@ -203,8 +203,80 @@ def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
         )
 
 
+#: The item-key shape drift mints: `tool.<name>`, `prompt.<name>`, `resource.<uri>`. The IDENT half
+#: is server-controlled, and until 2026-08-13 it went to disk verbatim while only the description
+#: text was redacted — so a tool NAMED with a credential, or the ordinary shape of a URI-only
+#: resource (`https://host/doc?apiKey=…`), wrote a live key into `history.json` as a MAP KEY, in
+#: `texts`, `items`, `tools`, `schemas`, `props` and `annotations` at once.
+_KIND_PREFIX = ("tool.", "prompt.", "resource.")
+
+
+def _mask_ident(ident: str) -> str:
+    """Mask a credential inside one item identity, shape-preserving.
+
+    URL-shaped idents go through `redact_url` (keeps the host and the parameter NAMES, so a drift
+    report can still say WHICH resource changed); everything else through the prose redactor.
+    Idempotent: a masked ident carries no credential shape, so re-masking is a no-op — which is
+    what lets this run at both ingress and the write without compounding.
+    """
+    from .redact import redact, redact_url
+    kind, _, rest = ident.partition(".")
+    if f"{kind}." in _KIND_PREFIX and rest:
+        return f"{kind}.{_mask_ident(rest)}"
+    if "://" in ident:
+        return redact_url(ident) or ident
+    return redact(ident) or ident
+
+
+def redact_record(rec: dict[str, Any]) -> dict[str, Any]:
+    """Mask credential shapes in one record, IN PLACE. Field-aware, never a whole-blob pass.
+
+    ADR-0012 says redaction happens at the persistence boundary. It did not: the only `redact()`
+    call lived in `drift._item_texts`, one caller, covering descriptions alone — the seventh
+    instance of this repo's most repeated defect, a rule living in one file instead of on the write.
+
+    A whole-blob `redact()` is deliberately NOT what this does. The store holds identity the drift
+    report must show verbatim — pins, item hashes, timestamps — and this module's own doctrine is
+    that over-redaction destroys the evidence the feature exists to display (`fleet.py` records an
+    attempt at exactly that, backed out because it mangled ordinary paths). So: map KEYS are item
+    identities and go through `_mask_ident`; prose VALUES (`texts`, annotation values, property
+    names) go through the prose redactor; hashes and scalars are left alone.
+
+    Applied at BOTH `record()` ingress and `save()`. Ingress masks the caller's own object in place
+    so the record that gets compared for drift is the same one that gets stored — mask only on the
+    way to disk and every scan would diff a raw `current` against a masked baseline and report a
+    rename that never happened. `save()` then catches every other writer, present and future
+    (`baseline.approve` writes measured annotations through its own direct save).
+    """
+    from .redact import redact
+    for field, value in list(rec.items()):
+        if not isinstance(value, dict):
+            continue
+        masked: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, str) and field == "texts":
+                v = redact(v) or v
+            elif isinstance(v, dict):
+                # annotations: {ident: {title: "…"}} — server-authored prose, one level down.
+                v = {ak: (redact(av) or av) if isinstance(av, str) else av for ak, av in v.items()}
+            elif isinstance(v, list):
+                # props: {ident: [property names]} — server-chosen names, same trust as an ident.
+                v = [(_mask_ident(i) if isinstance(i, str) else i) for i in v]
+            masked[_mask_ident(k) if isinstance(k, str) else k] = v
+        rec[field] = masked
+    return rec
+
+
 def save(store: dict[str, Any], path: str | None = None) -> None:
     path = path or default_path()
+    # THE persistence boundary — every writer lands here (record, approve, baseline). Masking here
+    # rather than in each caller is the whole point: a rule that lives in one caller is not a rule.
+    for entry in (store.get("servers") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for rec in [entry.get("approved"), *(entry.get("history") or [])]:
+            if isinstance(rec, dict):
+                redact_record(rec)
     # Owner-only: this file is a complete inventory of the user's MCP servers and their tool
     # descriptions. It was world-readable until 2026-07-27 — see state.py.
     state.secure_dir(os.path.dirname(path))
@@ -386,6 +458,10 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     baseline and `None` is returned, so a first scan never reports drift against itself.
     """
     path = path or default_path()
+    # IN PLACE, before anything compares it: the caller keeps this same object and diffs it against
+    # the baseline this function returns. Masking only on the way to disk would diff a raw `current`
+    # against a masked baseline and report a rename on every scan of a credentialled server.
+    redact_record(rec)
     with locked(path):
         store = load(path)
         adopted = _migrate(store, key, migrate_from, alias)
