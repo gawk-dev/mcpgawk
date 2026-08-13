@@ -5,6 +5,32 @@ All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelo
 > Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
 > commit message — the note recorded at the moment that version was published — not from memory.
 
+## [0.1.27] — 2026-08-13
+
+### Security
+
+- The store (`history.json`) no longer persists credentials carried in tool names, resource URIs,
+  or annotation values — masked at the write, with drift identity preserved.
+- The runtime decision log (`calls.jsonl`) no longer records credential-shaped server/tool names
+  from hook events, and keeps writing even without a package context.
+- `runs.db` no longer records the credential from a `scan --http <url>` command line; the target
+  column stays readable (`apiKey=***`).
+- The verify audit log no longer stores an excerpt of tool output containing the very credential a
+  finding convicted the server for; the observation stays in the trail as `[REDACTED]`.
+- `last-verify.json`, the behaviour profile, and verify's own stdout no longer carry a
+  credential-shaped tool name; the skipped-tools list stays readable.
+- The panel's action banner masks bare pasted keys, not only URL credentials.
+- OAuth token files are created owner-only in one syscall (no write-then-chmod window, and a
+  refused chmod can no longer leave a token world-readable); the token directory is 0700, and a
+  store written by an older version is repaired on the next login.
+- The verify run archive (directories, audit logs, archived reports) is created owner-only;
+  existing archives are narrowed on the next run.
+
+### Fixed
+
+- `mcpgawk demo --clean` now removes earlier runs' sandboxes too — previously it re-ran the demo
+  and deleted only its own new sandbox, leaving the one you asked it to delete.
+
 ## [0.1.22] — 2026-08-01
 
 ### Fixed
