@@ -54,10 +54,35 @@ class FileTokenStorage:
             return {}
 
     def _write(self, data: dict) -> None:
+        """Persist the token, never widening the window in which it is readable.
+
+        This used to `write_text` and THEN `chmod(0o600)`, swallowing a chmod failure. Measured
+        2026-08-13: a freshly created token file is 0644 under the default umask for the whole gap
+        between the two calls, and if the chmod fails it stays 0644 with a live OAuth token in it —
+        permanently, silently, because the OSError was passed. `os.open` with an explicit mode
+        creates the file correct in ONE syscall, so there is no gap and no failure to swallow.
+
+        The directory gets 0700 for the same reason. `~/.gawk` itself is already 0700, so today the
+        parent is what protects this store — but a mode on the object survives a copy, a backup and
+        a change to the parent, and every sibling store (`history.json`, `runs.db`,
+        `enforce-audit.db`) is already 0600. This one was the exception.
+        """
         _STORE_DIR.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data))
         try:
-            self._path.chmod(0o600)  # a token is a credential — not world-readable
+            _STORE_DIR.chmod(0o700)
+        except OSError:
+            pass                      # a directory we cannot narrow is not a reason to lose a login
+        payload = json.dumps(data).encode("utf-8")
+        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        # O_CREAT honours the mode only when the file is NEW; an existing file keeps whatever mode
+        # it already had, including a 0644 left behind by the old code path. Narrow it explicitly so
+        # a store written before this fix is repaired the next time a token is refreshed.
+        try:
+            self._path.chmod(0o600)
         except OSError:
             pass
 

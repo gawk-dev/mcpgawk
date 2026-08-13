@@ -16,7 +16,6 @@ this one exists because passing those would not prove the built artefact does it
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
