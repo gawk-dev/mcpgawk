@@ -9,6 +9,7 @@ import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
+import { redactAuditEvent } from "./redact.js";
 import { buildReport, exitCodeForStatus, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
@@ -220,7 +221,10 @@ licenseOpts = {}) {
                         err(`⚠  ${e.server}: ${e.reason}`);
                     }
                     if (e.type === "raw-observation" && auditLogPath) {
-                        appendFileSync(auditLogPath, `${JSON.stringify(e)}\n`);
+                        // Masked AT THE WRITE. `resultTextExcerpt` is 2000 chars of whatever the tool
+                        // returned, and on 2026-08-13 a fixture this engine CONVICTED for credential-exposure
+                        // had its key written here in cleartext. Truncation was never a redaction.
+                        appendFileSync(auditLogPath, `${JSON.stringify(redactAuditEvent(e))}\n`);
                     }
                 },
             }));
