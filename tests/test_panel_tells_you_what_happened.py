@@ -224,12 +224,13 @@ def test_guided_setup_runs_the_servers_own_steps(monkeypatch):
     panel._ACTION.update(running=False, label="login · Revolut X", message="", rows=[],
                          notice="", login_url="", setup_text="", setup_key="", at=panel._now())
     res = panel.run_login("Revolut X")
-    assert res["ok"] is True and "Configure" in res["message"], res
+    assert res["ok"] is True and "keypair ready" in res["message"], res
 
     tokened = panel._action_banner({**dict(panel._ACTION), "running": False,
                                     "label": "login · Revolut X", "message": res["message"],
                                     "at": panel._now()}, token="secret-tok")
     assert "BEGIN PUBLIC KEY" in tokened, "the public key must be ON the banner to copy"
+    assert "data-copy=" in tokened, "the Copy-key button is missing"
     assert 'name="act" value="login-configure"' in tokened, "the finish form is missing"
     assert 'type="password"' in tokened, "the API key input must not echo"
 
@@ -237,6 +238,32 @@ def test_guided_setup_runs_the_servers_own_steps(monkeypatch):
                                  "label": "login · Revolut X", "message": res["message"],
                                  "at": panel._now()})
     assert "login-configure" not in bare, "a tokenless viewer must not get the action form"
+
+
+def test_setup_flow_renders_for_a_human():
+    """The server's setup text is a prompt aimed at an AI client. The panel renders it for a
+    PERSON: the key in its own copyable block, machine-directed steps dropped, the user's own
+    steps kept verbatim — and if nothing parses, the raw text still renders (losing information
+    is worse than losing polish)."""
+    from mcpgawk import panel
+
+    text = ("Display the public key below to the user.\n"
+            "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n"
+            "1. Copy the public key and paste it back here.\n"
+            "2. Go to Settings -> API Keys on the website & register it.\n"
+            "3. Run 'configure_api_key' with the resulting key.\n")
+    html = panel._setup_flow_html(text)
+    assert "data-copy=" in html and "BEGIN PUBLIC KEY" in html
+    assert "Go to Settings -&gt; API Keys" in html, "the user-directed step must survive, escaped"
+    assert "configure_api_key" not in html, "machine-directed steps must be dropped"
+    assert "Copy the public key and paste it back here" not in html, \
+        "steps the UI replaces must be dropped"
+    assert "Paste the API key" in html, "the paste-form must be introduced as the last step"
+
+    unparseable = "Contact support to enable API access & retry."
+    fallback = panel._setup_flow_html(unparseable)
+    assert "Contact support to enable API access &amp; retry." in fallback, \
+        "unparseable text must render raw (escaped), never vanish"
 
 
 def test_configure_reports_the_servers_own_verdict(monkeypatch):
@@ -290,3 +317,27 @@ def test_an_error_result_falls_through_to_the_honest_refusal():
     assert "setup" not in _INBAND_STATUS_NAMES, "the greedy matcher is back"
     assert all("auth" in n or "login" in n for n in _INBAND_STATUS_NAMES), \
         "every status name must carry auth semantics"
+
+
+def test_sign_in_button_carries_the_fleet_name_never_None(monkeypatch):
+    """figma — a remote server with no store entry — rendered a sign-in button whose hidden key
+    was the literal string 'None' (its absent store key), a dead button that failed with
+    "no server named 'None'" when the founder clicked it (driven live 2026-08-14). run_login
+    addresses by fleet NAME, so the form must carry the name."""
+    from mcpgawk import panel, remote_login
+
+    monkeypatch.setattr(remote_login, "login_url",
+                        lambda entry, name="", path=None: "https://x.example/authorize")
+    monkeypatch.setattr(remote_login, "stored_access_token", lambda url: None)
+    html = panel.render(
+        {"entries": {"figma": {"url": "https://mcp.figma.com/mcp"}},
+         "store": {"servers": {}}, "pending": [], "findings": [], "recent_calls": [],
+         "hooks": {}, "adapters": {}, "unscannable": [], "observed": {}},
+        token="tok", action=None)
+    assert 'value="None"' not in html, "a Python None leaked into a form key"
+    import re as _re
+    login_forms = [f for f in _re.findall(r"<form(?:(?!</form>).)*?</form>", html, _re.S)
+                   if 'value="login"' in f]
+    assert login_forms, "the qualifying remote server got no sign-in button"
+    assert any('name="key" value="figma"' in f for f in login_forms), \
+        "the sign-in form must carry the fleet name run_login resolves"

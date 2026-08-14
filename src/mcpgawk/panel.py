@@ -977,6 +977,48 @@ def _activity_headline(summary: object) -> str:
     return out
 
 
+def _setup_flow_html(setup_text: str) -> str:
+    """The guided sign-in, rendered for a HUMAN.
+
+    The server's text is a prompt aimed at an AI client — "Display the public key below…",
+    "present ALL of these steps…", "Once the user provides the API key, run 'configure_api_key'".
+    Printing that at a person reads as noise ([FOUNDER] 2026-08-14: "there should be a simple and
+    better way"). So: the key gets its own block with a Copy button, the machine-directed lines
+    are dropped, the user-directed numbered steps survive verbatim, and the paste-form is the
+    last step. If nothing parseable is found the raw text still renders — losing information is
+    worse than losing polish.
+    """
+    import re as _re
+    pem = _re.search(r"-----BEGIN [A-Z ]*KEY-----[\s\S]*?-----END [A-Z ]*KEY-----", setup_text)
+    steps = []
+    for line in setup_text.splitlines():
+        line = line.strip()
+        if not _re.match(r"^\d+\.", line):
+            continue
+        # machine-directed or replaced-by-UI steps are dropped, not rephrased
+        lowered = line.lower()
+        if any(m in lowered for m in ("copy the public key", "paste it back here",
+                                      "run 'configure_api_key'", "run 'check_auth_status'",
+                                      "paste the resulting", "copy the resulting api key")):
+            continue
+        steps.append(_re.sub(r"^\d+\.\s*", "", line, count=1).strip())
+    if not pem:
+        return (f'<div style="margin-top:8px;font-family:ui-monospace,monospace;'
+                f'font-size:11.5px;word-break:break-all">'
+                f'{_esc(setup_text).replace(chr(10), "<br>")}</div>')
+    key_text = pem.group(0)
+    steps_html = "".join(f"<li>{_esc(st)}</li>" for st in steps)
+    return (
+        f'<ol style="margin:10px 0 0 18px;padding:0">'
+        f'<li>Copy your public key:'
+        f'<div style="margin:6px 0;padding:8px;border:1px solid rgba(0,0,0,.12);'
+        f'border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;'
+        f'word-break:break-all;background:rgba(255,255,255,.5)">{_esc(key_text).replace(chr(10), "<br>")}</div>'
+        f'<button type="button" class="gbtn" data-copy="{_esc(key_text)}">Copy key</button></li>'
+        f'{steps_html}'
+        f'<li>Paste the API key you created:</li></ol>')
+
+
 def _action_banner(action: dict | None, token: str = "") -> str:
     """The last action's state, full-width under the card header. Shown to EVERYONE — status is
     not an action, and gating it behind the token hid "Running verify…" from the founder's own
@@ -1029,10 +1071,10 @@ def _action_banner(action: dict | None, token: str = "") -> str:
         setup_key = action.get("setup_key") or ""
         setup_html = ""
         if setup_text:
-            # VERBATIM-escaped, deliberately not scrubbed: this is the server's public key and its
-            # own registration instructions — a public key is public by construction, and the
-            # prose redactor cannot tell one from a secret. Escaping is the injection defence.
-            body_html = _esc(setup_text).replace("\n", "<br>")
+            # Deliberately not scrubbed (a PUBLIC key is public by construction; the prose
+            # redactor cannot tell it from a secret) but always HTML-escaped, and rendered for a
+            # HUMAN — see _setup_flow_html.
+            body_html = _setup_flow_html(setup_text)
             form_html = (f'<form method="POST" action="/" style="margin-top:8px">'
                          f'<input type="hidden" name="token" value="{_esc(token)}">'
                          f'<input type="hidden" name="act" value="login-configure">'
@@ -1240,14 +1282,22 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         if token and key and key in (d.get("pending") or []):
             _acts += ('<button class="act-sm warn" name="act" value="approve" title="Accept this '
                       'server\'s current surface as the trusted baseline">approve</button>')
+        # Sign-in posts in its OWN form carrying the fleet NAME — run_login addresses by name,
+        # while verify/approve share the store-key form below. Sharing one hidden key gave
+        # figma's button the literal string "None" (its store key), a dead button that failed
+        # with "no server named 'None'" when clicked.
+        _login_form = ""
         if token and _login_button_applicable(entry, name):
-            _acts += ('<button class="act-sm" name="act" value="login" title="Complete this '
-                      'server\'s browser sign-in now — a browser window opens on this machine '
-                      'and the token stays local">sign in</button>')
+            _login_form = (f'<form method="POST" action="/" class="rowact">'
+                           f'<input type="hidden" name="token" value="{_esc(token)}">'
+                           f'<input type="hidden" name="key" value="{_esc(name)}">'
+                           f'<button class="act-sm" name="act" value="login" title="Complete '
+                           f'this server\'s browser sign-in now — a browser window opens on '
+                           f'this machine and the token stays local">sign in</button></form>')
         act_cell = (f'<form method="POST" action="/" class="rowact">'
                     f'<input type="hidden" name="token" value="{_esc(token)}">'
                     f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
-                    f'{_acts}</form>' if _acts else "")
+                    f'{_acts}</form>' if _acts else "") + _login_form
         if detail:
             # NB `tool_lines`, not `tl` — `tl` is render's finding-timeline parameter, and reusing
             # the name here silently clobbered it: the trail link rendered but never opened.
@@ -2520,6 +2570,18 @@ _ACTION: dict[str, Any] = _ActionState(
     {"running": False, "label": "", "message": "", "rows": [], "at": ""})
 
 
+def _begin_action(label: str) -> None:
+    """Stamp a new action's label and CLEAR every field the previous action left behind.
+
+    Driven live 2026-08-14: after a kite sign-in, every later banner still carried "Open the
+    sign-in page" (the stale login_url), and the synchronous actions never set a label at all —
+    "Start monitoring" reported its result under the headline "login-configure · __nosuch__".
+    A banner that mixes two actions' state is wrong twice at once."""
+    _ACTION.update(label=label, message="", rows=[], notice="", level="",
+                   secret="", snippet="", login_url="", setup_text="", setup_key="",
+                   at=_now())
+
+
 #: The last completed action, kept ON DISK. `_ACTION` is in-memory, so restarting the panel erased
 #: the result of a five-minute verify — the founder restarted three times and each time the page
 #: went blank of everything he had just run. A result that vanishes when the process does is not a
@@ -2595,8 +2657,8 @@ def _run_action_bg(kind: str, target: str | None = None,
             _ACTION.update(notice=f"'{wanted}' not started — waiting for {_ACTION['label']} "
                                   f"to finish; click again when this banner clears")
             return
-        _ACTION.update(running=True, label=(f"{kind} · {target}" if target else kind),
-                       message="", rows=[], notice="", at=_now())
+        _begin_action(f"{kind} · {target}" if target else kind)
+        _ACTION.update(running=True)
 
     def work():
         try:
@@ -3537,10 +3599,8 @@ def run_login(name: str | None) -> dict[str, Any]:
                     _, setup_text = setup
                     _ACTION.update(setup_text=setup_text, setup_key=name, login_url="")
                     return {"ok": True,
-                            "message": f"{name}: step 1 done — your keypair is generated. Copy "
-                                       f"the public key below, register it on {name}'s site "
-                                       f"(its own instructions are included), then paste the "
-                                       f"API key here and press Configure & verify."}
+                            "message": f"{name}: keypair ready — finish the steps below and "
+                                       f"you are signed in."}
                 inband = remote_login.inband_login(
                     command=launchable["command"], args=list(launchable.get("args") or []),
                     env=dict(launchable.get("env") or {}))
@@ -4079,11 +4139,44 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
 _PANEL_JS = """\
 (function () {
   "use strict";
+  document.addEventListener("click", function (ev) {
+    var el = ev.target && ev.target.closest ? ev.target.closest("[data-copy]") : null;
+    if (!el || !navigator.clipboard) return;
+    navigator.clipboard.writeText(el.getAttribute("data-copy") || "").then(function () {
+      var old = el.textContent;
+      el.textContent = "Copied";
+      setTimeout(function () { el.textContent = old; }, 1500);
+    });
+  });
   var bar = document.getElementById("action");
   if (!bar || !window.EventSource) return;   // no bar or ancient browser: noscript refresh rules
   var wasRunning = null;
   var t = bar.getAttribute("data-t") || "";
   var es = new EventSource(t ? "/events?t=" + encodeURIComponent(t) : "/events");
+  var deadProbes = 0;
+  es.onerror = function () {
+    // The stream drops for two very different reasons: the 30-min stream deadline (the panel is
+    // fine; EventSource reconnects on its own) and the panel PROCESS being gone — which twice
+    // left the founder clicking silently dead buttons on a stale tab. Only a failed fetch of our
+    // own script proves the second, so probe before declaring anything.
+    setTimeout(function () {
+      fetch("/panel.js", {cache: "no-store"}).then(function () { deadProbes = 0; })
+        .catch(function () {
+          deadProbes += 1;
+          if (deadProbes < 2 || document.getElementById("gone-note")) return;
+          es.close();
+          var n = document.createElement("div");
+          n.id = "gone-note";
+          n.textContent = "This page's panel has stopped — it was closed or restarted. " +
+            "The buttons here no longer reach anything. Reopen it from your terminal " +
+            "(mcpgawk panel) and use the fresh link it prints.";
+          n.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;" +
+            "padding:12px 16px;background:#7f1d1d;color:#fff;text-align:center;" +
+            "font:600 13px/1.45 system-ui";
+          document.body.prepend(n);
+        });
+    }, 1500);
+  };
   es.onmessage = function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
@@ -4188,6 +4281,14 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             if path == "/export/servers.csv":
                 self._send_download(export_servers_csv(), "text/csv", "mcpgawk-servers.csv")
                 return
+            if path != "/":
+                # Any other path used to serve the full page with a 200 — a wrong URL looked
+                # exactly like a right one. A panel answers for the routes it has.
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Not found. The panel lives at /")
+                return
             # The action token is served ONLY to a request that already carries it. Before this,
             # do_GET embedded the full token in every response while read views were open, so any
             # local process — including an agent, with no credential at all — could GET the page,
@@ -4227,6 +4328,26 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                  b"did not come from you. The token is in your terminal.")
                 return
             act = (form.get("act") or [""])[0]
+            if act in ("issue-key", "monitor-start", "gw-call", "keep", "protect", "approve"):
+                # The synchronous actions get the same two rules as the background ones:
+                # never stomp a running action's banner (busy = SAID, not silent), and every
+                # result renders under ITS OWN label — driven live 2026-08-14, "Start
+                # monitoring" reported under the headline "login-configure · __nosuch__".
+                if _ACTION.get("running"):
+                    _ACTION.update(notice=f"'{act}' not started — waiting for "
+                                          f"{_ACTION['label']} to finish; click again when "
+                                          f"this banner clears")
+                    act = ""
+                else:
+                    _k = (form.get("key") or [""])[0]
+                    _begin_action({"issue-key": f"issue-key · {(form.get('name') or [''])[0]}",
+                                   "monitor-start": "monitor",
+                                   # never the gw-call key: it is the agent's credential
+                                   "gw-call": "gateway call",
+                                   "keep": "keep blocked",
+                                   "protect": f"protect · {_k}" if _k else "protect",
+                                   "approve": f"approve · {_k}" if _k else "approve",
+                                   }[act])
             if act in ("scan", "verify", "login"):
                 # `key` carries the server for a row action; absent = whole fleet.
                 _run_action_bg(act, (form.get("key") or [""])[0] or None)

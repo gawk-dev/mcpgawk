@@ -20,6 +20,8 @@ import re
 import socket
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 
@@ -116,3 +118,48 @@ def test_the_stream_is_token_gated_like_the_page():
         assert token not in bare_first, "the bare stream leaked the token itself"
     finally:
         panel._ACTION.update(setup_text="", setup_key="")
+
+
+def test_unknown_paths_are_404_not_the_page():
+    """Every wrong URL used to serve the full page with a 200, so a typo looked exactly like the
+    panel. Driven live 2026-08-14. A panel answers for the routes it has."""
+    url, token, port = _serve_in_thread(__import__("mcpgawk.panel", fromlist=["serve"]).serve)
+    try:
+        _get(f"http://127.0.0.1:{port}/nonexistent")
+        raise AssertionError("unknown path served a 200")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404, e.code
+
+
+def test_a_dead_panel_is_said_on_the_page_not_discovered_by_clicking():
+    """Twice the founder clicked silently dead buttons on a tab whose panel process was gone
+    (2026-08-14, root-caused both times). The client script must PROBE on stream error and, only
+    when the probe itself fails, say the panel is gone — a stream-deadline reconnect (the panel
+    is fine) must never false-alarm."""
+    from mcpgawk import panel
+
+    js = panel._PANEL_JS
+    assert "onerror" in js, "no stream-error handler at all"
+    assert 'fetch("/panel.js"' in js, "declaring death without probing is the false-alarm bug"
+    assert "gone-note" in js and "es.close()" in js, "the dead-panel notice is missing"
+    assert "mcpgawk panel" in js, "the notice must name the way back, not just the failure"
+
+
+def test_a_synchronous_action_reports_under_its_own_label_and_clears_stale_state():
+    """Driven live 2026-08-14: after a kite sign-in, 'Start monitoring' reported its result under
+    the headline 'login-configure · __nosuch__' with a stale 'Open the sign-in page' link riding
+    the banner. A banner that mixes two actions' state is wrong twice at once."""
+    import mcpgawk.panel as panel
+
+    url, token, port = _serve_in_thread(panel.serve)
+    panel._ACTION.update(running=False, label="login · kite", message="old",
+                         login_url="https://stale.example/authorize", at=panel._now())
+    body = urllib.parse.urlencode({"act": "keep", "token": token}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/", data=body, method="POST")
+    with urllib.request.urlopen(req, timeout=5):
+        pass
+    with _get(url) as r:
+        page = r.read().decode()
+    assert "keep blocked" in page, "the action's own label is missing from the banner"
+    assert "Left blocked" in page, "the action's own message is missing"
+    assert "stale.example" not in page, "the previous action's sign-in link rode this banner"
