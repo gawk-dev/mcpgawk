@@ -791,7 +791,7 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     # An audit row whose principal is not the process-wide declared name is a call the gateway
     # attributed to a KEY — the end state this whole journey exists to reach.
     attributed = [p for p in (gw.get("by_principal") or [])
-                  if p.get("principal") and p["principal"] != "(not asserted)"]
+                  if p.get("principal") and p["principal"] != "(no identity asserted)"]
 
     steps: list[dict[str, Any]] = []
     steps.append({
@@ -919,7 +919,13 @@ def _ago(stamp: object) -> str:
     try:
         when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
-        return stamp
+        # Gateway and session stamps carry offsets or no Z — same fact, other spellings.
+        try:
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return stamp
     secs = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
     if secs < 60:
         return "just now"
@@ -1195,15 +1201,42 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     # --- the session record: one row per agent run, newest first -------------------------------
     sess_parts: list[str] = []
-    for s in sessions_summary(d.get("session_calls") or calls)[:10]:
+    _sess_calls = d.get("session_calls") or calls
+    all_sessions = sessions_summary(_sess_calls)
+    for s in all_sessions[:10]:
         sid = s["session"]
         shown = _esc(sid[:12] + ("…" if len(sid) > 12 else ""))
         denied = (f'<span class="chip bad">{s["denied"]}</span>' if s["denied"] else "0")
-        last = _esc(str(s["last"] or "")[11:19] or "—")
+        # The bare time-of-day slice interleaved sessions from different DAYS as apparently
+        # unsorted times ([FOUNDER] 2026-08-15: "the session information is not correct" — it
+        # was sorted correctly and DISPLAYED wrongly). Relative age, full stamp on hover.
+        last = (f'<span title="{_esc(str(s["last"]))}">{_esc(_ago(s["last"]) or "—")}</span>'
+                if s["last"] else "—")
+        # DRILL-DOWN, not a dead row ([FOUNDER] 2026-08-15: "show in the form of a drilldown
+        # way"): the session's own calls open in place. <details> — works with JS disabled,
+        # nothing for the CSP to allow.
+        own = [r for r in _sess_calls
+               if isinstance(r, dict) and r.get("session") == sid][-12:]
+        drill_rows = "".join(
+            f'<tr><td class="dim"><span title="{_esc(str(r.get("ts") or ""))}">'
+            f'{_esc(_ago(str(r.get("ts") or "")))}</span></td>'
+            f'<td>{_esc(str(r.get("decision") or "—"))}</td>'
+            f'<td class="nm">{_esc(str(r.get("tool") or "—"))}</td>'
+            f'<td class="dim">{_esc(str(r.get("server") or "—"))}</td></tr>'
+            for r in reversed(own)) or \
+            '<tr><td colspan="4" class="dim">no calls recorded for this session</td></tr>'
+        drill = (f'<details class="sessdrill"><summary class="whysum">'
+                 f'{len(own)} recent call(s)</summary>'
+                 f'<table class="mini"><thead><tr><th>when</th><th>verdict</th><th>tool</th>'
+                 f'<th>server</th></tr></thead><tbody>{drill_rows}</tbody></table></details>')
         sess_parts.append(
-            f'<tr><td class="nm" title="{_esc(sid)}">{shown}</td><td>{_esc(s["agent"])}</td>'
+            f'<tr><td class="nm" title="{_esc(sid)}">{shown}<br>{drill}</td>'
+            f'<td>{_esc(s["agent"])}</td>'
             f'<td class="num">{s["calls"]}</td><td class="num">{denied}</td>'
             f'<td class="num">{s["servers"]}</td><td class="dim">{last}</td></tr>')
+    if len(all_sessions) > 10:
+        sess_parts.append(f'<tr><td colspan="6" class="dim">…and {len(all_sessions) - 10} more '
+                          f'session(s) — the full record is in the exports above.</td></tr>')
     sess = "".join(sess_parts) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
 
@@ -1419,7 +1452,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
   <span class="n"><b>{tools}</b>{drift_note}</span>
 </div>""")
         else:
-            watched_s = (f' <s>/ {checked} watched</s>'
+            # "45 / 20 watched" read as forty-five-of-twenty ([FOUNDER] 2026-08-15: "45 of 20
+            # what is this ???"). The fraction goes smaller-first, labelled, in brackets.
+            watched_s = (f' <s>({checked} of {tools} watched)</s>'
                          if checked and isinstance(tools, int) and checked < tools else '')
             srows.append(f"""<div class="row">
   {who}
@@ -1717,7 +1752,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         f'<td class="nm">{_esc(getattr(r, "kind", ""))}</td>'
         f'<td><span class="chip {"bad" if getattr(r, "status", "") == "error" else ("warn" if getattr(r, "status", "") == "findings" else "ok")}">'
         f'{_esc(getattr(r, "status", ""))}</span></td>'
-        f'<td class="dim">{_esc(str(getattr(r, "target", "") or "—")[:56])}</td></tr>'
+        f'<td class="dim">{_esc(str(getattr(r, "target", "") or "fleet-wide")[:56])}</td></tr>'
         for r in (d.get("runs") or [])) or \
         '<tr><td colspan="4" class="dim">Nothing recorded yet.</td></tr>'
 
@@ -1934,10 +1969,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
    grey track, one white card per view, filter row with a right-aligned count, uppercase heads on
    a tinted row, two-line primary cell, fully-rounded tinted tags. Royal blue #2A33C2 stays ours.
    No script — the CSP is `default-src 'none'` and the tabs are pure CSS. */
-:root{{--page:#F7F7F8;--card:#FFF;--rail:#F1F1F3;--line:#E6E6EA;
---ink:#15161A;--mut:#5B5D66;--fai:#8A8D97;--acc:#2A33C2;--accent:#2A33C2;--acc-soft:#EEEFFB;
---ok:#157A40;--ok-bg:#E7F4EC;--warn:#B26A00;--warn-bg:#FBF1E3;
---bad:#C0392B;--bad-bg:#FBEBE9;--unv:#6B7280;--unv-bg:#F0F1F3;
+/* Palette per the founder's reference (2026-08-15, chosen over Observatory dark): warm
+   sage/cream field, white floating cards, ink-navy type, ONE hot orange accent used sparingly.
+   Danger is deepened to crimson so an alarm never reads as the brand colour. */
+:root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;
+--ink:#1D2A30;--mut:#5C6B66;--fai:#8A968F;--acc:#E8502B;--accent:#E8502B;--acc-soft:#FCEAE3;
+--ok:#157A40;--ok-bg:#E9F3EA;--warn:#B26A00;--warn-bg:#FBF1E3;
+--bad:#B3261E;--bad-bg:#F9E9E7;--unv:#707B74;--unv-bg:#EDF0EB;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
 --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
 --ease:cubic-bezier(.23,1,.32,1);
@@ -1951,7 +1989,8 @@ line-height:1.5}}
 .sheet{{max-width:1280px;margin:0 auto;padding:22px 22px 90px;
 display:grid;grid-template-columns:196px minmax(0,1fr);gap:0 26px;align-items:start}}
 .sheet>:not(.rail):not(.pane){{grid-column:1/-1}}
-.bhead{{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
+.bhead{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
+.brandmark{{width:22px;height:22px;display:block}}
 .ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12.5px;
 border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .ngrp{{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
@@ -2142,6 +2181,10 @@ font-size:12.5px;color:var(--mut);line-height:1.5}}
 .note.ok{{background:var(--ok-bg);color:var(--ok)}}
 .note.warn{{background:var(--warn-bg);color:var(--warn)}}
 .whysum{{cursor:pointer;color:var(--acc);font-size:12px}}
+/* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
+.sessdrill{{margin-top:4px}}
+.sessdrill .mini{{margin-top:6px;font-size:11.5px}}
+.sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:11px}}
 .whyfull{{white-space:pre-wrap;font-size:11.5px;color:var(--mut);margin-top:6px;max-width:60ch;
 line-height:1.5}}
 h2{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
@@ -2219,7 +2262,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 <input type="radio" name="nav" id="n4" aria-label="Activity tab"><input type="radio" name="nav" id="n5" aria-label="Trust tab">
 <input type="radio" name="nav" id="n6" aria-label="Findings tab"><input type="radio" name="nav" id="n7" aria-label="Gateway tab"><input type="radio" name="nav" id="n8" aria-label="Monitor tab">
 <div class="sheet">
-  <div class="bhead"><span class="brand">mcpgawk</span>
+  <div class="bhead"><img src="/brand.svg" alt="Nativerse" class="brandmark"><span class="brand">mcpgawk</span>
     <!-- WHICH BUILD AM I LOOKING AT. A running panel never reloads its code: on 2026-07-30 the
          founder read a 25-minute-old process three times and reported "nothing changed" —
          correctly, because that process predated the changes. -->
@@ -3284,12 +3327,12 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
                 "SELECT COUNT(*) FROM events WHERE decision='block'").fetchone()[0]
             out["sessions"] = con.execute(
                 "SELECT COUNT(DISTINCT session_id) FROM events").fetchone()[0]
-            out["principals"] = [r[0] or "(not asserted)" for r in con.execute(
+            out["principals"] = [r[0] or "(no identity asserted)" for r in con.execute(
                 "SELECT DISTINCT principal FROM events")]
             # Per-principal rollup, tool calls only: lifecycle rows (tool_name NULL) would count
             # every session per principal and say nothing about who DID what.
             out["by_principal"] = [
-                {"principal": r[0] or "(not asserted)", "calls": r[1], "blocks": r[2] or 0,
+                {"principal": r[0] or "(no identity asserted)", "calls": r[1], "blocks": r[2] or 0,
                  "last": r[3]}
                 for r in con.execute(
                     "SELECT principal, COUNT(*),"
@@ -3468,16 +3511,36 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
     if gw.get("by_principal"):
         ups = principal_upstreams((live or {}).get("keys_file"))
         parts = []
+        _events = gw.get("events") or []
         for p in gw["by_principal"]:
             pname = str(p.get("principal") or "")
             blocked = (f'<span class="chip bad">{p["blocks"]}</span>' if p.get("blocks") else "0")
             own = ", ".join(ups.get(pname) or []) or "—"
+            # The principal's own slice of the trail, in place — a flat total next to a name
+            # answered nothing ([FOUNDER] 2026-08-15: drill-down, not static fields).
+            mine = [e for e in _events
+                    if str(e.get("principal") or "(no identity asserted)") == (pname or "(no identity asserted)")
+                    ][:10]
+            _prows = "".join(
+                f'<tr><td class="dim"><span title="{_esc(str(e.get("at") or ""))}">'
+                f'{_esc(_ago(str(e.get("at") or "")))}</span></td>'
+                f'<td class="nm">{_esc(str(e.get("tool") or "—"))}</td>'
+                f'<td>{_esc(str(e.get("decision") or ""))}</td>'
+                f'<td class="dim">{_esc(str(e.get("reason") or ""))}</td></tr>'
+                for e in mine) or \
+                '<tr><td colspan="4" class="dim">no calls from this principal in the ' \
+                'loaded trail</td></tr>'
+            _pdrill = (f'<details class="sessdrill"><summary class="whysum">its own trail'
+                       f'</summary><table class="mini"><thead><tr><th>when</th><th>tool</th>'
+                       f'<th>decision</th><th>reason</th></tr></thead>'
+                       f'<tbody>{_prows}</tbody></table></details>')
             parts.append(
-                f'<tr><td class="nm">{_esc(pname)}</td>'
+                f'<tr><td class="nm">{_esc(pname)}<br>{_pdrill}</td>'
                 f'<td class="num">{p.get("calls", 0)}</td>'
                 f'<td class="num">{blocked}</td>'
                 f'<td class="dim">{_esc(own)}</td>'
-                f'<td class="dim">{_esc(str(p.get("last") or ""))[:19]}</td></tr>')
+                f'<td class="dim"><span title="{_esc(str(p.get("last") or ""))}">'
+                f'{_esc(_ago(str(p.get("last") or "")))}</span></td></tr>')
         note = ""
         if not ups:
             note = ('<div class="note">No agent carries its own credential for a backend yet, so '
@@ -3490,7 +3553,8 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                '<th>own credentials for</th><th>last seen</th></tr></thead>'
                f'<tbody>{"".join(parts)}</tbody></table>')
     rows = "".join(
-        f'<tr><td class="dim">{_esc(str(e.get("at") or ""))[:19]}</td>'
+        f'<tr><td class="dim"><span title="{_esc(str(e.get("at") or ""))}">'
+        f'{_esc(_ago(str(e.get("at") or "")))}</span></td>'
         f'<td class="nm">{_esc(str(e.get("tool") or "—"))}</td>'
         f'<td>{_esc(str(e.get("decision") or ""))}</td>'
         f'<td class="dim">{_esc(str(e.get("reason") or ""))}</td>'
@@ -4313,6 +4377,16 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
 
         def do_GET(self):                        # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path == "/brand.svg":
+                from ._brand import NATIVERSE_MARK_SVG
+                body = NATIVERSE_MARK_SVG.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Cache-Control", "max-age=86400")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == "/panel.js":
                 body = _PANEL_JS.encode("utf-8")
                 self.send_response(200)
@@ -4403,7 +4477,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # cannot — inline needs 'unsafe-inline', which stays absent.
             self.send_header("Content-Security-Policy",
                              "default-src 'none'; style-src 'unsafe-inline'; "
-                             "script-src 'self'; connect-src 'self'; form-action 'self'")
+                             "script-src 'self'; connect-src 'self'; img-src 'self'; "
+                             "form-action 'self'")
             self.end_headers()
             self.wfile.write(body)
 
