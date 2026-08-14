@@ -415,7 +415,8 @@ def test_gateway_setup_writes_configs_but_never_a_secret_and_never_twice(monkeyp
     from mcpgawk import discover
     monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
         "browserstack": {"command": "node", "args": ["bs.js"],
-                         "env": {"BROWSERSTACK_ACCESS_KEY": "real-secret-value"}},
+                         "env": {"BROWSERSTACK_ACCESS_KEY": "real-secret-value",
+                                 "BROWSERSTACK_CONFIG_DIR": "/Users/x/.config/bs"}},
         "figma": {"url": "https://mcp.figma.com/mcp"},
         "pencil": {},                                    # nothing to launch or reach — folds
     })
@@ -425,6 +426,10 @@ def test_gateway_setup_writes_configs_but_never_a_secret_and_never_twice(monkeyp
     pr = (tmp_path / "gateway" / "principals.json").read_text()
     assert "real-secret-value" not in cfg + pr, "a fleet secret reached the generated config"
     assert "${BROWSERSTACK_ACCESS_KEY}" in cfg, "env must become a placeholder, not vanish"
+    # A non-secret env value is written literally — demanding an export for a config path made
+    # the gateway refuse to start on values Desktop itself launches with (2026-08-15).
+    assert '"/Users/x/.config/bs"' in cfg, "a non-secret env value must be written literally"
+    assert "${BROWSERSTACK_CONFIG_DIR}" not in cfg
     assert "https://mcp.figma.com/mcp" in cfg
     assert "pencil" in cfg and "NOT included" in cfg, "un-backable servers must fold with names"
     assert "listen: 127.0.0.1:8080" in cfg, "the generated gateway must bind loopback"
@@ -456,3 +461,28 @@ def test_gateway_setup_never_writes_a_url_embedded_credential(monkeypatch, tmp_p
     assert "brandfetch" in cfg and "embeds a credential" in cfg, \
         "the folded server must be named with the reason"
     assert "https://mcp.figma.com/mcp" in cfg, "a clean URL backend must still be included"
+
+
+def test_gateway_setup_resolves_dxt_placeholders_or_folds(monkeypatch, tmp_path):
+    """Caught on the founder's first real start attempt (2026-08-15): Revolut X's raw entry
+    carries ${__dirname} (a Desktop-extension placeholder, not an env var) and the gateway's
+    loader rightly refused to start. The generator resolves the entry the way the scan path
+    does; anything still carrying a placeholder folds with a reason."""
+    from mcpgawk import discover, dxt, panel
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "Revolut X": {"command": "node", "args": ["${__dirname}/server.js"],
+                      "_manifest_dir": "/x"},
+        "stubborn": {"command": "node", "args": ["${mystery}/s.js"]},
+    })
+    monkeypatch.setattr(dxt, "resolve_for_launch", lambda e: (
+        {"command": "node", "args": ["/resolved/path/server.js"]}
+        if "${__dirname}/server.js" in (e.get("args") or []) else e))
+    res = panel.run_gateway_setup()
+    assert res["ok"], res
+    cfg = (tmp_path / "gateway" / "gateway.yaml").read_text()
+    assert "/resolved/path/server.js" in cfg, "the dxt-resolved launch must be written"
+    assert "${__dirname}" not in cfg, "a dxt placeholder reached the generated config"
+    assert "stubborn" in cfg and "unresolved placeholders" in cfg, \
+        "an unresolvable entry must fold with its reason"

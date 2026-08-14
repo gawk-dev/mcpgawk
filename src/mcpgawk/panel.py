@@ -3088,6 +3088,24 @@ def run_gateway_setup() -> dict[str, Any]:
         if not isinstance(e, dict):
             continue
         if e.get("command"):
+            # Resolve Desktop-extension placeholders the way the scan path does — the raw entry
+            # carries dxt-isms like ${__dirname}, which the gateway's loader reads as an unset
+            # env var and (rightly) refuses to start on. Caught live on the founder's first
+            # real start attempt, 2026-08-15.
+            from . import dxt as _dxt
+            launch = _dxt.resolve_for_launch(e) or e
+            _blob = " ".join([str(launch.get("command") or "")]
+                             + [str(a) for a in (launch.get("args") or [])])
+            if "${" in _blob:
+                folded.append(f"{name} (its launch command still carries unresolved "
+                              f"placeholders — add this backend by hand)")
+                continue
+            from .redact import contains_secret as _cs
+            if _cs(_blob):
+                folded.append(f"{name} (its launch arguments embed a credential — add this "
+                              f"backend by hand with the secret in env ${{VAR}})")
+                continue
+            e = launch
             lines.append(f"  {name}:")
             lines.append(f"    command: {e['command']}")
             if e.get("args"):
@@ -3095,9 +3113,19 @@ def run_gateway_setup() -> dict[str, Any]:
             env = e.get("env") or {}
             if env:
                 lines.append("    env:")
-                for k in env:
-                    # NEVER the value — the operator's environment supplies it at start.
-                    lines.append(f'      {k}: "${{{k}}}"')
+                from .decision import _CREDENTIAL_SHAPED as _cred
+                from .redact import contains_secret as _secretish
+                for k, v in env.items():
+                    # A secret never reaches the file: credential-shaped names and
+                    # secret-shaped values become ${VAR} for the operator's environment to
+                    # supply. Everything else is written literally — REVOLUTX_CONFIG_DIR is a
+                    # path, and demanding an export for a non-secret made the gateway refuse
+                    # to start on values Desktop itself launches with (founder's second start
+                    # attempt, 2026-08-15).
+                    if _cred.search(k) or _secretish(str(v)):
+                        lines.append(f'      {k}: "${{{k}}}"')
+                    else:
+                        lines.append(f'      {k}: {json.dumps(str(v))}')
         elif e.get("url"):
             # A URL can EMBED a credential in its query string (brandfetch does:
             # ?apiKey=…) — and this generator wrote it verbatim on its first live run
@@ -3604,7 +3632,8 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
                 + f'<div class="note">{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
                 + f'<form method="POST" action="/" class="filters">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
-                  f'<input name="name" placeholder="agent name<input type="hidden" name="tab" value="n7">, e.g. claude-code@laptop" '
+                  f'<input type="hidden" name="tab" value="n7">'
+                  f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
                   f'maxlength="80" required>'
                   f'<select name="role"><option value="">no grants yet</option>{opts}</select>'
                   f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key'
@@ -3622,6 +3651,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
     return (issued + role_note
             + f'<form method="POST" action="/" class="filters">'
               f'<input type="hidden" name="token" value="{_esc(token)}">'
+              f'<input type="hidden" name="tab" value="n7">'
               f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
               f'maxlength="80" required>{role_field}'
               f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key</button>'
