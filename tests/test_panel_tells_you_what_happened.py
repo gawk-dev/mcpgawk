@@ -136,6 +136,10 @@ def test_a_server_with_no_oauth_is_refused_fast_not_hung(monkeypatch):
 
     monkeypatch.setattr(panel, "_oauth_unsupported_reason",
                         lambda url: "it answers without asking us to authenticate")
+    # No in-band login tool either — the refusal path under test is the server that has NEITHER
+    # flow. kite-class servers (in-band login tool) are covered by the test below.
+    from mcpgawk import remote_login as _rl
+    monkeypatch.setattr(_rl, "inband_login", lambda url, headers=None, timeout=20.0: None)
 
     def must_not_run(*a, **k):                       # noqa: ANN002, ANN003
         raise AssertionError("a login subprocess was started for a server with no OAuth")
@@ -174,3 +178,29 @@ def test_a_bare_403_is_not_mistaken_for_an_auth_challenge():
     finally:
         urllib.request.urlopen = real
     assert reason, "a bare 403 was treated as an OAuth challenge"
+
+
+def test_a_server_with_an_inband_login_tool_gets_a_real_link(monkeypatch):
+    """[FOUNDER] 2026-08-14: "every time kite connects me to the webpage and i need to provide
+    access" — and Revolut X does the same. These servers sign in through their OWN login tool,
+    which returns the authorisation URL. The panel now makes that call and puts the link on the
+    banner, instead of refusing with "look at the server's own tools"."""
+    from mcpgawk import discover, panel, remote_login
+
+    monkeypatch.setattr(panel, "_oauth_unsupported_reason", lambda url: "no oauth")
+    monkeypatch.setattr(remote_login, "inband_login",
+                        lambda url, headers=None, timeout=20.0:
+                        ("https://mcp.kite.trade/authorize?session_id=abc", "WARNING: markets."))
+    monkeypatch.setattr(discover, "discover_servers",
+                        lambda *a, **k: {"kite": {"url": "https://mcp.kite.trade/mcp"}})
+    monkeypatch.setattr(remote_login, "login_url",
+                        lambda entry, name="", path=None: "https://mcp.kite.trade/mcp")
+    panel._ACTION.update(running=False, label="login · kite", message="", rows=[],
+                         notice="", login_url="", at=panel._now())
+    res = panel.run_login("kite")
+    assert res["ok"] is True
+    assert "sign-in link is ready" in res["message"], res["message"]
+    banner = panel._action_banner({**dict(panel._ACTION), "running": False,
+                                   "label": "login · kite", "message": res["message"],
+                                   "at": panel._now()})
+    assert "https://mcp.kite.trade/authorize?session_id=abc" in banner,         "the authorisation link must be ON the banner, not in a log"

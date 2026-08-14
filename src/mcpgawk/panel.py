@@ -1024,9 +1024,14 @@ def _action_banner(action: dict | None) -> str:
         # were simply never printed.
         subject = _esc(action.get("label") or "action")
         when = _esc(_ago(action.get("at")))
+        done_link = action.get("login_url") or ""
+        done_link_html = (f'<br><a class="gbtn" href="{_esc(done_link)}" target="_blank" '
+                          f'rel="noopener noreferrer">Open the sign-in page</a>'
+                          f'<div class="dim" style="margin-top:6px;word-break:break-all">'
+                          f'{_esc(done_link)}</div>' if done_link else "")
         banner = (f'<div class="abanner done {_esc(worst)}">'
                   f'<b>{subject}</b> — finished {when}<br>'
-                  f'{_esc(action.get("message"))}{detail}</div>')
+                  f'{_esc(action.get("message"))}{done_link_html}{detail}</div>')
     return banner
 
 
@@ -3471,6 +3476,21 @@ def run_login(name: str | None) -> dict[str, Any]:
     # OAuth flow to run, and saying so in two seconds beats hanging for five and a half minutes.
     unsupported = _oauth_unsupported_reason(url)
     if unsupported:
+        # NOT the end of the story. kite and Revolut X sign in through their OWN login tool — the
+        # tool returns the real authorisation URL bound to a session ([FOUNDER] 2026-08-14: "every
+        # time kite connects me to the webpage and i need to provide access"). A genuine panel
+        # does that call FOR the user and hands them the link, instead of telling them to go look
+        # at the server's tools themselves.
+        inband = remote_login.inband_login(url)
+        if inband:
+            auth_url, server_notice = inband
+            _ACTION.update(login_url=auth_url,
+                           notice=f"{name} signs in through its own login tool. "
+                                  f"{server_notice}")
+            return {"ok": True,
+                    "message": f"{name} sign-in link is ready — open it from this banner. "
+                               f"The server binds access to a session, so your agent may ask "
+                               f"once more in its own chat; that is {name}'s model, not an error."}
         return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
     try:
         proc, log_path = _run_login_cli(url, _transport_flag(entry, url))

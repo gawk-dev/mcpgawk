@@ -182,3 +182,53 @@ def consent_text(name: str, entry: dict[str, Any]) -> str:
         f"response into this run's evidence archive on this machine. Nothing is uploaded. "
         f"Verify it this way only if both of those are acceptable to you."
     )
+
+
+#: Tool names that mean "this server signs you in through its own tool". kite and Revolut X both
+#: work this way (measured 2026-08-14: kite's `login` returns the real
+#: `https://mcp.kite.trade/authorize?session_id=…` URL plus a warning it asks clients to display).
+#: Standard OAuth servers never get here — the panel tries the challenge/discovery flow first.
+_INBAND_LOGIN_NAMES = ("login", "authorize", "authenticate", "connect")
+
+
+def inband_login(url: str, headers: dict[str, str] | None = None,
+                 timeout: float = 20.0) -> tuple[str, str] | None:
+    """Call the server's OWN login tool and return (auth_url, server_notice), or None.
+
+    The other way MCP servers do sign-in: not an OAuth challenge, but a tool that hands back an
+    authorisation URL bound to THIS session. The caller's job is to put that URL in front of the
+    human — which is exactly what the panel's banner link does. `server_notice` is whatever prose
+    the tool returned around the URL (kite explicitly instructs clients to display its warning);
+    the caller renders it through the normal scrubbing path, never raw.
+
+    Sync on purpose: called from the panel's background action thread. Returns None on ANY
+    failure — "no in-band login" and "could not ask" both mean the caller falls back to its
+    honest refusal, which names the manual command.
+    """
+    import asyncio
+    import re as _re
+
+    async def _go() -> tuple[str, str] | None:
+        from mcp.client.session import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+        async with streamable_http_client(url) as streams:
+            read, write = streams[0], streams[1]
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                name = next((t.name for t in tools.tools
+                             if t.name in _INBAND_LOGIN_NAMES
+                             or "login" in t.name.lower()), None)
+                if name is None:
+                    return None
+                result = await session.call_tool(name, {})
+                text = " ".join(getattr(c, "text", "") or "" for c in result.content)
+                hit = _re.search(r"https?://\S+", text)
+                if not hit:
+                    return None
+                return hit.group(0).rstrip(".,)*`"), text[:400]
+
+    try:
+        return asyncio.run(asyncio.wait_for(_go(), timeout))
+    except Exception:                              # noqa: BLE001 — fall back to the honest refusal
+        return None
