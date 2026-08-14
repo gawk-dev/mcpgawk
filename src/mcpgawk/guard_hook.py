@@ -213,6 +213,17 @@ def approved_for_detail(server: str, store_path: Path) -> tuple[dict[str, str] |
 
 def _approved_from_projection(server: str,
                               store_path: Path) -> tuple[dict[str, str] | None, str | None]:
+    """`(approved {tool: hash}, note)` — thin wrapper over `_record_from_projection`, kept so
+    `approved_for` / `approved_for_detail` (the paid gateway's contract) are unchanged."""
+    record, note = _record_from_projection(server, store_path)
+    if record is None:
+        return None, note
+    tools = record.get("tools")
+    return (dict(tools) if isinstance(tools, dict) else None), note
+
+
+def _record_from_projection(server: str,
+                            store_path: Path) -> tuple[dict | None, str | None]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
     `history.json` itself. This hook used to hold its own second reader of the store, kept honest
     only by a test; now it consumes an artefact `history.save` produced, so the two cannot drift.
@@ -299,8 +310,7 @@ def _approved_from_projection(server: str,
         # believes an approved server is being guarded.
         return None, (f"not enforcing {server!r}: {reason}. Re-approve it on this version, or "
                       f"upgrade mcpgawk, to be guarded again.")
-    tools = record.get("tools")
-    return (dict(tools) if isinstance(tools, dict) else None), None
+    return record, None
 
 
 def decide(event: dict, store_path: Path | None = None,
@@ -330,7 +340,17 @@ def _decide(event: dict, store_path: Path | None,
     server, tool = parsed
 
     store = store_path or history_path()
-    approved, note = _approved_from_projection(server, store)
+    record, note = _record_from_projection(server, store)
+    approved = None
+    approved_props = None
+    if record is not None:
+        _tools = record.get("tools")
+        approved = dict(_tools) if isinstance(_tools, dict) else None
+        _props = record.get("props")
+        if isinstance(_props, dict):
+            _p = _props.get(tool)
+            if isinstance(_p, list):
+                approved_props = [str(x) for x in _p]
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
@@ -351,7 +371,14 @@ def _decide(event: dict, store_path: Path | None,
     if behaviour and observations and (observations.get(tool) or {}).get("sink") is True:
         sources = _session_sources(_session_id(event), behaviour)
 
-    verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
+    try:
+        verdict, basis, reason = core.verdict(server, tool, approved, observations, sources,
+                                              args=_args if isinstance(_args, dict) else None,
+                                              approved_props=approved_props)
+    except TypeError:
+        # An older decision core beside a newer hook (mixed install): the smuggled-field check
+        # is silently absent rather than the hook crashing — a crashed hook allows everything.
+        verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
     # Checked means there was something to check AGAINST: an approved surface for this server, or
     # recorded observations of it. With neither, `verdict` had no evidence and whatever it returned
     # is a decline, not a pass. A DENY is checked by construction.

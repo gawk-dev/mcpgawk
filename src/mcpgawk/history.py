@@ -359,6 +359,18 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             # (so the hook can deny loudly rather than infer from absence) — see HANDOFF.
             row = {"tools": dict(rec["tools"]),
                    "aliases": list(entry.get("aliases") or [])}
+            # The APPROVED parameter names per tool, so the hook can catch the smuggled-field
+            # rug-pull at call time: a schema widened after approval breaks nothing by itself,
+            # but an agent FILLING a parameter the human never approved — and one shaped like a
+            # credential — is the attack becoming real ([FOUNDER] 2026-08-15: "do the right
+            # thing without breaking any expected flow"). Absent props (older records) simply
+            # skip the check.
+            props = rec.get("props")
+            if isinstance(props, dict):
+                row["props"] = {ident[len("tool."):]: list(v)
+                                for ident, v in props.items()
+                                if isinstance(ident, str) and ident.startswith("tool.")
+                                and isinstance(v, list)}
             # CARRY the refusal rather than implying it by absence. A record this build cannot
             # interpret must neither be enforced (its hashes were computed by rules we do not know)
             # nor silently omitted (absent reads as "never approved", which DEFERS = allows, and the

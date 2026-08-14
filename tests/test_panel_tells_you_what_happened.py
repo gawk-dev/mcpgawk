@@ -402,3 +402,57 @@ def test_schema_only_drift_never_renders_as_blocked():
             _re.finditer(r"<tr><td class=\"nm\">([\w-]+)</td>(?:(?!</tr>).)*</tr>", html, _re.S)}
     assert "NOT blocked" in rows.get("schema-only", ""), "schema-only drift claimed enforcement"
     assert ">Blocked<" in rows.get("tools-added", ""), "a genuinely blocked drift lost its chip"
+
+
+def test_gateway_setup_writes_configs_but_never_a_secret_and_never_twice(monkeypatch, tmp_path):
+    """[FOUNDER] 2026-08-15: "provide the option to configure the gateway". The affordance does
+    the work — backends from the live fleet, env values as ${VAR} placeholders, principals file
+    0600 — and hands over one command. It never starts a process (credential custody is the
+    human's act, the approve invariant) and never overwrites what it generated."""
+    from mcpgawk import panel
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    from mcpgawk import discover
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "browserstack": {"command": "node", "args": ["bs.js"],
+                         "env": {"BROWSERSTACK_ACCESS_KEY": "real-secret-value"}},
+        "figma": {"url": "https://mcp.figma.com/mcp"},
+        "pencil": {},                                    # nothing to launch or reach — folds
+    })
+    res = panel.run_gateway_setup()
+    assert res["ok"], res
+    cfg = (tmp_path / "gateway" / "gateway.yaml").read_text()
+    pr = (tmp_path / "gateway" / "principals.json").read_text()
+    assert "real-secret-value" not in cfg + pr, "a fleet secret reached the generated config"
+    assert "${BROWSERSTACK_ACCESS_KEY}" in cfg, "env must become a placeholder, not vanish"
+    assert "https://mcp.figma.com/mcp" in cfg
+    assert "pencil" in cfg and "NOT included" in cfg, "un-backable servers must fold with names"
+    assert "listen: 127.0.0.1:8080" in cfg, "the generated gateway must bind loopback"
+    import stat as _stat
+    assert _stat.S_IMODE((tmp_path / "gateway" / "principals.json").stat().st_mode) == 0o600
+    assert "enforce serve" in res["message"], "the one command must be handed over"
+
+    again = panel.run_gateway_setup()
+    assert again["ok"] and "already generated" in again["message"], \
+        "a re-click must not overwrite the operator's edited configs"
+
+
+def test_gateway_setup_never_writes_a_url_embedded_credential(monkeypatch, tmp_path):
+    """Caught on the feature's FIRST live run (2026-08-15): brandfetch's fleet URL embeds
+    ?apiKey=… and the generator wrote it verbatim — the same credentials-in-URLs class as the
+    monitor-alert leak. A credential-bearing URL folds with a reason; the secret never reaches
+    the file."""
+    from mcpgawk import discover, panel
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "brandfetch": {"url": "https://mcp.brandfetch.io/mcp?clientId=abc&apiKey=SECRETVALUE"},
+        "figma": {"url": "https://mcp.figma.com/mcp"},
+    })
+    res = panel.run_gateway_setup()
+    assert res["ok"], res
+    cfg = (tmp_path / "gateway" / "gateway.yaml").read_text()
+    assert "SECRETVALUE" not in cfg, "a URL-embedded credential reached the generated config"
+    assert "brandfetch" in cfg and "embeds a credential" in cfg, \
+        "the folded server must be named with the reason"
+    assert "https://mcp.figma.com/mcp" in cfg, "a clean URL backend must still be included"

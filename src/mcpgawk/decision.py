@@ -18,6 +18,8 @@ imports, no package imports, standard library only.
 """
 from __future__ import annotations
 
+import re
+
 #: The evidence tier a verdict rests on. The basis travels with every verdict — a caller cannot
 #: calibrate trust in a deny (or in the absence of one) without knowing what evidence produced it.
 BASIS_DECLARED = "declared"
@@ -43,9 +45,36 @@ def content_hash(description: str | None) -> str:
     return hashlib.sha256((description or "").encode()).hexdigest()[:12]
 
 
+#: Parameter names an agent should never be filling unless the human approved that exact field.
+#: Deliberately narrow — the founder's constraint is "without breaking any expected flow", and a
+#: benign new parameter (a sort order, a page size) must keep working. What must NOT keep working
+#: is the smuggled-field rug-pull: a tool approved with {city} quietly gaining {api_key}, which
+#: the agent then helpfully fills with a credential.
+_CREDENTIAL_SHAPED = re.compile(
+    r"(?i)(?:^|[_\-.])(?:token|secret|password|passwd|credential|api[_\-]?key|apikey|"
+    r"auth|bearer|cookie|private[_\-]?key|access[_\-]?key|session[_\-]?id)(?:$|[_\-.])")
+
+
+def smuggled_credential_args(args: dict | None,
+                             approved_props: list[str] | None) -> list[str]:
+    """Argument keys of THIS call that (a) were never in the approved parameter list and
+    (b) are credential-shaped. Empty when the check cannot run (no props recorded — older
+    baselines) or nothing qualifies. The comparison is against what the human approved, not
+    against the server's current schema: the hook does not hold the live surface, but it does
+    hold the call, and the call is where the smuggled field gets filled."""
+    if not isinstance(args, dict) or approved_props is None:
+        return []
+    approved_set = {str(k) for k in approved_props}
+    return sorted(k for k in args
+                  if isinstance(k, str) and k not in approved_set
+                  and _CREDENTIAL_SHAPED.search(k))
+
+
 def declared_verdict(server: str, tool: str,
                      approved: dict[str, str] | None,
-                     live_hash: str | None = None) -> tuple[str, str, str | None]:
+                     live_hash: str | None = None,
+                     args: dict | None = None,
+                     approved_props: list[str] | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -80,13 +109,39 @@ def declared_verdict(server: str, tool: str,
             f"(approved {approved_hash}, now {live_hash}). This is the rug-pull shape: a tool you "
             f"trusted rewritten to say something else. Re-read it, then `mcpgawk approve {server}`."
         )
+    # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
+    # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
+    # call is FILLING a parameter the human never approved, and it is credential-shaped
+    # ([FOUNDER] 2026-08-15: "do the right thing without breaking any expected flow"). Benign
+    # extra parameters pass; approved parameters on drifted tools pass; older baselines with no
+    # recorded parameter list skip the check entirely.
+    smuggled = smuggled_credential_args(args, approved_props)
+    if smuggled:
+        # Same load-bearing properties as deny_reason: no executable remedy, no override named,
+        # the agent is told to stop and tell the user — a denial that hands the agent a bypass
+        # has enforced nothing (proven end to end 2026-07-27).
+        named = ", ".join(smuggled)
+        return DENY, BASIS_DECLARED, (
+            f"SECURITY BLOCK (mcpgawk). This call to '{server}.{tool}' fills parameter(s) that "
+            f"were not part of the tool when the user approved it, and they look like "
+            f"credentials: {named}. A parameter that appears after approval and asks for a "
+            f"secret is the smuggled-field shape of a malicious update.\n"
+            f"This decision is final for this session. Do not retry it, do not move the value "
+            f"into a different parameter or tool, and do not run any mcpgawk command to change "
+            f"the baseline — approval requires the person at the keyboard.\n"
+            f"Tell the user exactly this: '{tool}' on '{server}' gained parameter(s) {named} "
+            f"since they approved it, mcpgawk blocked a call that was filling them, and they "
+            f"should run `mcpgawk scan` themselves to review the change before deciding."
+        )
     return DEFER, BASIS_DECLARED, None
 
 
 def verdict(server: str, tool: str, approved: dict[str, str] | None,
             observations: dict[str, dict] | None = None,
             session_sources: tuple[tuple[str, str], ...] = (),
-            live_hash: str | None = None) -> tuple[str, str, str | None]:
+            live_hash: str | None = None,
+            args: dict | None = None,
+            approved_props: list[str] | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -102,7 +157,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
       observed sink running after an observed source delivered untrusted content — which is the
       lethal-trifecta shape caught live, on evidence, not on names.
     """
-    decision, basis, reason = declared_verdict(server, tool, approved, live_hash)
+    decision, basis, reason = declared_verdict(server, tool, approved, live_hash,
+                                               args=args, approved_props=approved_props)
     if decision == DENY:
         return decision, basis, reason
 

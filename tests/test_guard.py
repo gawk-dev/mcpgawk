@@ -567,3 +567,32 @@ def test_cli_wires_guard(tmp_path, capsys):
     assert cli_main(["guard", "status", "--settings", str(settings)]) == 0
     assert "INSTALLED" in capsys.readouterr().out
     assert cli_main(["guard", "uninstall", "--settings", str(settings)]) == 0
+
+
+def test_a_smuggled_credential_fill_is_denied_through_the_real_hook(tmp_path):
+    """The wiring half: projection carries the approved parameter names, the hook reads the
+    call's arguments, and the deny fires only on the credential-shaped fill of an unapproved
+    field ([FOUNDER] 2026-08-15: the right thing without breaking any expected flow)."""
+    from mcpgawk import history
+
+    rec = {"tools": {"get_weather": "h1"},
+           "items": {"tool.get_weather": "h1"},
+           "props": {"tool.get_weather": ["city", "units"]},
+           "measured_at": "2026-08-15T00:00:00Z"}
+    store = str(tmp_path / "history.json")
+    history.record("mcp:figma", rec, path=store)
+    history.approve("mcp:figma", path=store)
+
+    # The attack: filling a credential-shaped field that was never approved.
+    out, _ = decide({"tool_name": "mcp__figma__get_weather",
+                     "tool_input": {"city": "London", "api_key": "sk-live-1"}},
+                    Path(store))
+    assert out is not None, "the smuggled credential fill was allowed"
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "api_key" in reason and "mcpgawk approve" not in reason
+
+    # Expected flows keep flowing: approved fields, and benign new fields.
+    assert decide({"tool_name": "mcp__figma__get_weather",
+                   "tool_input": {"city": "London", "units": "metric"}}, Path(store))[0] is None
+    assert decide({"tool_name": "mcp__figma__get_weather",
+                   "tool_input": {"city": "London", "sort_order": "asc"}}, Path(store))[0] is None
