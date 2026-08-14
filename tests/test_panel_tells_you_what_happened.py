@@ -139,7 +139,8 @@ def test_a_server_with_no_oauth_is_refused_fast_not_hung(monkeypatch):
     # No in-band login tool either — the refusal path under test is the server that has NEITHER
     # flow. kite-class servers (in-band login tool) are covered by the test below.
     from mcpgawk import remote_login as _rl
-    monkeypatch.setattr(_rl, "inband_login", lambda url, headers=None, timeout=20.0: None)
+    monkeypatch.setattr(_rl, "inband_login", lambda url=None, **kw: None)
+    monkeypatch.setattr(_rl, "inband_login_held", lambda url=None, **kw: None)
 
     def must_not_run(*a, **k):                       # noqa: ANN002, ANN003
         raise AssertionError("a login subprocess was started for a server with no OAuth")
@@ -188,8 +189,8 @@ def test_a_server_with_an_inband_login_tool_gets_a_real_link(monkeypatch):
     from mcpgawk import discover, panel, remote_login
 
     monkeypatch.setattr(panel, "_oauth_unsupported_reason", lambda url: "no oauth")
-    monkeypatch.setattr(remote_login, "inband_login",
-                        lambda url, headers=None, timeout=20.0:
+    monkeypatch.setattr(remote_login, "inband_login_held",
+                        lambda url=None, **kw:
                         ("https://mcp.kite.trade/authorize?session_id=abc", "WARNING: markets."))
     monkeypatch.setattr(discover, "discover_servers",
                         lambda *a, **k: {"kite": {"url": "https://mcp.kite.trade/mcp"}})

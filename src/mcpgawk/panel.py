@@ -3567,16 +3567,21 @@ def run_login(name: str | None) -> dict[str, Any]:
         # time kite connects me to the webpage and i need to provide access"). A genuine panel
         # does that call FOR the user and hands them the link, instead of telling them to go look
         # at the server's tools themselves.
-        inband = remote_login.inband_login(url)
+        # HELD, not fire-and-forget: the link kite returns is bound to the session that asked,
+        # and closing that session killed every link on arrival ("session error" the moment the
+        # founder clicked, 2026-08-14). The session now stays alive ~5 minutes while the human
+        # authorises.
+        inband = remote_login.inband_login_held(url=url)
         if inband:
             auth_url, server_notice = inband
             _ACTION.update(login_url=auth_url,
                            notice=f"{name} signs in through its own login tool. "
                                   f"{server_notice}")
             return {"ok": True,
-                    "message": f"{name} sign-in link is ready — open it from this banner. "
-                               f"The server binds access to a session, so your agent may ask "
-                               f"once more in its own chat; that is {name}'s model, not an error."}
+                    "message": f"{name} sign-in link is ready — open it from this banner within "
+                               f"5 minutes (it is bound to a live session we are holding for "
+                               f"you). Your agent may ask once more in its own chat; that is "
+                               f"{name}'s model, not an error."}
         return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
     try:
         proc, log_path = _run_login_cli(url, _transport_flag(entry, url))

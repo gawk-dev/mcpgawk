@@ -344,3 +344,74 @@ def inband_setup(command: str, args: list[str], env: dict[str, str],
         return asyncio.run(asyncio.wait_for(_go(), timeout))
     except Exception:                              # noqa: BLE001 — the caller reports, never hangs
         return None
+
+
+def inband_login_held(url: str | None = None, *, command: str | None = None,
+                      args: list[str] | None = None, env: dict[str, str] | None = None,
+                      hold_seconds: float = 300.0,
+                      connect_timeout: float = 45.0) -> tuple[str, str] | None:
+    """Like `inband_login`, but KEEPS THE SESSION ALIVE after handing back the URL.
+
+    The defect this exists for, found by the founder clicking the real link (2026-08-14): kite's
+    `login` tool returns `…/authorize?session_id=<THIS session>` — the URL is bound to the MCP
+    session that asked. The first implementation closed the session the moment it had the URL, so
+    every link was dead on arrival: "session error" the instant a human opened it. The session now
+    stays connected in a background thread for `hold_seconds` (the same five minutes the OAuth
+    flow grants a human), which is what makes the link real.
+    """
+    import asyncio
+    import queue
+    import re as _re
+    import threading
+
+    out: queue.Queue = queue.Queue()
+
+    def run() -> None:
+        async def go() -> None:
+            from mcp.client.session import ClientSession
+
+            async def drive(session) -> bool:
+                await session.initialize()
+                listed = await session.list_tools()
+                name = next((t.name for t in listed.tools
+                             if t.name in _INBAND_LOGIN_NAMES or "login" in t.name.lower()), None)
+                if name is None:
+                    out.put(None)
+                    return False
+                result = await session.call_tool(name, {})
+                text = " ".join(getattr(c, "text", "") or "" for c in result.content)
+                hit = _re.search(r"https?://\S+", text)
+                if not hit:
+                    out.put(None)
+                    return False
+                out.put((hit.group(0).rstrip(".,)*`"), text[:400]))
+                return True
+
+            if command:
+                from mcp.client.stdio import StdioServerParameters, stdio_client
+                params = StdioServerParameters(command=command, args=list(args or []),
+                                               env=dict(env or {}))
+                async with stdio_client(params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        if await drive(session):
+                            await asyncio.sleep(hold_seconds)   # the link lives while we do
+            elif url:
+                from mcp.client.streamable_http import streamable_http_client
+                async with streamable_http_client(url) as streams:
+                    async with ClientSession(streams[0], streams[1]) as session:
+                        if await drive(session):
+                            await asyncio.sleep(hold_seconds)
+
+        try:
+            asyncio.run(go())
+        except Exception:                          # noqa: BLE001 — the queue carries the verdict
+            try:
+                out.put(None)
+            except Exception:                      # noqa: BLE001
+                pass
+
+    threading.Thread(target=run, daemon=True, name="mcpgawk-held-login").start()
+    try:
+        return out.get(timeout=connect_timeout)
+    except queue.Empty:
+        return None
