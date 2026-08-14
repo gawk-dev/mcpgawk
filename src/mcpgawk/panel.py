@@ -3657,9 +3657,11 @@ def _login_button_applicable(entry: dict, name: str = "") -> bool:
                     if name in (se.get("aliases") or []):
                         rec = se.get("approved") or (se.get("history") or [{}])[-1]
                         tools = [t.lower() for t in (rec.get("tools") or {})]
-                        return any("login" in t or any(m in t for m in
-                                   ("check_auth_status", "auth_status", "get_instructions",
-                                    "get_trading_setup", "setup")) for t in tools)
+                        # AUTH-shaped evidence only — bare "setup"/"instructions" put a sign-in
+                        # button on browserstack, whose auth is env keys it already carries, and
+                        # the click called a test scaffolder (founder, live, 2026-08-14).
+                        return any("login" in t or "check_auth_status" in t or "auth_status" in t
+                                   or "keypair" in t for t in tools)
             except Exception:  # noqa: BLE001 - an unreadable store must not add buttons
                 return False
         return False

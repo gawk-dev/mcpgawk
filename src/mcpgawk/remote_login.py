@@ -194,8 +194,11 @@ _INBAND_LOGIN_NAMES = ("login", "authorize", "authenticate", "connect")
 #: Revolut X's `check_auth_status` answers "Not configured" with numbered steps and explicitly
 #: instructs clients to present them all. Relaying those verbatim IS the sign-in flow for this
 #: class; there is nothing else to run.
-_INBAND_STATUS_NAMES = ("check_auth_status", "get_instructions", "get_trading_setup",
-                        "auth_status", "setup")
+#: AUTH-shaped names only. The first version included bare "setup" — which matched browserstack's
+#: `setupBrowserStackAutomateTests` (test scaffolding, mandatory arguments), so the panel called
+#: it with {} and rendered the raw validation error as "sign-in steps" (founder, live,
+#: 2026-08-14). A generic word is not a shape; every name here must carry auth semantics.
+_INBAND_STATUS_NAMES = ("check_auth_status", "auth_status", "login_status")
 
 def inband_login(url: str | None = None, headers: dict[str, str] | None = None,
                  timeout: float = 30.0, *, command: str | None = None,
@@ -238,6 +241,12 @@ def inband_login(url: str | None = None, headers: dict[str, str] | None = None,
             return None
         result = await session.call_tool(target, {})
         text = " ".join(getattr(c, "text", "") or "" for c in result.content)
+        # An ERROR is not a sign-in surface. A tool that refuses its arguments proves only that
+        # we called the wrong tool — rendering its validation complaints as "sign-in steps" is
+        # noise dressed as guidance. Fall through to the honest refusal instead.
+        if getattr(result, "is_error", False) or getattr(result, "isError", False) \
+                or text.lstrip().startswith("MCP error"):
+            return None
         hit = _re.search(r"https?://\S+", text)
         auth_url = hit.group(0).rstrip(".,)*`") if hit else ""
         if kind == "login" and not auth_url:
@@ -271,7 +280,8 @@ def inband_login(url: str | None = None, headers: dict[str, str] | None = None,
 #: configure_api_key -> check_auth_status. Matched by SHAPE so the next server with this model
 #: works without a special case.
 _KEYGEN_NAMES = ("generate_keypair", "create_keypair", "generate_key", "keygen")
-_CONFIGURE_NAMES = ("configure_api_key", "set_api_key", "configure_key", "configure")
+#: bare "configure" was greedy for the same reason bare "setup" was: key/auth context required.
+_CONFIGURE_NAMES = ("configure_api_key", "set_api_key", "configure_key")
 
 
 def inband_setup(command: str, args: list[str], env: dict[str, str],

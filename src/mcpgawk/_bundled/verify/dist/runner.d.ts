@@ -19,6 +19,28 @@ export declare function stderrTailOf(transport: object): string;
  * user needs; the frames below it are for us, and stay in the audit log.
  */
 export declare function explainChildFailure(stderrTail: string): string;
+/** The client surface verify actually uses — satisfied by BOTH the SDK Client (legacy MCP) and
+ * the ModernClient adapter (2026-07-28). Both protocol generations are first-class: legacy is
+ * tried first (richer identity, unchanged behaviour for every server that exists today), modern
+ * is the fallback taken exactly when a server refuses the legacy handshake — the post-upgrade
+ * shape the ecosystem is moving to. Mirrors the Python probe's policy, for the same reason. */
+export type VerifyClient = {
+    listTools(): Promise<{
+        tools: {
+            name: string;
+            description?: string;
+            inputSchema?: unknown;
+            annotations?: unknown;
+        }[];
+    }>;
+    callTool(params: {
+        name: string;
+        arguments?: Record<string, unknown>;
+    }, resultSchema?: undefined, options?: {
+        timeout?: number;
+    }): Promise<unknown>;
+    close(): Promise<void>;
+};
 /** Connect once and enumerate the server's tools (works for stdio and remote). */
 export declare function listTools(server: ServerConfig): Promise<ToolInfo[]>;
 /** Call ONE tool once and return its text output — for enumerating a dynamic-dispatch server's

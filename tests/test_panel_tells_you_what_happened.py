@@ -255,3 +255,37 @@ def test_configure_reports_the_servers_own_verdict(monkeypatch):
     assert calls == [("configure", "rk-live-PASTED")], "the pasted key must reach the tool"
     assert res["ok"] is True
     assert not panel._ACTION.get("setup_text"), "the spent flow must clear its state"
+
+
+def test_a_scaffolding_tool_is_never_mistaken_for_a_sign_in_surface(monkeypatch):
+    """browserstack, live (founder, 2026-08-14): bare "setup" matched
+    `setupBrowserStackAutomateTests`, the panel called it with {}, and the raw argument-validation
+    dump rendered as "sign-in steps". Two contracts, pinned separately: generic words are not
+    auth shapes, and an ERROR result is never a sign-in surface."""
+    from mcpgawk import panel
+
+    entry = {"command": "npx", "args": ["browserstack-mcp"], "env": {"BROWSERSTACK_ACCESS_KEY": "x"}}
+
+    class _FakeStore:
+        @staticmethod
+        def load():
+            return {"servers": {"mcp:bs": {
+                "aliases": ["browserstack"],
+                "approved": {"tools": {"setupBrowserStackAutomateTests": "h1",
+                                       "runTestsOnBrowserStack": "h2"}}}}}
+
+    monkeypatch.setattr(panel, "history", _FakeStore, raising=False)
+    from mcpgawk import history as real_history
+    monkeypatch.setattr(real_history, "load", _FakeStore.load)
+    assert panel._login_button_applicable(entry, "browserstack") is False, \
+        "a test scaffolder put a sign-in button on an env-key server again"
+
+
+def test_an_error_result_falls_through_to_the_honest_refusal():
+    """The error-shape guard in remote_login: 'MCP error -32602: …' is a wrong-tool symptom, not
+    guidance for the user."""
+    from mcpgawk.remote_login import _INBAND_STATUS_NAMES
+
+    assert "setup" not in _INBAND_STATUS_NAMES, "the greedy matcher is back"
+    assert all("auth" in n or "login" in n for n in _INBAND_STATUS_NAMES), \
+        "every status name must carry auth semantics"
