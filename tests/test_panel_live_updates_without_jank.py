@@ -16,9 +16,36 @@ for before (see _serve_in_thread's docstring in test_local_surface_token.py).
 from __future__ import annotations
 
 import json
+import re
+import socket
+import threading
+import time
 import urllib.request
+from urllib.parse import parse_qs, urlparse
 
-from tests.test_local_surface_token import _serve_in_thread
+
+def _serve_in_thread(serve, **kw):
+    """Self-contained copy of test_local_surface_token's helper: that file is deliberately NOT in
+    PUBLIC_TESTS, so importing from it broke collection in the public repo (caught by the public
+    suite, 2026-08-14). Same rationale as the original: drive the real HTTP surface, never the
+    renderer alone."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    seen: list[str] = []
+    t = threading.Thread(target=lambda: serve(port=port, open_browser=False, log=seen.append),
+                         daemon=True)
+    t.start()
+    url = ""
+    for _ in range(100):
+        time.sleep(0.05)
+        hit = [m.group(0) for line in seen
+               for m in [re.search(r"http://127\.0\.0\.1:\d+/\?t=\S+", line)] if m]
+        if hit:
+            url = hit[0]
+            break
+    assert url, f"surface did not start; log was {seen!r}"
+    return url, parse_qs(urlparse(url).query)["t"][0], port
 
 
 def _get(url: str, timeout: float = 5.0):
