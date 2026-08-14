@@ -1444,6 +1444,24 @@ def _guard_is_installed() -> bool:
         return True                                # stay quiet rather than nag wrongly
 
 
+def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> str:
+    """One honest line for a sign-in that died — never a traceback, never circular advice.
+
+    Both failures shipped to the founder's terminal on figma (2026-08-14): the SDK's raw
+    'OAuth flow error' traceback, then our own scan-path message telling them to "retry with
+    `--login`" — from INSIDE the login flow that had just failed. A server that refuses Dynamic
+    Client Registration (403 on the registration endpoint) is a dead end for this flow, and the
+    honest answer names that instead of sending the user in a circle."""
+    err = " ".join((flow_error or snap_error or "no detail").split())
+    if "Registration failed" in err:
+        return (f"  {name}: sign-in is not possible from here — this server refuses automatic "
+                f"client registration ({err[:120]}). It only accepts OAuth clients it already "
+                f"knows about; check {name}'s documentation for its supported MCP clients.")
+    # Scan-path advice is circular inside the login flow itself: we ARE `--login`.
+    err = err.split("; retry with")[0]
+    return f"  {name}: sign-in did not complete — {err[:160]}"
+
+
 def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
     """ONE prompt for every server that needs credentials — never one prompt per server, which the
     founder rejected outright as the painpoint this view exists to remove.
@@ -1482,7 +1500,9 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
         finally:
             server.shutdown()               # always release the local callback port
         if snap.is_failure:
-            print(f"  {row.name}: sign-in did not complete — {(snap.error or '')[:90]}", file=sys.stderr)
+            from .oauth_login import last_flow_error
+            print(_signin_failure_line(row.name, snap.error or "", last_flow_error()),
+                  file=sys.stderr)
             continue
         # The row is replaced by a REAL measurement of the now-authenticated server, built through
         # the same label path as the original pass — so the refreshed row cannot disagree with the

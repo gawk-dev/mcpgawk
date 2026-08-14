@@ -150,3 +150,62 @@ def test_the_access_token_never_reaches_the_snapshot(oauth_base, store, clicks):
 
     assert token not in json.dumps(snap.tools)
     assert token not in (snap.error or "")
+
+
+def test_a_dead_flow_is_one_honest_line_never_a_traceback_or_a_circle():
+    """figma, on the founder's terminal (2026-08-14): the SDK's raw 'OAuth flow error' traceback,
+    then our scan-path message advising "retry with `--login`" — from INSIDE the login flow that
+    had just failed. A DCR-refusing server (403 on registration) is a dead end; say so."""
+    from mcpgawk.cli import _signin_failure_line
+
+    line = _signin_failure_line(
+        "figma", "authentication required — retry with `--login`",
+        "Registration failed: 403 Forbidden")
+    assert "refuses automatic client registration" in line
+    assert "403" in line, "the server's own refusal must be quoted"
+    assert "--login" not in line, "circular advice inside the login flow"
+
+    generic = _signin_failure_line(
+        "x", "authentication required — the endpoint is live but refused this scan; "
+             "retry with `--login` or `--header ...`", None)
+    assert "retry with" not in generic, "we ARE --login; the advice is circular"
+    assert "refused this scan" in generic, "the factual half must survive the trim"
+
+
+def test_the_sdk_traceback_is_captured_not_printed():
+    """With no logging configured, the SDK's `logger.exception` fell to Python's last-resort
+    stderr handler — a full traceback mid-sign-in. The capture keeps the SDK's words for the
+    failure line and stops propagation so the terminal never sees the dump."""
+    import logging
+
+    from mcpgawk import oauth_login
+
+    sdk = logging.getLogger("mcp.client.auth.oauth2")
+    root_seen: list[logging.LogRecord] = []
+
+    class Root(logging.Handler):
+        def emit(self, record):
+            root_seen.append(record)
+
+    root_handler = Root()
+    logging.getLogger().addHandler(root_handler)
+    try:
+        try:
+            raise ValueError("Registration failed: 403 Forbidden")
+        except ValueError:
+            sdk.exception("OAuth flow error")
+        assert oauth_login.last_flow_error() == "Registration failed: 403 Forbidden"
+        assert not root_seen, "the SDK record still propagates — the terminal gets the traceback"
+    finally:
+        logging.getLogger().removeHandler(root_handler)
+
+
+def test_a_new_flow_never_wears_the_last_flows_failure():
+    from mcpgawk import oauth_login
+
+    oauth_login._SdkFlowLog.last = "Registration failed: 403 Forbidden"
+    provider, server = oauth_login.build_login_provider("https://example.invalid/mcp")
+    try:
+        assert oauth_login.last_flow_error() is None
+    finally:
+        server.shutdown()

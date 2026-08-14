@@ -5,14 +5,16 @@ OAuth-protected server can be scanned: on first connect the system browser opens
 once, and the token is stored locally (`~/.gawk/oauth`, mode 0600) and refreshed automatically
 thereafter. No Node/`mcp-remote`, no from-scratch OAuth stack — and the token never leaves the
 machine (the local-first posture buyers in the MCP ecosystem explicitly ask for; the SDK handles
-DCR + PKCE + refresh, and the pre-registered-client fallback for servers like GitHub that opt out
-of Dynamic Client Registration).
+DCR + PKCE + refresh). A server that refuses Dynamic Client Registration is a DEAD END for this
+flow — measured on figma 2026-08-14: its registration endpoint answers 403 and the SDK raises,
+there is no automatic fallback. Naming that honestly is `last_flow_error`'s job below.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import threading
 import webbrowser
@@ -36,6 +38,30 @@ from mcp.shared.auth import (
 #: the licence cache is deliberately machine-bound to hostname + home directory, so moving HOME
 #: invalidates it (which is the anti-copy protection doing its job).
 _STORE_DIR = Path(os.environ.get("GAWK_OAUTH_STORE") or (Path.home() / ".gawk" / "oauth"))
+
+
+class _SdkFlowLog(logging.Handler):
+    """The MCP SDK logs OAuth failures as `logger.exception("OAuth flow error")` — with no logging
+    configured, Python's last-resort handler printed the FULL TRACEBACK into the founder's
+    terminal mid-sign-in (figma, 2026-08-14). A traceback is not a message to a person. This
+    handler keeps the SDK's own words for the caller to render honestly, and propagation stops so
+    the terminal never sees the raw dump."""
+
+    last: str | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        exc = record.exc_info[1] if record.exc_info else None
+        _SdkFlowLog.last = str(exc) if exc else record.getMessage()
+
+
+_sdk_auth_logger = logging.getLogger("mcp.client.auth")
+_sdk_auth_logger.addHandler(_SdkFlowLog())
+_sdk_auth_logger.propagate = False
+
+
+def last_flow_error() -> str | None:
+    """The SDK's own words for why the most recent OAuth flow died, or None if it did not."""
+    return _SdkFlowLog.last
 
 
 class FileTokenStorage:
@@ -109,6 +135,7 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
     """Construct an OAuthClientProvider that opens the system browser for approval and catches the
     redirect on a local loopback port. Returns (provider, callback_server); the caller MUST call
     server.shutdown() when the scan is done."""
+    _SdkFlowLog.last = None          # a stale reason must never explain a NEW flow's failure
     captured: dict[str, Optional[str]] = {"code": None, "state": None}
     done = threading.Event()
 
