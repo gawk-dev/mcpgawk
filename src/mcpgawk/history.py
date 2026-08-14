@@ -634,11 +634,24 @@ def display_name(store: dict[str, Any], key: str) -> str:
 
 
 def pending(store: dict[str, Any]) -> list[str]:
-    """Keys whose newest sighting differs from the approved baseline — i.e. unacknowledged drift."""
+    """Keys whose newest sighting differs from the approved baseline — i.e. unacknowledged drift.
+
+    ALL drift-relevant axes, not items alone. Found live 2026-08-15: browserstack's input
+    schemas changed (createLCASteps gained `requires_authentication`) — the scan reported the
+    drift, the surface pin caught it, and this function compared `items` only, so Decisions
+    said "0 waiting on you" while scan said "review the change, then approve". A schema-only
+    widening is the exact rug-pull class the pin was extended for (audit B2); a decision queue
+    that cannot see it is a queue the attacker routes around. An axis is compared only when
+    BOTH records carry it, so stores approved before that axis existed do not flood the queue
+    on upgrade — their drift stays invisible until the next approve, exactly as before."""
     out = []
     for key, entry in store.get("servers", {}).items():
         base, latest = approved(store, key), last(store, key)
-        if base and latest and base.get("items") != latest.get("items"):
+        if not (base and latest):
+            continue
+        if base.get("items") != latest.get("items") or any(
+                ax in base and ax in latest and base[ax] != latest[ax]
+                for ax in ("schemas", "props", "annotations")):
             out.append(key)
     return sorted(out)
 

@@ -1632,15 +1632,30 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                          f'{items}</ul></div>')
 
     _ran = d.get("verified_runs") or {}
+    # ONLY the current fleet renders as your fleet. The behaviour store keeps every server ever
+    # verified — including pytest fixtures from before the real-home write guard (evil, mal,
+    # dies…) — and rendering them unlabelled put fake servers in the founder's Trust table
+    # (tab audit, 2026-08-15). Folded with names, never silently dropped.
+    _fleet_names = set((d.get("entries") or {}).keys())
+    for _se in ((d.get("store") or {}).get("servers") or {}).values():
+        _fleet_names.update((_se or {}).get("aliases") or [])
+    _ran_gone = sorted(n for n, o in _ran.items()
+                       if isinstance(o, dict) and n not in _fleet_names)
     isorows = "".join(
         f'<tr><td class="nm">{_esc(n)}</td>'
         f'<td><span class="chip {"ok" if str(o.get("backend")) in ("proxied-container", "docker") else "warn"}">'
         f'{_esc(o.get("backend") or "?")}</span></td>'
         f'<td class="dim">{o.get("toolsChecked", "?")}</td>'
         f'<td class="dim">{len(o.get("skipped") or [])}</td></tr>'
-        for n, o in sorted(_ran.items()) if isinstance(o, dict)) or \
+        for n, o in sorted(_ran.items())
+        if isinstance(o, dict) and n in _fleet_names) or \
         ('<tr><td colspan="4" class="dim">No verify has run yet. Nothing here means nothing was '
          'watched — not that nothing is wrong.</td></tr>')
+    if _ran_gone:
+        _gone_shown = ", ".join(_ran_gone[:12]) + (", …" if len(_ran_gone) > 12 else "")
+        isorows += (f'<tr><td colspan="4" class="dim">{len(_ran_gone)} record(s) from servers '
+                    f'not in your current fleet (removed servers and old test fixtures) — kept '
+                    f'in the store, folded here: {_esc(_gone_shown)}</td></tr>')
     from .history import default_path as _history_path
     pathrows = "".join(
         f'<tr><td class="nm">{_esc(label)}</td><td class="dim">{_esc(str(pth))}</td></tr>'
@@ -1808,10 +1823,22 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return "<br>".join(bits) or ('<span class="dim">The surface moved; the record predates '
                                      'detailed diffs.</span>')
 
+    def _dec_chip(k: str) -> str:
+        """What enforcement is ACTUALLY doing about this pending drift. The hook denies by
+        tool-name projection, so a schema/annotation-only change (pending since 2026-08-15,
+        the audit-B2 rug-pull class) leaves every call passing — a flat "Blocked" chip here
+        claimed enforcement that was not happening, the worst lie a security product can
+        render. [CLAUDE-PROPOSED, undecided]: whether schema drift should also deny."""
+        base, latest = _h.approved(store, k), _h.last(store, k)
+        if base and latest and base.get("items") != latest.get("items"):
+            return '<span class="chip bad"><i></i>Blocked</span>'
+        return ('<span class="chip warn"><i></i>NOT blocked — schema/annotations only, '
+                'calls still pass</span>')
+
     dec = "".join(
         f'<tr><td class="nm">{_esc(_h.display_name(store, k))}</td>'
         f'<td>{_dec_what(k)}</td>'
-        f'<td><span class="chip bad"><i></i>Blocked</span></td>'
+        f'<td>{_dec_chip(k)}</td>'
         f'<td>{_dec_action(k)}</td></tr>'
         for k in pending) or \
         '<tr><td colspan="4" class="dim">Nothing is waiting on you.</td></tr>'
@@ -2086,6 +2113,10 @@ text-overflow:ellipsis;white-space:nowrap}}
 .fill{{height:100%;background:var(--acc);border-radius:999px}}
 .cbar .vl{{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--ink)}}
 table{{width:100%;border-collapse:collapse;font-size:13px}}
+/* A wide table must scroll INSIDE the card, never be clipped by its overflow:hidden — the
+   Findings table's last column was cut off with no way to reach it (founder's audit,
+   2026-08-15). */
+.tscroll{{overflow-x:auto}}
 th{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 text-align:left;font-weight:500;padding:9px 16px;background:var(--rail);
 border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
@@ -2253,8 +2284,9 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <div class="note">First-party egress — a server reaching its own vendor API — is listed and
         folded, not hidden. 42 of 42 findings on a real fleet were that; a detector that fires on
         normal traffic teaches you to ignore it.</div>
-      <table><thead><tr><th>server</th><th>tool</th><th>finding</th><th>severity</th>
-      <th>what it contacted</th><th>reproduced</th></tr></thead><tbody>{frows}</tbody></table>
+      <div class="tscroll"><table><thead><tr><th>server</th><th>tool</th><th>finding</th>
+      <th>severity</th><th>what it contacted</th><th>reproduced</th></tr></thead>
+      <tbody>{frows}</tbody></table></div>
     </div>
   </section>
 
@@ -2668,6 +2700,13 @@ def _run_action_bg(kind: str, target: str | None = None,
         _ACTION.update(running=True)
 
     def work():
+        # The panel's runs belong in the SAME provenance trail as the CLI's — Evidence listed
+        # only CLI runs, so a verify clicked in the panel left no row at all (founder's tab
+        # audit, 2026-08-15). Login stays un-logged deliberately: it is an auth act, not a
+        # check run, and the closed KINDS set is closed for a reason.
+        from . import runlog as _runlog
+        run_id = _runlog.start_run(kind, target or "fleet") if kind in ("scan", "verify") else None
+        status = _runlog.ERROR
         try:
             if kind == "login-configure":
                 res = run_login_configure(target, value)
@@ -2681,11 +2720,15 @@ def _run_action_bg(kind: str, target: str | None = None,
                 res = {"ok": False, "message": f"unknown action {kind!r}"}
             msg = res.get("message") or ("done" if res.get("ok") else "failed")
             rows = res.get("rows") or []
+            level = res.get("level") or ("ok" if res.get("ok") else "bad")
+            status = (_runlog.FINDINGS if level == "bad"
+                      else _runlog.OK if res.get("ok") else _runlog.INCOMPLETE)
         except Exception as exc:                  # noqa: BLE001 — an action must not kill the panel
             msg, rows = f"{type(exc).__name__}: {exc}", []
         with _ACTION_LOCK:
             _ACTION.update(running=False, message=msg, rows=rows, notice="", at=_now())
         _persist_action()
+        _runlog.finish_run(run_id, status, {"message": msg[:400]})
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -3064,12 +3107,31 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
         return frame + state + err + ('<div class="note">The monitoring store exists but holds no '
                                       'servers yet.</div>')
     parts = []
+    stale = 0
     for r in rows:
         ok = r.get("last_ok")
+        # A green "checked" with a 13-day-old timestamp read as coverage (founder's tab audit,
+        # 2026-08-15: 8 local servers, last checked 1 Aug, under "11 watched" and RUNNING).
+        # Local servers are excluded from polling BY DEFAULT — polling one spawns it with the
+        # credentials in its config — and the tab must say which rows are history, not coverage.
+        is_stale = False
+        last = str(r.get("last_check") or "")
+        if last:
+            try:
+                from datetime import datetime, timedelta, timezone
+                is_stale = (datetime.now(timezone.utc)
+                            - datetime.fromisoformat(last.replace("Z", "+00:00"))
+                            ) > timedelta(hours=24)
+            except ValueError:
+                pass
         # never checked != checked and failed. An unknown must never render as a pass.
-        chip = ('<span class="chip ok">checked</span>' if ok is True else
-                '<span class="chip bad">check failed</span>' if ok is False else
-                '<span class="chip unv">never checked</span>')
+        if is_stale and ok is not None:
+            chip = '<span class="chip unv">stale — not being re-checked</span>'
+            stale += 1
+        else:
+            chip = ('<span class="chip ok">checked</span>' if ok is True else
+                    '<span class="chip bad">check failed</span>' if ok is False else
+                    '<span class="chip unv">never checked</span>')
         alerts = (f'<span class="chip bad">{r["open_alerts"]}</span>' if r.get("open_alerts")
                   else "0")
         parts.append(
@@ -3079,9 +3141,19 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
             f'<td class="num">{alerts}</td>'
             f'<td class="dim">{_esc(str(r.get("last_check") or "never"))[:19]}</td></tr>')
     open_total = sum(int(r.get("open_alerts") or 0) for r in rows)
-    head = (f'<div class="filters"><span class="count" style="margin-left:0">{len(rows)} '
-            f'server(s) watched · {open_total} unresolved alert(s)</span></div>')
-    return (frame + state + err + head
+    live = len(rows) - stale
+    head = (f'<div class="filters"><span class="count" style="margin-left:0">{live} '
+            f'server(s) watched live'
+            + (f' · {stale} stale (in the store, NOT being re-checked)' if stale else '')
+            + f' · {open_total} unresolved alert(s)</span></div>')
+    stale_note = ""
+    if stale:
+        stale_note = ('<div class="note warn">Stale rows are HISTORY, not coverage. Local '
+                      'servers are not polled by default — polling one spawns it every '
+                      'interval, running its code with the credentials in its config. Start '
+                      'monitoring with <code>--include-local</code> to poll them '
+                      'deliberately.</div>')
+    return (frame + state + err + head + stale_note
             + '<table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
               '<th>open alerts</th><th>when</th></tr></thead>'
               f'<tbody>{"".join(parts)}</tbody></table>')

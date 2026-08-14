@@ -341,3 +341,60 @@ def test_sign_in_button_carries_the_fleet_name_never_None(monkeypatch):
     assert login_forms, "the qualifying remote server got no sign-in button"
     assert any('name="key" value="figma"' in f for f in login_forms), \
         "the sign-in form must carry the fleet name run_login resolves"
+
+
+def test_a_stale_monitor_row_is_history_not_coverage():
+    """Founder's tab audit 2026-08-15: 8 local servers last checked 13 days earlier rendered as
+    green "checked" under "11 watched · RUNNING". Locals are excluded from polling by default
+    (polling one spawns it with its config's credentials) — a row the daemon is not re-checking
+    must say so, and the headline must not count it as watched."""
+    from datetime import datetime, timedelta, timezone
+
+    from mcpgawk.panel import _monitor_pane
+
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(minutes=30)).isoformat()
+    old = (now - timedelta(days=13)).isoformat()
+    pane = _monitor_pane({
+        "installed": True, "running": True, "since": "2026-08-14T16:34:59",
+        "db_present": True,
+        "servers": [
+            {"server_id": "brandfetch", "last_ok": True, "has_baseline": True,
+             "open_alerts": 1, "last_check": fresh},
+            {"server_id": "kite", "last_ok": True, "has_baseline": True,
+             "open_alerts": 0, "last_check": old},
+        ]})
+    assert "stale — not being re-checked" in pane, "a 13-day-old check rendered as coverage"
+    assert "1 server(s) watched live" in pane, pane[:400]
+    assert "1 stale" in pane
+    assert "--include-local" in pane, "the way to actually poll locals must be named"
+    # The fresh row keeps its honest green.
+    assert '<span class="chip ok">checked</span>' in pane
+
+
+def test_schema_only_drift_never_renders_as_blocked():
+    """The hook denies by tool-name projection, so a schema-only change leaves every call
+    passing — the Decisions chip said "Blocked" anyway (browserstack, live 2026-08-15).
+    Claiming enforcement that is not happening is the worst lie a security product renders."""
+    from mcpgawk import panel
+
+    store = {"servers": {
+        "mcp:schema-only": {
+            "aliases": ["schema-only"],
+            "approved": {"items": {"tool.a": "f1"}, "schemas": {"tool.a": "s1"}},
+            "history": [{"items": {"tool.a": "f1"}, "schemas": {"tool.a": "s2"}}]},
+        "mcp:tools-added": {
+            "aliases": ["tools-added"],
+            "approved": {"items": {"tool.a": "f1"}},
+            "history": [{"items": {"tool.a": "f1", "tool.evil": "f2"}}]},
+    }}
+    html = panel.render(
+        {"entries": {}, "store": store, "pending": ["mcp:schema-only", "mcp:tools-added"],
+         "findings": [], "recent_calls": [], "hooks": {}, "adapters": {},
+         "unscannable": [], "observed": {}},
+        token="tok", action=None)
+    import re as _re
+    rows = {m.group(1): m.group(0) for m in
+            _re.finditer(r"<tr><td class=\"nm\">([\w-]+)</td>(?:(?!</tr>).)*</tr>", html, _re.S)}
+    assert "NOT blocked" in rows.get("schema-only", ""), "schema-only drift claimed enforcement"
+    assert ">Blocked<" in rows.get("tools-added", ""), "a genuinely blocked drift lost its chip"
