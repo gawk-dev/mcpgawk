@@ -204,3 +204,54 @@ def test_a_server_with_an_inband_login_tool_gets_a_real_link(monkeypatch):
                                    "label": "login · kite", "message": res["message"],
                                    "at": panel._now()})
     assert "https://mcp.kite.trade/authorize?session_id=abc" in banner,         "the authorisation link must be ON the banner, not in a log"
+
+
+def test_guided_setup_runs_the_servers_own_steps(monkeypatch):
+    """Reciting "run the generate_keypair tool" at a user with no way to run it is a dead end
+    ([FOUNDER] 2026-08-14: "it is not working"). The click now RUNS the server's keygen tool; the
+    public key lands on the banner beside a form that finishes the job with the pasted API key —
+    which travels POST -> tool call and is never stored."""
+    from mcpgawk import discover, dxt, panel, remote_login
+
+    entry = {"command": "node", "args": ["x.js"], "_manifest_dir": "/tmp"}
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {"Revolut X": entry})
+    monkeypatch.setattr(dxt, "resolve_for_launch", lambda e: dict(e))
+    monkeypatch.setattr(remote_login, "login_url", lambda e, name="", path=None: "")
+    monkeypatch.setattr(remote_login, "inband_setup",
+                        lambda c, a, e, step, value=None, timeout=40.0:
+                        ("pubkey", "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"))
+    panel._ACTION.update(running=False, label="login · Revolut X", message="", rows=[],
+                         notice="", login_url="", setup_text="", setup_key="", at=panel._now())
+    res = panel.run_login("Revolut X")
+    assert res["ok"] is True and "Configure" in res["message"], res
+
+    tokened = panel._action_banner({**dict(panel._ACTION), "running": False,
+                                    "label": "login · Revolut X", "message": res["message"],
+                                    "at": panel._now()}, token="secret-tok")
+    assert "BEGIN PUBLIC KEY" in tokened, "the public key must be ON the banner to copy"
+    assert 'name="act" value="login-configure"' in tokened, "the finish form is missing"
+    assert 'type="password"' in tokened, "the API key input must not echo"
+
+    bare = panel._action_banner({**dict(panel._ACTION), "running": False,
+                                 "label": "login · Revolut X", "message": res["message"],
+                                 "at": panel._now()})
+    assert "login-configure" not in bare, "a tokenless viewer must not get the action form"
+
+
+def test_configure_reports_the_servers_own_verdict(monkeypatch):
+    from mcpgawk import discover, dxt, panel, remote_login
+
+    entry = {"command": "node", "args": ["x.js"]}
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {"Revolut X": entry})
+    monkeypatch.setattr(dxt, "resolve_for_launch", lambda e: dict(e))
+    calls = []
+
+    def fake_setup(c, a, e, step, value=None, timeout=40.0):
+        calls.append((step, value))
+        return ("status", "Configured! Authentication is working.")
+
+    monkeypatch.setattr(remote_login, "inband_setup", fake_setup)
+    res = panel.run_login_configure("Revolut X", "rk-live-PASTED")
+    assert calls == [("configure", "rk-live-PASTED")], "the pasted key must reach the tool"
+    assert res["ok"] is True
+    assert not panel._ACTION.get("setup_text"), "the spent flow must clear its state"

@@ -190,45 +190,147 @@ def consent_text(name: str, entry: dict[str, Any]) -> str:
 #: Standard OAuth servers never get here — the panel tries the challenge/discovery flow first.
 _INBAND_LOGIN_NAMES = ("login", "authorize", "authenticate", "connect")
 
+#: Tools that don't return an auth URL but DO return the server's own sign-in instructions —
+#: Revolut X's `check_auth_status` answers "Not configured" with numbered steps and explicitly
+#: instructs clients to present them all. Relaying those verbatim IS the sign-in flow for this
+#: class; there is nothing else to run.
+_INBAND_STATUS_NAMES = ("check_auth_status", "get_instructions", "get_trading_setup",
+                        "auth_status", "setup")
 
-def inband_login(url: str, headers: dict[str, str] | None = None,
-                 timeout: float = 20.0) -> tuple[str, str] | None:
-    """Call the server's OWN login tool and return (auth_url, server_notice), or None.
+def inband_login(url: str | None = None, headers: dict[str, str] | None = None,
+                 timeout: float = 30.0, *, command: str | None = None,
+                 args: list[str] | None = None,
+                 env: dict[str, str] | None = None) -> tuple[str, str] | None:
+    """Drive a server's OWN sign-in surface and return (auth_url, server_text), or None.
 
-    The other way MCP servers do sign-in: not an OAuth challenge, but a tool that hands back an
-    authorisation URL bound to THIS session. The caller's job is to put that URL in front of the
-    human — which is exactly what the panel's banner link does. `server_notice` is whatever prose
-    the tool returned around the URL (kite explicitly instructs clients to display its warning);
-    the caller renders it through the normal scrubbing path, never raw.
+    Three real shapes, measured on the founder's fleet 2026-08-14:
+    * kite: a `login` tool returns the actual authorisation URL (plus a warning it instructs
+      clients to display) — auth_url is that link.
+    * Revolut X: no URL tool; `check_auth_status` returns numbered setup steps and instructs
+      clients to present ALL of them — auth_url is "" and server_text carries the steps. Relaying
+      them IS the flow.
+    * Everything else: None, and the caller keeps its honest refusal.
 
-    Sync on purpose: called from the panel's background action thread. Returns None on ANY
-    failure — "no in-band login" and "could not ask" both mean the caller falls back to its
-    honest refusal, which names the manual command.
+    Works over HTTP (`url`) or stdio (`command`/`args`/`env` — Desktop extensions, resolved by
+    dxt with Desktop's own defaults). Sync on purpose (panel background thread); any failure is
+    None — "could not ask" falls back to the refusal, never to a hang.
     """
     import asyncio
     import re as _re
 
+    async def _drive(session) -> tuple[str, str] | None:
+        await session.initialize()
+        tools = await session.list_tools()
+        names = [t.name for t in tools.tools]
+        target = next((n for n in names if n in _INBAND_LOGIN_NAMES
+                       or "login" in n.lower()), None)
+        kind = "login"
+        if target is None:
+            # OUR preference order, not the server's listing order: a status tool answers "what
+            # should the user do right now", a generic instructions tool answers "what is this
+            # server" — Revolut X has both, and the first is the sign-in surface.
+            for want in _INBAND_STATUS_NAMES:
+                target = next((n for n in names if want in n.lower()), None)
+                if target:
+                    break
+            kind = "status"
+        if target is None:
+            return None
+        result = await session.call_tool(target, {})
+        text = " ".join(getattr(c, "text", "") or "" for c in result.content)
+        hit = _re.search(r"https?://\S+", text)
+        auth_url = hit.group(0).rstrip(".,)*`") if hit else ""
+        if kind == "login" and not auth_url:
+            return None                       # a login tool that yields no link proves nothing
+        return auth_url, text[:900]
+
     async def _go() -> tuple[str, str] | None:
         from mcp.client.session import ClientSession
-        from mcp.client.streamable_http import streamable_http_client
-        async with streamable_http_client(url) as streams:
-            read, write = streams[0], streams[1]
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                name = next((t.name for t in tools.tools
-                             if t.name in _INBAND_LOGIN_NAMES
-                             or "login" in t.name.lower()), None)
-                if name is None:
-                    return None
-                result = await session.call_tool(name, {})
-                text = " ".join(getattr(c, "text", "") or "" for c in result.content)
-                hit = _re.search(r"https?://\S+", text)
-                if not hit:
-                    return None
-                return hit.group(0).rstrip(".,)*`"), text[:400]
+        if command:
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+            params = StdioServerParameters(command=command, args=list(args or []),
+                                           env=dict(env or {}))
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    return await _drive(session)
+        if url:
+            from mcp.client.streamable_http import streamable_http_client
+            async with streamable_http_client(url) as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    return await _drive(session)
+        return None
 
     try:
         return asyncio.run(asyncio.wait_for(_go(), timeout))
-    except Exception:                              # noqa: BLE001 — fall back to the honest refusal
+    except Exception:                              # noqa: BLE001 — the refusal owns failure
+        return None
+
+
+#: Guided in-band setup: the tool pairs that make "sign in" an executable flow rather than a
+#: recited one. Revolut X: generate_keypair -> user registers the public key on Revolut's site ->
+#: configure_api_key -> check_auth_status. Matched by SHAPE so the next server with this model
+#: works without a special case.
+_KEYGEN_NAMES = ("generate_keypair", "create_keypair", "generate_key", "keygen")
+_CONFIGURE_NAMES = ("configure_api_key", "set_api_key", "configure_key", "configure")
+
+
+def inband_setup(command: str, args: list[str], env: dict[str, str],
+                 step: str, value: str | None = None, timeout: float = 40.0) -> tuple[str, str] | None:
+    """Execute ONE step of a server's own setup flow. Returns (kind, text) or None.
+
+    step="start": run the server's key-generation tool; text is its verbatim output (the public
+    key the user must register — PUBLIC by construction, so the caller may display it unscrubbed
+    but always HTML-escaped).
+    step="configure": run the configure tool with `value` (the API key the user pasted — passed
+    straight to the tool, NEVER stored anywhere by the caller), then the status tool; text is the
+    status tool's answer, which is the server's own verdict on whether sign-in now works.
+    """
+    import asyncio
+
+    async def _go() -> tuple[str, str] | None:
+        from mcp.client.session import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        params = StdioServerParameters(command=command, args=list(args), env=dict(env))
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                listed = await session.list_tools()
+
+                def pick(wanted: tuple[str, ...]):
+                    for want in wanted:
+                        for t in listed.tools:
+                            if want in t.name.lower():
+                                return t
+                    return None
+
+                def text_of(result) -> str:
+                    return " ".join(getattr(c, "text", "") or "" for c in result.content)
+
+                if step == "start":
+                    tool = pick(_KEYGEN_NAMES)
+                    if tool is None:
+                        return None
+                    return "pubkey", text_of(await session.call_tool(tool.name, {}))[:1500]
+                if step == "configure" and value:
+                    tool = pick(_CONFIGURE_NAMES)
+                    if tool is None:
+                        return None
+                    # The argument name comes from the tool's OWN schema — first required string —
+                    # so the next server's configure(secret=...) works without a special case.
+                    schema = tool.inputSchema or {}
+                    props = schema.get("properties") or {}
+                    required = schema.get("required") or list(props)
+                    arg = next((r for r in required
+                                if (props.get(r) or {}).get("type", "string") == "string"),
+                               next(iter(props), "api_key"))
+                    out = text_of(await session.call_tool(tool.name, {arg: value}))
+                    status = pick(_INBAND_STATUS_NAMES)
+                    if status is not None:
+                        out = text_of(await session.call_tool(status.name, {}))
+                    return "status", out[:1200]
+                return None
+
+    try:
+        return asyncio.run(asyncio.wait_for(_go(), timeout))
+    except Exception:                              # noqa: BLE001 — the caller reports, never hangs
         return None

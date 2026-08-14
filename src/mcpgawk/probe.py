@@ -499,6 +499,16 @@ async def probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
 
 async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     if entry.get("command"):
+        # Desktop EXTENSIONS launch through placeholders (`${__dirname}`, `${user_config.*}`).
+        # verify has resolved them since 38i-q; the SCAN path never did, so an extension like
+        # Revolut X launched the literal string `node ${__dirname}/dist/index.js`, failed, and
+        # recorded UNREACHABLE — which then gated every downstream surface (no baseline → no
+        # sign-in button → "the revolut login is not even starting", founder 2026-08-14). Resolve
+        # with Desktop's OWN values (settings file, else manifest defaults) — the same launch
+        # Desktop itself performs; an extension that genuinely cannot launch outside Desktop
+        # still refuses honestly (resolve returns None → the raw entry → command-missing).
+        from . import dxt as _dxt
+        entry = _dxt.resolve_for_launch(entry) or entry
         command = entry["command"]
         if _missing_program(command):
             # Not launched: there is nothing to launch. Worth its own kind because a configured

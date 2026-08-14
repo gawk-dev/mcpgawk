@@ -29,6 +29,7 @@ The split this module draws:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 #: `${__dirname}` — the extension's own install directory.
@@ -50,11 +51,57 @@ def _launch_strings(entry: dict[str, Any]) -> list[str]:
     return out
 
 
+def _user_config_values(entry: dict[str, Any]) -> dict[str, str]:
+    """The `${user_config.*}` values this machine actually has, from the two places Claude Desktop
+    itself reads them: the per-extension SETTINGS file (the user's overrides), then the MANIFEST's
+    declared defaults.
+
+    This is what makes the resolution honest rather than fabricated: Desktop launches Revolut X
+    with `config_dir=~/.config/revolut-x` and `api_url=https://revx.revolut.com` when the user has
+    configured nothing, because those are the manifest defaults — measured on the founder's machine
+    2026-08-14, where refusing to resolve them meant the extension could never be scanned,
+    verified, OR signed into from the panel ("the revolut login is not even starting").
+
+    Only string/directory values are usable; anything else stays unresolved and keeps the honest
+    refusal. `~` expands because a default like `~/.config/revolut-x` is meant as the USER's home.
+    """
+    import json as _json
+    import os as _os
+    root = str(entry.get("_manifest_dir") or "")
+    values: dict[str, str] = {}
+    if not root:
+        return values
+    try:
+        manifest = _json.loads((Path(root) / "manifest.json").read_text(encoding="utf-8"))
+        for key, spec in (manifest.get("user_config") or {}).items():
+            default = spec.get("default") if isinstance(spec, dict) else None
+            if isinstance(default, str):
+                values[key] = _os.path.expanduser(default)
+    except (OSError, ValueError):
+        pass
+    try:
+        settings_dir = Path(root).parent.parent / "Claude Extensions Settings"
+        settings = _json.loads(
+            (settings_dir / f"{Path(root).name}.json").read_text(encoding="utf-8"))
+        for key, value in settings.items():
+            if isinstance(value, str) and value:
+                values[key] = _os.path.expanduser(value)
+    except (OSError, ValueError):
+        pass
+    return values
+
+
 def unresolvable_vars(entry: dict[str, Any]) -> list[str]:
     """The placeholders we cannot fill, in the order they appear. Empty means launchable."""
+    have = _user_config_values(entry)
     found: list[str] = []
     for text in _launch_strings(entry):
         for m in _USER_CONFIG.finditer(text):
+            # A value the manifest defaults or the settings file supplies is NOT unresolvable —
+            # Claude Desktop itself launches with exactly these. Only a placeholder with no
+            # default and no configured value keeps the honest refusal.
+            if m.group(1) in have:
+                continue
             name = f"user_config.{m.group(1)}"
             if name not in found:
                 found.append(name)
@@ -76,8 +123,11 @@ def resolve_for_launch(entry: dict[str, Any]) -> dict[str, Any] | None:
     if not root:
         return None
 
+    have = _user_config_values(entry)
+
     def sub(text: str) -> str:
-        return _DIRNAME.sub(root, text)
+        text = _DIRNAME.sub(root, text)
+        return _USER_CONFIG.sub(lambda m: have.get(m.group(1), m.group(0)), text)
 
     out = dict(entry)
     if entry.get("command"):

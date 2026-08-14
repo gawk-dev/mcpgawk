@@ -65,3 +65,27 @@ def test_panel_js_and_events_are_served():
         assert first.startswith("data: "), first
         payload = json.loads(first[len("data: "):])
         assert set(payload) == {"running", "html"}, payload
+
+
+def test_the_stream_is_token_gated_like_the_page():
+    """The first SSE version wiped the tokened page's configure form mid-flow (it rendered a
+    tokenless fragment) — and fixing THAT by always streaming the tokened fragment would leak the
+    token to any local reader. The stream renders with the token only for a caller that proved it
+    holds it: the same gate as the page."""
+    import mcpgawk.panel as panel
+
+    url, token, port = _serve_in_thread(panel.serve)
+    panel._ACTION.update(running=False, label="login · x", message="paste it",
+                         setup_text="-----BEGIN PUBLIC KEY-----abc", setup_key="x",
+                         at=panel._now())
+    try:
+        base = f"http://127.0.0.1:{port}"
+        with _get(f"{base}/events?t={token}") as r:
+            tokened_first = r.readline().decode()
+        with _get(f"{base}/events") as r:
+            bare_first = r.readline().decode()
+        assert "login-configure" in tokened_first, "the tokened stream lost the action form"
+        assert "login-configure" not in bare_first, "the bare stream leaked the tokened form"
+        assert token not in bare_first, "the bare stream leaked the token itself"
+    finally:
+        panel._ACTION.update(setup_text="", setup_key="")

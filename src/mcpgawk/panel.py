@@ -977,7 +977,7 @@ def _activity_headline(summary: object) -> str:
     return out
 
 
-def _action_banner(action: dict | None) -> str:
+def _action_banner(action: dict | None, token: str = "") -> str:
     """The last action's state, full-width under the card header. Shown to EVERYONE — status is
     not an action, and gating it behind the token hid "Running verify…" from the founder's own
     read-only view (2026-07-30)."""
@@ -1009,7 +1009,8 @@ def _action_banner(action: dict | None) -> str:
                 f'<tr><td class="nm">{_esc(r.get("server"))}</td>'
                 f'<td><span class="chip {_esc(r.get("level") or "bad")}">'
                 f'{_esc(r.get("outcome"))}</span></td>'
-                f'<td class="dim">{_esc(r.get("detail"))}{_fixblock(r)}</td></tr>'
+                f'<td class="dim">{_esc(r.get("detail")).replace(chr(10), "<br>")}'
+                f'{_fixblock(r)}</td></tr>'
                 for r in rows) + "</tbody></table>")
         # THE BANNER TAKES THE WORST ROW'S COLOUR. It used to be green whenever the action
         # COMPLETED — so a run reporting 5 unverified servers and 21 convictions was styled as
@@ -1024,6 +1025,25 @@ def _action_banner(action: dict | None) -> str:
         # were simply never printed.
         subject = _esc(action.get("label") or "action")
         when = _esc(_ago(action.get("at")))
+        setup_text = action.get("setup_text") or ""
+        setup_key = action.get("setup_key") or ""
+        setup_html = ""
+        if setup_text:
+            # VERBATIM-escaped, deliberately not scrubbed: this is the server's public key and its
+            # own registration instructions — a public key is public by construction, and the
+            # prose redactor cannot tell one from a secret. Escaping is the injection defence.
+            body_html = _esc(setup_text).replace("\n", "<br>")
+            form_html = (f'<form method="POST" action="/" style="margin-top:8px">'
+                         f'<input type="hidden" name="token" value="{_esc(token)}">'
+                         f'<input type="hidden" name="act" value="login-configure">'
+                         f'<input type="hidden" name="key" value="{_esc(setup_key)}">'
+                         f'<input type="password" name="value" placeholder="paste the API key" '
+                         f'style="min-width:280px" autocomplete="off" required> '
+                         f'<button class="gbtn" type="submit">Configure &amp; verify</button>'
+                         f'</form>' if token else
+                         '<div class="dim">open the tokened URL from your terminal to finish</div>')
+            setup_html = (f'<div style="margin-top:8px;font-family:ui-monospace,monospace;'
+                          f'font-size:11.5px;word-break:break-all">{body_html}</div>{form_html}')
         done_link = action.get("login_url") or ""
         done_link_html = (f'<br><a class="gbtn" href="{_esc(done_link)}" target="_blank" '
                           f'rel="noopener noreferrer">Open the sign-in page</a>'
@@ -1031,7 +1051,7 @@ def _action_banner(action: dict | None) -> str:
                           f'{_esc(done_link)}</div>' if done_link else "")
         banner = (f'<div class="abanner done {_esc(worst)}">'
                   f'<b>{subject}</b> — finished {when}<br>'
-                  f'{_esc(action.get("message"))}{done_link_html}{detail}</div>')
+                  f'{_esc(action.get("message"))}{setup_html}{done_link_html}{detail}</div>')
     return banner
 
 
@@ -2151,7 +2171,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
        '(scan, verify, approve, protect) appear only through the link printed in the terminal '
        'that started the panel, which an agent that merely opens this page cannot supply. '
        'Lost the link? Restart <code>mcpgawk panel</code> and use the fresh one it prints.</div>'}
-      <div class="abar" id="action">{_action_banner(action)}</div>
+      <div class="abar" id="action" data-t="{token}">{_action_banner(action, token)}</div>
       {nba}
       {disc_problems}
       {cannot}
@@ -2526,8 +2546,9 @@ def _persist_action() -> None:
     try:
         path = _action_store()
         path.parent.mkdir(parents=True, exist_ok=True)
-        # `login_url` is intentionally absent: a one-time authorisation link has no business
-        # outliving the run in a file, and a stale one would invite a human to open a dead page.
+        # `login_url` and `setup_text`/`setup_key` are intentionally absent: one-time sign-in
+        # state has no business outliving the run in a file - a stale link or keypair block would
+        # invite the human to act on a dead flow.
         keep = {k: _ACTION.get(k) for k in ("label", "message", "rows", "level", "at")}
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(keep), encoding="utf-8")
@@ -2553,7 +2574,8 @@ def load_last_action() -> None:
 _ACTION_LOCK: Any = None
 
 
-def _run_action_bg(kind: str, target: str | None = None) -> None:
+def _run_action_bg(kind: str, target: str | None = None,
+                   value: str | None = None) -> None:
     """Run a long action (scan/verify) in the background, recording its state for the page.
 
     Never raises: a control panel whose own action button crashes the server is worse than one
@@ -2578,7 +2600,9 @@ def _run_action_bg(kind: str, target: str | None = None) -> None:
 
     def work():
         try:
-            if kind == "scan":
+            if kind == "login-configure":
+                res = run_login_configure(target, value)
+            elif kind == "scan":
                 res = run_scan()
             elif kind == "verify":
                 res = run_verify_fleet(target)
@@ -3444,6 +3468,35 @@ def _oauth_unsupported_reason(url: str) -> str:
         return ""
 
 
+def run_login_configure(name: str | None, value: str | None) -> dict[str, Any]:
+    """Finish a guided in-band setup: hand the user's API key to the server's own configure tool,
+    then ask its status tool for the verdict. The key is passed through and never stored."""
+    from . import discover, remote_login
+    if not name or not value:
+        return {"ok": False, "message": "configure needs the server name and the pasted key"}
+    try:
+        entry = discover.discover_servers().get(name)
+    except Exception as exc:                      # noqa: BLE001
+        return {"ok": False, "message": f"could not read the fleet: {exc}"}
+    if not entry:
+        return {"ok": False, "message": f"no server named {name!r} in the current fleet"}
+    launchable = dxt.resolve_for_launch(entry) or {}
+    if not launchable.get("command"):
+        return {"ok": False, "message": f"{name} cannot be launched from here"}
+    result = remote_login.inband_setup(
+        launchable["command"], list(launchable.get("args") or []),
+        dict(launchable.get("env") or {}), "configure", value)
+    _ACTION.update(setup_text="", setup_key="")   # the flow is spent either way
+    if not result:
+        return {"ok": False, "message": f"{name} configure tool did not answer; run "
+                                        f"mcpgawk verify to see the server error"}
+    _, status_text = result
+    bad = any(w in status_text.lower() for w in ("not configured", "error", "invalid", "failed"))
+    return {"ok": not bad, "message": f"{name}, in its own words:",
+            "rows": [{"server": name, "outcome": "sign-in status",
+                      "level": "bad" if bad else "ok", "detail": status_text}]}
+
+
 def run_login(name: str | None) -> dict[str, Any]:
     """Complete ONE server's interactive browser sign-in, from the panel.
 
@@ -3465,6 +3518,39 @@ def run_login(name: str | None) -> dict[str, Any]:
                 "message": f"no server named {name!r} in the current fleet — refresh and retry"}
     url = remote_login.login_url(entry, name)
     if not url:
+        # A LOCAL server can still have an in-band sign-in surface (Revolut X: a Desktop
+        # extension whose check_auth_status returns the numbered setup steps and instructs
+        # clients to present them). The click is the consent to launch it — the same model as
+        # the row's verify button. dxt resolves Desktop's own defaults for the launch env.
+        if entry.get("command"):
+            launchable = dxt.resolve_for_launch(entry) or {}
+            if launchable.get("command"):
+                # GUIDED first: if the server has a key-generation tool, RUN it — reciting "run
+                # the generate_keypair tool" at a user who has no way to run it is a dead end
+                # ([FOUNDER] 2026-08-14: "it is not working"). The result (a PUBLIC key) goes on
+                # the banner to copy, next to a form that finishes the job with the API key they
+                # bring back.
+                setup = remote_login.inband_setup(
+                    launchable["command"], list(launchable.get("args") or []),
+                    dict(launchable.get("env") or {}), "start")
+                if setup:
+                    _, setup_text = setup
+                    _ACTION.update(setup_text=setup_text, setup_key=name, login_url="")
+                    return {"ok": True,
+                            "message": f"{name}: step 1 done — your keypair is generated. Copy "
+                                       f"the public key below, register it on {name}'s site "
+                                       f"(its own instructions are included), then paste the "
+                                       f"API key here and press Configure & verify."}
+                inband = remote_login.inband_login(
+                    command=launchable["command"], args=list(launchable.get("args") or []),
+                    env=dict(launchable.get("env") or {}))
+                if inband:
+                    auth_url, server_text = inband
+                    _ACTION.update(login_url=auth_url or "", notice="")
+                    return {"ok": True,
+                            "message": f"{name}, in its own words:",
+                            "rows": [{"server": name, "outcome": "sign-in steps",
+                                      "level": "warn", "detail": server_text}]}
         return {"ok": False,
                 "message": f"{name} has no browser sign-in we can run: it is not an mcp-remote "
                            f"launcher, and the last scan did not see it ask for credentials"}
@@ -3558,6 +3644,24 @@ def _login_button_applicable(entry: dict, name: str = "") -> bool:
     from . import remote_login
     url = remote_login.login_url(entry, name)
     if not url:
+        # LOCAL servers can still carry their own sign-in surface (Revolut X's check_auth_status
+        # returns the setup steps). Offer the button when the BASELINE — no launch needed to
+        # decide — records a login/status-shaped tool; the click is the consent to launch, same
+        # as verify. A server with no baseline and no URL stays button-less: a button that may do
+        # nothing is the old trap.
+        if entry.get("command"):
+            try:
+                from . import history
+                store = history.load()
+                for key, se in (store.get("servers") or {}).items():
+                    if name in (se.get("aliases") or []):
+                        rec = se.get("approved") or (se.get("history") or [{}])[-1]
+                        tools = [t.lower() for t in (rec.get("tools") or {})]
+                        return any("login" in t or any(m in t for m in
+                                   ("check_auth_status", "auth_status", "get_instructions",
+                                    "get_trading_setup", "setup")) for t in tools)
+            except Exception:  # noqa: BLE001 - an unreadable store must not add buttons
+                return False
         return False
     return not remote_login.stored_access_token(url)
 
@@ -3971,7 +4075,8 @@ _PANEL_JS = """\
   var bar = document.getElementById("action");
   if (!bar || !window.EventSource) return;   // no bar or ancient browser: noscript refresh rules
   var wasRunning = null;
-  var es = new EventSource("/events");
+  var t = bar.getAttribute("data-t") || "";
+  var es = new EventSource(t ? "/events?t=" + encodeURIComponent(t) : "/events");
   es.onmessage = function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
@@ -4035,13 +4140,21 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+                # The fragment is rendered WITH the token only for a caller that proved it
+                # holds it — otherwise the stream would either wipe the tokened page's forms
+                # (the first version did exactly that: the SSE update replaced the banner with a
+                # tokenless fragment and the configure form vanished mid-flow) or leak the token
+                # to any local reader. Same gate as the page itself.
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                stream_token = token if secrets.compare_digest(
+                    (qs.get("t") or [""])[0], token) else ""
                 last = None
                 deadline = time.monotonic() + 30 * 60   # a tab left open re-connects on its own
                 try:
                     while time.monotonic() < deadline:
                         state = dict(_ACTION)
                         payload = json.dumps({"running": bool(state.get("running")),
-                                              "html": _action_banner(state)})
+                                              "html": _action_banner(state, stream_token)})
                         if payload != last:
                             self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                             self.wfile.flush()
@@ -4110,6 +4223,11 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             if act in ("scan", "verify", "login"):
                 # `key` carries the server for a row action; absent = whole fleet.
                 _run_action_bg(act, (form.get("key") or [""])[0] or None)
+            elif act == "login-configure":
+                # The pasted API key travels POST -> tool call and NOWHERE else: not into
+                # _ACTION, not into any log - the scrubbers never even see it.
+                _run_action_bg("login-configure", (form.get("key") or [""])[0] or None,
+                               value=(form.get("value") or [""])[0] or None)
             elif act == "issue-key":
                 # Issue ONE agent key against the RUNNING gateway's registry. Synchronous (a file
                 # write, not a subprocess) and the secret is held in _ACTION for exactly one
