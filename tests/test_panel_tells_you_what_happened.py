@@ -87,3 +87,90 @@ def test_the_post_action_redirect_anchors_at_the_result():
     text = src.read_text(encoding="utf-8")
     assert text.count('#action"') >= 2, "a post-action redirect lost its anchor"
     assert 'id="action"' in text, "the anchor target does not exist in the page"
+
+
+def test_a_denied_server_stays_blocked_beyond_the_display_window():
+    """The Blocked TIER asked a 40-row display window, so a server the guard stopped 100 calls ago
+    silently lost the tier while the banner still announced it. Reproduced on the founder's fleet
+    2026-08-14: "Blocked → 0 of 17" beside 10 rendered deny chips."""
+    from mcpgawk.panel import _classify
+
+    d = {"denied_servers": {"resend"}, "recent_calls": [], "findings": [], "pending": []}
+    assert _classify("resend", "mcp:resend", d) == "blocked"
+    assert _classify("other", "mcp:other", d) != "blocked"
+
+
+def test_the_verify_step_never_counts_more_servers_than_exist():
+    """"25 of 11 server(s) watched running" — a numerator above its own denominator, on the step
+    representing behavioural verification. `verified_runs` is keyed by every name ever recorded
+    (aliases, removed servers); `entries` is what discovery sees now."""
+    from mcpgawk.panel import journey_steps
+
+    d = {"entries": {"a": {}, "b": {}},
+         "verified_runs": {"a": {"toolsChecked": 3}, "gone": {"toolsChecked": 9},
+                           "alias": {"toolsChecked": 1}},
+         "store": {"servers": {}}, "pending": [], "findings": [], "recent_calls": [],
+         "hooks": {}, "adapters": {}, "unscannable": [], "observed": {}}
+    fact = next(s["fact"] for s in journey_steps(d) if s["key"] == "verify")
+    assert fact.startswith("1 of 2 "), fact
+
+
+def test_the_blocked_banner_names_where_those_servers_are():
+    """The alarm said "blocked right now" and the servers carry the Changed tier — so the user
+    filtered by Blocked and found nothing. The alarm must name its own subject's location."""
+    from mcpgawk.panel import next_best_action
+
+    text, tier = next_best_action({"pending": ["mcp:resend"], "findings": [], "hooks": {},
+                                   "adapters": {}, "entries": {}, "store": {"servers": {}}})
+    assert tier == "bad"
+    assert "Changed" in text, text
+
+
+def test_a_server_with_no_oauth_is_refused_fast_not_hung(monkeypatch):
+    """The founder's actual complaint: "Running login · kite… " forever. Measured 2026-08-14 —
+    `kite` answers `initialize` 200 with no auth challenge and 404s both OAuth discovery documents.
+    Its sign-in is IN-BAND (one of its own tools returns a broker link), so there was never a
+    browser flow to run; the panel started one anyway and sat for 330 seconds before blaming the
+    sign-in. The button must now answer in seconds, with the reason."""
+    from mcpgawk import panel
+
+    monkeypatch.setattr(panel, "_oauth_unsupported_reason",
+                        lambda url: "it answers without asking us to authenticate")
+
+    def must_not_run(*a, **k):                       # noqa: ANN002, ANN003
+        raise AssertionError("a login subprocess was started for a server with no OAuth")
+
+    monkeypatch.setattr(panel, "_run_login_cli", must_not_run)
+    # `run_login` imports these INSIDE the function, so patch the modules themselves.
+    from mcpgawk import discover, remote_login
+    monkeypatch.setattr(discover, "discover_servers",
+                        lambda *a, **k: {"kite": {"url": "https://mcp.kite.trade/mcp"}})
+    monkeypatch.setattr(remote_login, "login_url",
+                        lambda entry, name="", path=None: "https://mcp.kite.trade/mcp")
+    res = panel.run_login("kite")
+    assert res["ok"] is False
+    assert "does not offer a browser sign-in" in res["message"], res["message"]
+
+
+def test_a_bare_403_is_not_mistaken_for_an_auth_challenge():
+    """kite answers curl 200 and urllib 403 (a Cloudflare bot block). Reading that 403 as "it
+    challenged us" is what kept the dead button on screen — the RFC signal is WWW-Authenticate."""
+    import urllib.error
+
+    from mcpgawk import panel
+
+    class _Blocked(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("u", 403, "Forbidden", {}, None)   # no WWW-Authenticate
+
+    def fake_urlopen(req, timeout=0):                # noqa: ANN001, ARG001
+        raise _Blocked()
+
+    import urllib.request
+    real = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        reason = panel._oauth_unsupported_reason("https://mcp.kite.trade/mcp")
+    finally:
+        urllib.request.urlopen = real
+    assert reason, "a bare 403 was treated as an OAuth challenge"

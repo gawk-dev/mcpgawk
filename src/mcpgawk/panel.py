@@ -28,6 +28,7 @@ import html
 import json
 import re
 import os
+import pathlib
 from pathlib import Path
 from typing import Any
 
@@ -90,11 +91,19 @@ def collect() -> dict[str, Any]:
     try:
         data["activity"] = spool.summarise()
         data["recent_calls"] = spool.read(limit=40)
+        # DENIALS ARE NOT A RECENT-EVENTS QUESTION. `recent_calls` is a 40-row display window, and
+        # classification used it — so a server the guard blocked 100 calls ago silently lost its
+        # "Blocked" tier while the banner (which reads full state) still said a server was blocked
+        # right now. Reproduced on the founder's fleet 2026-08-14: the Blocked filter returned
+        # "0 of 17" beside 10 rendered `deny` chips. The tier now asks the whole session window.
+        data["denied_servers"] = {r.get("server") for r in spool.read(limit=5000)
+                                  if r.get("decision") == "deny" and r.get("server")}
         # A wider window than the recent-calls tile: sessions are the unit an operator reviews
         # ("what did my agent do in that run"), and a 40-row window would show fragments of one.
         data["session_calls"] = spool.read(limit=1000)
     except Exception as exc:                       # noqa: BLE001
         data["activity"], data["recent_calls"] = None, []
+        data["denied_servers"] = set()
         data["session_calls"] = []
         data["errors"]["runtime"] = f"{type(exc).__name__}: {exc}"
 
@@ -255,8 +264,13 @@ TIERS = (
 
 def _classify(name: str, key: str | None, d: dict) -> str:
     """One server's tier. Ordered worst-first: the first thing that is true wins."""
-    calls = [c for c in (d.get("recent_calls") or []) if c.get("server") == name]
-    if any(c.get("decision") == "deny" for c in calls):
+    # BOTH universes. `denied_servers` is the full session history (added 2026-08-14 because the
+    # 40-row display window silently dropped the tier); `recent_calls` is that window, and callers
+    # that build `d` themselves may supply only it. Asking either keeps both correct — a deny is a
+    # deny whenever it happened.
+    if name in (d.get("denied_servers") or set()) or any(
+            c.get("decision") == "deny" for c in (d.get("recent_calls") or [])
+            if c.get("server") == name):
         return "blocked"
     # Convictions outrank "changed" and "unverified": a server verification CAUGHT doing something
     # is a stronger statement than one whose declared surface moved, and it must never fall through
@@ -793,7 +807,14 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     steps.append({
         "key": "verify", "title": "Verify what they do",
         "state": "done" if ran else "now",
-        "fact": (f"{len(ran)} of {len(entries)} server(s) watched running"
+        # SAME UNIVERSE ON BOTH SIDES. `ran` is keyed by every name a verify run has ever
+        # recorded — aliases, baseline-only entries, servers since removed — while `entries` is
+        # what discovery sees NOW. Dividing one by the other rendered "25 of 11 server(s) watched
+        # running" on the founder's machine (reproduced live 2026-08-14): a numerator larger than
+        # its own denominator, on the step that represents the product's differentiator. Count
+        # only servers that are BOTH currently present and have been watched.
+        "fact": (f"{len([n for n in entries if n in ran])} of {len(entries)} server(s) "
+                 f"watched running"
                  if entries else "verify runs a server and records what it actually does"),
         "where": "Evidence"})
     steps.append({
@@ -841,8 +862,12 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
     """
     pending = len(d.get("pending") or [])
     if pending:
-        return (f"{pending} server(s) changed since you approved them and are blocked right now — "
-                f"open Decisions.", "bad")
+        # NAME THE FILTER. "blocked right now" is true (the guard refuses a changed server), but
+        # a user reading it reaches for the Blocked filter and finds nothing — those servers carry
+        # the "Changed" tier. Saying both words is what closes the gap between the alarm and the
+        # place the alarm's subject can be found.
+        return (f"{pending} server(s) changed since you approved them — your agents cannot call "
+                f"them right now. Open Decisions, or filter Servers by Changed.", "bad")
     findings = [f for f in (d.get("findings") or [])
                 if not f.get("suppressed") and not f.get("first_party")]
     if findings:
@@ -963,8 +988,15 @@ def _action_banner(action: dict | None) -> str:
     if running:
         note = action.get("notice") or ""
         note_html = f'<br><b>{_esc(note)}</b>' if note else ""
+        # THE LINK, IF THERE IS ONE. An OAuth sign-in cannot finish without a human opening a URL;
+        # printing it into a pipe nobody reads is the same as not having the feature.
+        link = action.get("login_url") or ""
+        link_html = (f'<br><a class="gbtn" href="{_esc(link)}" target="_blank" '
+                     f'rel="noopener noreferrer">Open the sign-in page</a>'
+                     f'<div class="dim" style="margin-top:6px;word-break:break-all">{_esc(link)}</div>'
+                     if link else "")
         banner = (f'<div class="abanner run">Running {_esc(action.get("label"))}… '
-                  f'this can take a minute. This page updates itself.{note_html}</div>')
+                  f'this can take a minute. This page updates itself.{note_html}{link_html}</div>')
     elif action.get("message"):
         # The RESULT, per server, on the page. A one-line "done" that points at a terminal is the
         # CLI-only habit this surface replaces: the user must be able to see WHICH server produced
@@ -2412,6 +2444,9 @@ class _ActionState(dict):
 
     #: Free-text fields a human reads. Masked with `redact_urls_in_text`, which keeps the host and
     #: the parameter names visible — an operator still has to be able to see WHICH server failed.
+    #: `login_url` is deliberately NOT here. It is a one-time authorisation request the human must
+    #: open verbatim; masking its query would hand over a broken link — and it carries a PKCE
+    #: challenge and client id, which are public by construction, not secrets.
     _TEXT_FIELDS = ("message", "label", "notice")
 
     @staticmethod
@@ -2477,6 +2512,8 @@ def _persist_action() -> None:
     try:
         path = _action_store()
         path.parent.mkdir(parents=True, exist_ok=True)
+        # `login_url` is intentionally absent: a one-time authorisation link has no business
+        # outliving the run in a file, and a stale one would invite a human to open a dead page.
         keep = {k: _ACTION.get(k) for k in ("label", "message", "rows", "level", "at")}
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(keep), encoding="utf-8")
@@ -3318,11 +3355,79 @@ def _run_login_cli(url: str, flag: str = "--http"):
     with `FileNotFoundError: No such file or directory: 'https://…'` and reported it as
     "sign-in did not complete", blaming the sign-in for an argument bug. Found 2026-08-03 by the
     founder clicking the button on a real server, reproduced in one command afterwards.
+
+    NOT `capture_output`. The flow PRINTS the authorisation URL (oauth_login._redirect, with
+    flush) precisely so a human whose browser did not open can paste it — and capturing that into a
+    pipe nobody reads until the child exits meant the panel showed "Running login…" for five and a
+    half minutes and then "sign-in for kite did not complete". The sign-in never failed; it was
+    never SHOWN to the human. Confirmed on the founder's own fleet 2026-08-14, and it is the second
+    time this path has blamed the sign-in for a panel bug (see the argument bug above).
+
+    So: the child writes to a real file, which the caller can read WHILE it runs.
     """
     import subprocess
     import sys as _sys
-    return subprocess.run([_sys.executable, "-m", "mcpgawk", "scan", flag, url, "--login"],
-                          capture_output=True, text=True, timeout=330)
+    import tempfile
+    log = tempfile.NamedTemporaryFile("w+", prefix="mcpgawk-login-", suffix=".log", delete=False)
+    proc = subprocess.Popen([_sys.executable, "-m", "mcpgawk", "scan", flag, url, "--login"],
+                            stdout=log, stderr=subprocess.STDOUT, text=True)
+    return proc, log.name
+
+
+def _oauth_unsupported_reason(url: str) -> str:
+    """"" if this endpoint plausibly speaks OAuth, else WHY it does not — in the operator's words.
+
+    Two cheap, bounded questions, both answered in well under a second: does the endpoint challenge
+    an unauthenticated request (401/403 + `WWW-Authenticate`), and does it publish either OAuth
+    discovery document? A server that answers neither has no browser flow for us to start.
+
+    Never raises and never blocks the button on a network hiccup: an unreachable check returns ""
+    (proceed), because refusing a sign-in because our probe failed would be its own false negative.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    try:
+        parts = urllib.parse.urlsplit(url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        body = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                                       "clientInfo": {"name": "mcpgawk", "version": "1"}}}).encode()
+        # A real user-agent: kite answers curl with 200 and urllib with a Cloudflare 403, and a
+        # bare 403 read as "it challenged us" is exactly the false positive that kept the dead
+        # sign-in button on screen.
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+            "user-agent": "mcpgawk/panel (+https://mcp.gawk.dev)"})
+        challenged = False
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r:
+                r.read(1)                      # answered WITHOUT auth: no challenge
+        except urllib.error.HTTPError as exc:
+            # WWW-Authenticate is THE signal (RFC 9728 / OAuth): a bare 401/403 can be a bot
+            # block, a firewall, or a proxy, none of which have a browser flow for us to run.
+            challenged = bool(exc.headers.get("WWW-Authenticate"))
+        except Exception:                      # noqa: BLE001 — unreachable: do not block the button
+            return ""
+        if challenged:
+            return ""
+        for well_known in (".well-known/oauth-authorization-server",
+                           ".well-known/oauth-protected-resource"):
+            try:
+                with urllib.request.urlopen(f"{origin}/{well_known}", timeout=6) as r:
+                    if r.status == 200:
+                        return ""
+            except urllib.error.HTTPError:
+                continue
+            except Exception:                  # noqa: BLE001
+                return ""
+        return ("it answers without asking us to authenticate and publishes no OAuth metadata, so "
+                "there is no browser flow to run. If it needs credentials, they are in-band — look "
+                "at the server's own tools, or set a header on the entry")
+    except Exception:                          # noqa: BLE001 — a check that fails must not block
+        return ""
 
 
 def run_login(name: str | None) -> dict[str, Any]:
@@ -3349,17 +3454,63 @@ def run_login(name: str | None) -> dict[str, Any]:
         return {"ok": False,
                 "message": f"{name} has no browser sign-in we can run: it is not an mcp-remote "
                            f"launcher, and the last scan did not see it ask for credentials"}
+    # DOES THIS SERVER ACTUALLY DO OAUTH? Measured on the founder's fleet 2026-08-14: `kite`
+    # answers `initialize` with 200 and NO auth challenge, and both OAuth discovery endpoints 404 —
+    # its sign-in is IN-BAND (one of its own tools returns a broker link). The panel offered a
+    # browser OAuth flow anyway, which cannot succeed, and then sat on "Running login · kite…" for
+    # 330 seconds before blaming the sign-in. Ask first; a server that never challenges us has no
+    # OAuth flow to run, and saying so in two seconds beats hanging for five and a half minutes.
+    unsupported = _oauth_unsupported_reason(url)
+    if unsupported:
+        return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
     try:
-        proc = _run_login_cli(url, _transport_flag(entry, url))
-    except Exception as exc:                      # noqa: BLE001 — includes the 330s timeout
+        proc, log_path = _run_login_cli(url, _transport_flag(entry, url))
+    except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "message": f"sign-in for {name} did not complete: {exc}"}
+
+    # PUBLISH THE LINK THE MOMENT IT EXISTS. The child prints the authorisation URL for exactly
+    # this reason; the panel used to swallow it for 330s and then blame the sign-in. We poll the
+    # child's log, and the first http(s) URL it prints goes straight onto the banner as a real
+    # link — so a browser that did not open is a two-second inconvenience, not a dead feature.
+    import re as _re
+    import time as _time
+    deadline = _time.monotonic() + 330
+    published = False
+    while _time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        if not published:
+            try:
+                text = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            hit = _re.search(r"https?://\S+", text)
+            if hit:
+                link = hit.group(0).rstrip(".,)")
+                _ACTION.update(login_url=link,
+                               notice=f"Open this to finish signing in to {name}")
+                published = True
+        _time.sleep(0.5)
+    else:                                          # loop exhausted: the human never finished
+        proc.kill()
+
+    try:
+        out = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        out = ""
+    _ACTION.update(login_url="", notice="")        # the link is spent either way
+
     # The token ON DISK is the outcome that matters, not the subprocess's exit code — the flow
     # can exit non-zero after storing a perfectly good token (the follow-on probe may fail).
     if remote_login.stored_access_token(url):
         return {"ok": True, "message": f"signed in to {name} — the token is stored on this "
                                        f"machine; verify can use it now"}
-    tail = [ln for ln in ((proc.stderr or "") + (proc.stdout or "")).splitlines() if ln.strip()]
-    detail = f" — {tail[-1].strip()}" if tail else ""
+    tail = [ln for ln in out.splitlines() if ln.strip()]
+    # The child's ACTUAL last line, never a bare "did not complete" — that phrasing blamed the
+    # sign-in for an argument bug once already, and for this swallowing bug a second time.
+    detail = f" — {tail[-1].strip()}" if tail else (" — the flow printed nothing at all; run "
+                                                   f"`mcpgawk scan --http {url} --login` in a "
+                                                   f"terminal to see it")
     return {"ok": False, "message": f"sign-in for {name} did not complete{detail}"}
 
 
