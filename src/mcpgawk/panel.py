@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import html
 import json
+import time
 import re
 import os
 import pathlib
@@ -1737,7 +1738,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # indicator: 0.1.20 completed its scan in ~100s and went on showing "Running scan…" forever
     # because nobody reloaded, which is indistinguishable from a hang and was reported as one.
     # A meta refresh (not script — the CSP forbids script) is the only mechanism available here.
-    refresh = ('<meta http-equiv="refresh" content="5">'
+    # PROGRESSIVE ENHANCEMENT, decided 2026-08-14 [FOUNDER]: "design should come first and very
+    # importantly the experience. i cannot accept your fact that js files not secure." Correctly
+    # so — the threat on this page was never OUR script, it is INJECTED script riding
+    # server-controlled text (tool descriptions), and CSP kills that by ALLOWLISTING
+    # (`script-src 'self'` runs /panel.js and refuses every injected inline block), not by
+    # banning JS wholesale. So: with JS, /events streams action state live and the page never
+    # yanks; without JS, this refresh — now inside <noscript> — keeps the page honest exactly
+    # as before. Same server-rendered truth on both paths.
+    refresh = ('<noscript><meta http-equiv="refresh" content="5"></noscript>'
                if (action or {}).get("running") else "")
     agent_gaps = sum(1 for _, _, st, _, _ in rows if st != "on")
 
@@ -1808,7 +1817,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     _ct_agt = f'<span class="ct">{agent_gaps} gap(s)</span>' if agent_gaps else ""
     _span = (f'{str(span_first or "")[:10]} → {str(span_last or "")[:10]}'
              if span_first else "nothing recorded yet")
-    return f"""<!doctype html><html><head><meta charset="utf-8">{refresh}
+    return f"""<!doctype html><html><head><meta charset="utf-8">{refresh}<script src="/panel.js" defer></script>
 <title>mcpgawk</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 /* LIKE FOR LIKE with LiteLLM's admin console — DESIGN.md; the approved target is
@@ -3931,6 +3940,33 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
     return {"ok": False, "message": f"verify did not complete (exit {rc}){_ev}"}
 
 
+#: The panel's ONE script. Served from our own origin so `script-src 'self'` allowlists it while
+#: every injected inline block stays dead. It renders nothing itself: the server pre-renders the
+#: banner fragment (`_action_banner`, the same function the full page uses — one rendering path,
+#: one escaping path) and this only places it and settles the page ONCE when a run completes,
+#: replacing the 5-second whole-page refresh whose yanking was the founder's "haywire".
+_PANEL_JS = """\
+(function () {
+  "use strict";
+  var bar = document.getElementById("action");
+  if (!bar || !window.EventSource) return;   // no bar or ancient browser: noscript refresh rules
+  var wasRunning = null;
+  var es = new EventSource("/events");
+  es.onmessage = function (ev) {
+    var d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (typeof d.html === "string") bar.innerHTML = d.html;  // server-escaped fragment
+    if (wasRunning === true && d.running === false) {
+      es.close();
+      location.reload();      // one settle with fresh rows, instead of a refresh loop
+      return;
+    }
+    wasRunning = d.running;
+  };
+})();
+"""
+
+
 def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
     """Serve the panel as an authenticated LOCAL CONTROL SURFACE.
 
@@ -3962,6 +3998,41 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
 
         def do_GET(self):                        # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path == "/panel.js":
+                body = _PANEL_JS.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/events":
+                # Live action state, as pre-rendered banner HTML — the exact same fragment and
+                # escaping the full page uses. Streams only what the read-only page already shows,
+                # so it grants nothing the bare URL does not. One thread per viewer
+                # (ThreadingHTTPServer); localhost, single user, bounded below.
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                last = None
+                deadline = time.monotonic() + 30 * 60   # a tab left open re-connects on its own
+                try:
+                    while time.monotonic() < deadline:
+                        state = dict(_ACTION)
+                        payload = json.dumps({"running": bool(state.get("running")),
+                                              "html": _action_banner(state)})
+                        if payload != last:
+                            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                            self.wfile.flush()
+                            last = payload
+                        else:
+                            self.wfile.write(b": hb\n\n")   # heartbeat keeps proxies honest
+                            self.wfile.flush()
+                        time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass                                  # viewer left; the thread ends with them
+                return
             # The record, downloadable. "Everything logged and available to download" — the raw
             # append-only log verbatim, or a spreadsheet-friendly CSV of the same rows. No token:
             # this is your own local record of your own machine, the same bytes `cat` would show.
@@ -3996,8 +4067,12 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             # Actions are same-origin POST forms; keep the strict CSP but allow the form submit.
+            # `script-src 'self'` is the allowlist, not a relaxation: /panel.js (ours) runs,
+            # and an inline <script> smuggled through a server-controlled description still
+            # cannot — inline needs 'unsafe-inline', which stays absent.
             self.send_header("Content-Security-Policy",
-                             "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+                             "default-src 'none'; style-src 'unsafe-inline'; "
+                             "script-src 'self'; connect-src 'self'; form-action 'self'")
             self.end_headers()
             self.wfile.write(body)
 
