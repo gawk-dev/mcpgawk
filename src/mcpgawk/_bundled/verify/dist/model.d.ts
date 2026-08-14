@@ -74,6 +74,11 @@ export interface ServerReport {
     readonly sandboxBackend: "proxied-container" | "docker" | "proxy" | "none";
     /** Set only when `isolate` was requested but Docker was unavailable/unusable for this command. */
     readonly sandboxDegradedReason?: string;
+    /** Set when this server's restricting annotations were IGNORED as uninformative — every tool
+     * carried the same restricting label (kite stamps all 22 destructive, get_ltp included).
+     * Labels that never vary carry no information, and honouring them lets a server evade
+     * behavioural verification by labelling; name-mutating tools stayed skipped regardless. */
+    readonly labelNoiseNote?: string;
     /** Meta-tool name(s) that make this a dynamic-DISPATCH server (see dispatch.ts). Non-empty means
      * a larger real tool catalog is hidden behind them and was NOT enumerated by the static tools/list
      * — the verification is INCOMPLETE, and a "clean" result on the visible tools is not proof of a

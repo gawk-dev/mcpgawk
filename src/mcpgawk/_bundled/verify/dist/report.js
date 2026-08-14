@@ -199,6 +199,7 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             drift: driftByServer[r.server],
             sandboxBackend: r.sandboxBackend,
             sandboxDegradedReason: r.sandboxDegradedReason,
+            labelNoiseNote: r.labelNoiseNote,
             dynamicDispatch: r.dynamicDispatch,
             hiddenCatalog: r.hiddenCatalog,
             hiddenProbed: r.hiddenProbed,

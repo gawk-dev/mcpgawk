@@ -1,7 +1,7 @@
 import { Verifier } from "@gawk/oracle";
 import { DockerProcessSandbox, ProcessSandbox, ProxiedContainerSandbox, canProxyContainerize, } from "@gawk/sandbox";
 import { CHECKS } from "./checks.js";
-import { classifyTool } from "./classify.js";
+import { annotationSignal, classifyTool } from "./classify.js";
 import { DISCOVERY_QUERIES, detectDynamicDispatch, discoverQueryParam, discoverToolOf, executorToolOf, inferExecutorEnvelope, parseHiddenCatalog, } from "./dispatch.js";
 import { isRemote, } from "./model.js";
 import { pinInventory } from "./pins.js";
@@ -227,11 +227,25 @@ export async function verifyServer(server, opts = {}) {
     const executor = remote ? undefined : executorToolOf(tools);
     const envelope = executor ? inferExecutorEnvelope(executor.inputSchema) : null;
     const hiddenProbed = [];
+    // Per-server, once: do this server's restricting labels DISCRIMINATE? Kite stamps every tool
+    // destructiveHint:true (get_ltp included) — blanket labels are noise, and honouring them let
+    // kite sit "verified-looking" with 0 of 22 tools exercised for two weeks ([FOUNDER]
+    // 2026-08-14: the user's security outranks the server's labels).
+    const labelSignal = annotationSignal(tools);
+    const noisyAxes = [
+        ...(labelSignal.destructiveInformative ? [] : ["destructiveHint:true on every tool"]),
+        ...(labelSignal.readOnlyVetoInformative ? [] : ["readOnlyHint:false on every tool"]),
+    ];
+    const labelNoiseNote = noisyAxes.length > 0
+        ? `blanket labels ignored as uninformative (${noisyAxes.join("; ")}) — a label that never ` +
+            `varies carries no information and would let a server evade behavioural verification; ` +
+            `name-read tools were exercised, name-mutating tools stayed skipped`
+        : undefined;
     try {
         for (const tool of tools) {
             // Safe mode (default): NEVER invoke a tool that could mutate state or move money.
             if (mode === "safe") {
-                const { klass, callable } = classifyTool(tool);
+                const { klass, callable } = classifyTool(tool, labelSignal);
                 if (!callable) {
                     skipped.push({ tool: tool.name, klass });
                     emit({ type: "skip", server: server.name, tool: tool.name, klass });
@@ -271,7 +285,7 @@ export async function verifyServer(server, opts = {}) {
                         inputSchema: hidden.inputSchema,
                     };
                     if (mode === "safe") {
-                        const { klass, callable } = classifyTool(hiddenTool);
+                        const { klass, callable } = classifyTool(hiddenTool, labelSignal);
                         if (!callable) {
                             skipped.push({ tool: hidden.name, klass });
                             emit({ type: "skip", server: server.name, tool: hidden.name, klass });
@@ -311,6 +325,7 @@ export async function verifyServer(server, opts = {}) {
         pins: pinInventory(server.name, tools),
         sandboxBackend,
         sandboxDegradedReason,
+        labelNoiseNote,
         dynamicDispatch: dynamicDispatch.length > 0 ? dynamicDispatch : undefined,
         hiddenCatalog: hiddenCatalog.length > 0 ? hiddenCatalog : undefined,
         hiddenProbed: hiddenProbed.length > 0 ? hiddenProbed : undefined,

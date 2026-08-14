@@ -501,6 +501,11 @@ export function egressClusterLines(egressFindings) {
 export function printText(report, log) {
     for (const s of report.servers) {
         log(`\n${s.server} [${s.transport}]: checked ${s.toolsChecked} tool(s)`);
+        if (s.labelNoiseNote) {
+            // The JSON knowing is not the human knowing — kite sat behind blanket labels for two
+            // weeks because no printed line ever said why nothing was exercised.
+            log(`  ! ${s.labelNoiseNote}`);
+        }
         if (s.transport !== "stdio") {
             log(`  (remote — can't sandbox; egress checks N/A, ran: ${s.checksRun.join(", ")})`);
         }

@@ -7,6 +7,13 @@
  *  - Annotations (`readOnlyHint`/`destructiveHint`) are attacker-controlled, so they may only
  *    RESTRICT: `destructiveHint:true` forces mutating; `readOnlyHint:false` vetoes a read. They can
  *    never turn a mutating/unknown tool into a callable one.
+ *  - RESTRICTION REQUIRES INFORMATION ([FOUNDER] 2026-08-14: "it is not what the kite server
+ *    labels … it is our users security"): a server that stamps EVERY tool destructive (kite marks
+ *    all 22 — get_ltp, get_profile, even search_instruments) is emitting noise, and blanket
+ *    labels are exactly how a malicious server would evade behavioural verification while
+ *    looking cautious. So a restricting annotation is honoured only when the server
+ *    DISCRIMINATES — labels that never vary carry no information and no veto. Name-mutating
+ *    tools stay uncallable regardless; this only stops noise from silencing name-reads.
  *  - Anything not confidently read is `unknown` and is NOT called in safe mode (default-deny).
  *
  * Residual risk (stated honestly): a tool with a deceptive read-looking name that actually mutates
@@ -95,16 +102,36 @@ function tokens(name) {
         .filter(Boolean)
         .map((t) => t.toLowerCase());
 }
-export function classifyTool(tool) {
+/** Labels that never vary carry no information. Per SERVER, per axis: if every tool carries the
+ * same restricting label (all `destructiveHint:true`, or all `readOnlyHint:false`), that axis is
+ * noise and loses its veto. A single-tool server keeps its labels (nothing to vary against, and
+ * caution costs one tool, not a fleet's coverage). Selective labels — a server that marks SOME
+ * tools destructive — are real warnings and keep full force. */
+export function annotationSignal(tools) {
+    if (tools.length <= 1) {
+        return { destructiveInformative: true, readOnlyVetoInformative: true };
+    }
+    const anns = tools.map((t) => t.annotations ?? {});
+    return {
+        destructiveInformative: !anns.every((a) => a.destructiveHint === true),
+        readOnlyVetoInformative: !anns.every((a) => a.readOnlyHint === false),
+    };
+}
+const FULLY_INFORMATIVE = {
+    destructiveInformative: true,
+    readOnlyVetoInformative: true,
+};
+export function classifyTool(tool, signal = FULLY_INFORMATIVE) {
     const a = tool.annotations ?? {};
     const ts = tokens(tool.name);
-    // Restrict-only signals first.
-    if (a.destructiveHint === true)
+    // Restrict-only signals first — honoured only from a server whose labels discriminate.
+    if (a.destructiveHint === true && signal.destructiveInformative) {
         return { klass: "mutating", callable: false };
+    }
     if (ts.some((t) => MUTATING.has(t)))
         return { klass: "mutating", callable: false };
-    // Callable only if a read verb is present AND the server did not veto with readOnlyHint:false.
-    if (ts.some((t) => READ.has(t)) && a.readOnlyHint !== false) {
+    // Callable only if a read verb is present AND an informative server did not veto the read.
+    if (ts.some((t) => READ.has(t)) && !(a.readOnlyHint === false && signal.readOnlyVetoInformative)) {
         return { klass: "read", callable: true };
     }
     return { klass: "unknown", callable: false };

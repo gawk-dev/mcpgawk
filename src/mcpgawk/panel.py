@@ -353,7 +353,8 @@ def _merge_verify_report(report_path: Path | str, prev_report: dict) -> None:
 
 def verify_verdict(*, checked: int, skipped: list, errors: int, hits: int,
                    folded: int = 0, backend: str | None = None,
-                   degraded: str | None = None) -> tuple[str, str, str]:
+                   degraded: str | None = None,
+                   label_noise: str | None = None) -> tuple[str, str, str]:
     """(outcome, level, detail) for one server a verify run touched.
 
     "observed" is NOT a verdict — it says we managed to run, which is a fact about US. The founder
@@ -375,6 +376,12 @@ def verify_verdict(*, checked: int, skipped: list, errors: int, hits: int,
         bits.append(f"ran WITHOUT container isolation — {degraded.split('—')[0].strip()}")
     if folded:             # classified, never dropped — the list is on the Findings screen
         bits.append(f"{folded} first-party finding(s) folded (the vendor's own traffic)")
+    if label_noise:        # the server's own labels were noise and were ignored — SAY so here,
+        # not only in the JSON. Kite sat "verified-looking" for two weeks behind blanket labels
+        # because no human surface ever printed the reason ([FOUNDER] 2026-08-14). The note's
+        # first clause already reads as a sentence; prefixing "ignored as uninformative" again
+        # printed the phrase twice on the founder's row.
+        bits.append(f"its own {label_noise.split('—')[0].strip()}")
     detail = " · ".join(bits)
 
     if hits:               # convictions outrank everything: this is the headline, not an aside
@@ -4016,6 +4023,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         # showed those same servers green At-baseline. A first-party finding stays LISTED on the
         # Findings screen; here it is counted as folded, never as a conviction.
         degraded_map: dict[str, str] = {}
+        noise_map: dict[str, str] = {}            # server -> its labels were ignored as noise
         real_map: dict[str, set] = {}             # server -> tools with non-first-party findings
         folded_map: dict[str, int] = {}           # server -> first-party findings folded
         report_readable = False
@@ -4028,6 +4036,8 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                     continue
                 if s.get("sandboxDegradedReason"):
                     degraded_map[sname] = str(s["sandboxDegradedReason"])
+                if s.get("labelNoiseNote"):
+                    noise_map[sname] = str(s["labelNoiseNote"])
                 for f in (s.get("findings") or []):
                     if f.get("suppressed"):
                         continue
@@ -4041,7 +4051,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         except (OSError, ValueError):
             # Unreadable report: no degradation info, and fall back to RAW conviction counts from
             # the profile below — overcounting is the safe direction, silence is not.
-            degraded_map, real_map, folded_map, report_readable = {}, {}, {}, False
+            degraded_map, noise_map, real_map, folded_map, report_readable = {}, {}, {}, {}, False
         # A server counts as observed when a run EXERCISED it. Counting convictions instead meant a
         # clean fleet reported as an unverified one, and "observed 2 of 8" understated real work.
         seen = {n for n, o in ran_map.items()
@@ -4068,6 +4078,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                 folded=folded_map.get(n, 0),
                 backend=o.get("backend"),
                 degraded=degraded_map.get(n),
+                label_noise=noise_map.get(n),
             )
 
         rows = []
@@ -4111,11 +4122,18 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                        f"listed on Findings)") if folded_total else ""
         evidence_dir = str(run_dir) if audit_args else ""
         evidence_note = f"full evidence: {evidence_dir}" if evidence_dir else ""
-        if not parts:                       # genuinely nothing wrong and nothing left unchecked
+        troubled = [r for r in rows if r["level"] != "ok"]
+        if not parts and clean and not troubled:    # genuinely nothing wrong, nothing unchecked
             msg = f"clean — {len(clean)} local server(s) verified, no findings"
             tail = " · ".join(x for x in (folded_note, evidence_note) if x)
             return {"ok": True, "rows": rows, "level": "ok", "evidence_dir": evidence_dir,
                     "message": f"{msg} · {tail}" if tail else msg}
+        if not parts:
+            # ZERO verified must NEVER headline as clean. The founder read "clean — 0 local
+            # server(s) verified" one line above a row saying "incomplete — not clean"
+            # (2026-08-15, live) — a headline that contradicts its own rows is wrong twice.
+            parts.append(f"incomplete — {len(troubled)} server(s) ran but proved nothing"
+                         if troubled else "incomplete — nothing was verified")
         parts.append(f"{len(clean)} clean")
         if folded_note:
             parts.append(folded_note)
