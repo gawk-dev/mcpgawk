@@ -1017,7 +1017,7 @@ def _setup_flow_html(setup_text: str) -> str:
         steps.append(_re.sub(r"^\d+\.\s*", "", line, count=1).strip())
     if not pem:
         return (f'<div style="margin-top:8px;font-family:ui-monospace,monospace;'
-                f'font-size:11.5px;word-break:break-all">'
+                f'font-size:12px;word-break:break-all">'
                 f'{_esc(setup_text).replace(chr(10), "<br>")}</div>')
     key_text = pem.group(0)
     steps_html = "".join(f"<li>{_esc(st)}</li>" for st in steps)
@@ -1025,7 +1025,7 @@ def _setup_flow_html(setup_text: str) -> str:
         f'<ol style="margin:10px 0 0 18px;padding:0">'
         f'<li>Copy your public key:'
         f'<div style="margin:6px 0;padding:8px;border:1px solid rgba(0,0,0,.12);'
-        f'border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;'
+        f'border-radius:6px;font-family:ui-monospace,monospace;font-size:10.5px;'
         f'word-break:break-all;background:rgba(255,255,255,.5)">{_esc(key_text).replace(chr(10), "<br>")}</div>'
         f'<button type="button" class="gbtn" data-copy="{_esc(key_text)}">Copy key</button></li>'
         f'{steps_html}'
@@ -1090,7 +1090,7 @@ def _action_banner(action: dict | None, token: str = "") -> str:
             body_html = _setup_flow_html(setup_text)
             form_html = (f'<form method="POST" action="/" style="margin-top:8px">'
                          f'<input type="hidden" name="token" value="{_esc(token)}">'
-                         f'<input type="hidden" name="act" value="login-configure">'
+                         f'<input type="hidden" name="act" value="login-configure"><input type="hidden" name="tab" value="n0">'
                          f'<input type="hidden" name="key" value="{_esc(setup_key)}">'
                          f'<input type="password" name="value" placeholder="paste the API key" '
                          f'style="min-width:280px" autocomplete="off" required> '
@@ -1098,7 +1098,7 @@ def _action_banner(action: dict | None, token: str = "") -> str:
                          f'</form>' if token else
                          '<div class="dim">open the tokened URL from your terminal to finish</div>')
             setup_html = (f'<div style="margin-top:8px;font-family:ui-monospace,monospace;'
-                          f'font-size:11.5px;word-break:break-all">{body_html}</div>{form_html}')
+                          f'font-size:12px;word-break:break-all">{body_html}</div>{form_html}')
         done_link = action.get("login_url") or ""
         done_link_html = (f'<br><a class="gbtn" href="{_esc(done_link)}" target="_blank" '
                           f'rel="noopener noreferrer">Open the sign-in page</a>'
@@ -1121,10 +1121,12 @@ def _action_buttons(token: str, action: dict | None) -> str:
     tok = _esc(token)
     return f"""<form method="POST" action="/" style="display:inline">
   <input type="hidden" name="token" value="{tok}">
+  <input type="hidden" name="tab" value="n0">
   <button class="act-btn" name="act" value="scan"{dis}>Re-scan</button>
 </form>
 <form method="POST" action="/" style="display:inline">
   <input type="hidden" name="token" value="{tok}">
+  <input type="hidden" name="tab" value="n0">
   <button class="act-btn" name="act" value="verify"{dis}>Verify fleet (run &amp; watch)</button>
 </form>"""
 
@@ -1164,8 +1166,25 @@ def _connect_card() -> str:
 </div>"""
 
 
+
+
+_TAB_LABELS = (("n0", "Servers"), ("n1", "Agents"), ("n2", "Evidence"), ("n3", "Decisions"),
+               ("n4", "Activity"), ("n5", "Trust"), ("n6", "Findings"), ("n7", "Gateway"),
+               ("n8", "Monitor"))
+
+
+def _radio_tabs(tab: str) -> str:
+    """The nav radios, with `checked` following the REQUESTED tab. The radio state is
+    client-side only, so every full page load snapped back to Servers — a founder mid-review
+    on Findings clicked "see every attempt" and landed on the first tab (2026-08-15). Links
+    and forms carry `tab=`; unknown values fall back to Servers."""
+    current = tab if tab in {t for t, _ in _TAB_LABELS} else "n0"
+    return "\n".join(
+        f'<input type="radio" name="nav" id="{t}"{" checked" if t == current else ""} '
+        f'aria-label="{label} tab">' for t, label in _TAB_LABELS)
+
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
-           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "") -> str:
+           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "") -> str:
     """The panel.
 
     Built against how LiteLLM, OpenRouter, Snyk and Stainless actually present this, not invented:
@@ -1200,8 +1219,22 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     uncovered = sum(n for _, _, s, n, _ in rows if s != "on")
 
     # --- the session record: one row per agent run, newest first -------------------------------
+    # ONE folding rule, shared by sessions / activity / evidence / Trust: rows about servers
+    # not in the current fleet (removed servers, and pytest/demo residue that leaked into real
+    # stores before the write guards) fold into a labelled count. Rendering them unlabelled is
+    # what read as "cooked up values" ([FOUNDER] 2026-08-15); dropping them silently would be
+    # worse. The stores keep everything; the exports show everything.
+    _fleet_names = set((d.get("entries") or {}).keys())
+    for _se in ((d.get("store") or {}).get("servers") or {}).values():
+        _fleet_names.update((_se or {}).get("aliases") or [])
+
     sess_parts: list[str] = []
     _sess_calls = d.get("session_calls") or calls
+    _in_fleet = [r for r in _sess_calls if isinstance(r, dict)
+                 and r.get("server") in _fleet_names]
+    _foreign_sessions = {r.get("session") for r in _sess_calls if isinstance(r, dict)} \
+        - {r.get("session") for r in _in_fleet}
+    _sess_calls = _in_fleet
     all_sessions = sessions_summary(_sess_calls)
     for s in all_sessions[:10]:
         sid = s["session"]
@@ -1237,6 +1270,11 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     if len(all_sessions) > 10:
         sess_parts.append(f'<tr><td colspan="6" class="dim">…and {len(all_sessions) - 10} more '
                           f'session(s) — the full record is in the exports above.</td></tr>')
+    if _foreign_sessions:
+        sess_parts.append(
+            f'<tr><td colspan="6" class="dim">{len(_foreign_sessions)} session(s) touched only '
+            f'servers not in your current fleet (removed servers and old test fixtures) — '
+            f'folded, kept in the exports.</td></tr>')
     sess = "".join(sess_parts) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
 
@@ -1281,7 +1319,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         parts = ([f"t={_urlq(token)}"] if token else []) \
             + ([f"q={_urlq(q)}"] if q else []) \
             + ([f"tier={_urlq(tier_filter)}"] if tier_filter else []) \
-            + ([f"sel={_urlq(target)}"] if target else [])
+            + ([f"sel={_urlq(target)}"] if target else []) + ["tab=n0"]
         return "/?" + "&".join(parts) if parts else "/"
 
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
@@ -1331,12 +1369,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             _login_form = (f'<form method="POST" action="/" class="rowact">'
                            f'<input type="hidden" name="token" value="{_esc(token)}">'
                            f'<input type="hidden" name="key" value="{_esc(name)}">'
+            f'<input type="hidden" name="tab" value="n0">'
                            f'<button class="act-sm" name="act" value="login" title="Complete '
                            f'this server\'s browser sign-in now — a browser window opens on '
                            f'this machine and the token stays local">sign in</button></form>')
         act_cell = (f'<form method="POST" action="/" class="rowact">'
                     f'<input type="hidden" name="token" value="{_esc(token)}">'
                     f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
+            f'<input type="hidden" name="tab" value="n0">'
                     f'{_acts}</form>' if _acts else "") + _login_form
         if detail:
             # NB `tool_lines`, not `tl` — `tl` is render's finding-timeline parameter, and reusing
@@ -1504,6 +1544,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         for k, lbl, _ in TIERS)
     filterbar = (
         '<form method="GET" action="/" class="filters">'
+        + '<input type="hidden" name="tab" value="n0">'
         + (f'<input type="hidden" name="t" value="{_esc(token)}">' if token else "")
         + f'<input class="fq" type="search" name="q" value="{_esc(q)}" '
           'placeholder="search server, key or agent">'
@@ -1598,7 +1639,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         parts = ([f"t={_urlq(token)}"] if token else []) \
             + ([f"q={_urlq(q)}"] if q else []) \
             + ([f"tier={_urlq(tier_filter)}"] if tier_filter else []) \
-            + ([f"tl={_urlq(key)}"] if tl != key else [])
+            + ([f"tl={_urlq(key)}"] if tl != key else []) \
+            + ["tab=n6"]
         label = "hide trail" if tl == key else "see every attempt"
         return f'<a class="tll" href="/?{"&amp;".join(parts)}#p6">{label}</a>'
 
@@ -1671,17 +1713,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # verified — including pytest fixtures from before the real-home write guard (evil, mal,
     # dies…) — and rendering them unlabelled put fake servers in the founder's Trust table
     # (tab audit, 2026-08-15). Folded with names, never silently dropped.
-    _fleet_names = set((d.get("entries") or {}).keys())
-    for _se in ((d.get("store") or {}).get("servers") or {}).values():
-        _fleet_names.update((_se or {}).get("aliases") or [])
     _ran_gone = sorted(n for n, o in _ran.items()
                        if isinstance(o, dict) and n not in _fleet_names)
     isorows = "".join(
         f'<tr><td class="nm">{_esc(n)}</td>'
         f'<td><span class="chip {"ok" if str(o.get("backend")) in ("proxied-container", "docker") else "warn"}">'
         f'{_esc(o.get("backend") or "?")}</span></td>'
-        f'<td class="dim">{o.get("toolsChecked", "?")}</td>'
-        f'<td class="dim">{len(o.get("skipped") or [])}</td></tr>'
+        f'<td class="num dim">{o.get("toolsChecked", "?")}</td>'
+        f'<td class="num dim">{len(o.get("skipped") or [])}</td></tr>'
         for n, o in sorted(_ran.items())
         if isinstance(o, dict) and n in _fleet_names) or \
         ('<tr><td colspan="4" class="dim">No verify has run yet. Nothing here means nothing was '
@@ -1711,6 +1750,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<form method="POST" action="/" class="rowact">'
                 f'<input type="hidden" name="token" value="{_esc(token)}">'
                 f'<input type="hidden" name="key" value="{_esc(ckey)}">'
+            f'<input type="hidden" name="tab" value="n1">'
                 f'<button class="act-sm warn" name="act" value="protect" title="Install the '
                 f'pre-execution hook so every MCP call from this agent is checked against your '
                 f'baseline">Protect</button></form>')
@@ -1783,7 +1823,20 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # buries the one deny that matters under a thousand identical allows; a security view leads
     # with the exception.
     all_acts = activity_rows(limit=2000)
-    notable = [a for a in all_acts if a.get("decision") == "deny"]
+    _foreign_acts = [a for a in all_acts if a.get("server") not in _fleet_names]
+    all_acts = [a for a in all_acts if a.get("server") in _fleet_names]
+    # Identical denials collapse into one row with a count — the founder scrolled the same
+    # verbatim reason five times ([FOUNDER] 2026-08-15); repetition hides the second problem.
+    _seen_deny: dict[tuple, dict] = {}
+    for a in all_acts:
+        if a.get("decision") != "deny":
+            continue
+        k = (a.get("server"), a.get("tool"), a.get("why"))
+        if k in _seen_deny:
+            _seen_deny[k]["repeats"] += 1
+        else:
+            _seen_deny[k] = dict(a, repeats=1)
+    notable = list(_seen_deny.values())
 
     def _act_row(a: dict, expand_why: bool = False) -> str:
         deny = a.get("decision") == "deny"
@@ -1794,11 +1847,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                         f'<div class="whyfull">{_esc(why)}</div></details>')
         else:
             why_cell = _esc(why or "—")
+        reps = a.get("repeats") or 0
+        rep_note = (f' <span class="dim">×{reps} identical</span>' if reps > 1 else "")
         return (f'<tr><td class="dim">{_esc(str(a.get("when") or "")[:19])}</td>'
                 f'<td class="dim">{_esc(a.get("agent") or "—")}</td>'
                 f'<td class="nm">{_esc(a.get("server") or "")}.{_esc(a.get("tool") or "")}</td>'
                 f'<td><span class="chip {"bad" if deny else "dim"}">'
-                f'{_esc(a.get("decision") or "")}</span></td>'
+                f'{_esc(a.get("decision") or "")}</span>{rep_note}</td>'
                 f'<td class="dim">{_esc(a.get("basis") or "")}</td><td>{why_cell}</td></tr>')
 
     act_summary = act if isinstance(act, dict) else {}
@@ -1809,6 +1864,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         'overstepped its approved baseline.</td></tr>'
     acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
+    if _foreign_acts:
+        acts_full += (f'<tr><td colspan="6" class="dim">{len(_foreign_acts)} call(s) from '
+                      f'servers not in your current fleet (removed servers and old test '
+                      f'fixtures) — folded, kept in the exports.</td></tr>')
 
     def _dec_action(k: str) -> str:
         if not token:
@@ -1816,6 +1875,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<form method="POST" action="/" class="rowact">'
                 f'<input type="hidden" name="token" value="{_esc(token)}">'
                 f'<input type="hidden" name="key" value="{_esc(k)}">'
+                f'<input type="hidden" name="tab" value="n3">'
                 f'<button class="act-sm" name="act" value="keep">Keep blocked</button>'
                 f'<button class="act-sm warn" name="act" value="approve">Approve</button>'
                 f'</form>')
@@ -1981,7 +2041,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 --ease:cubic-bezier(.23,1,.32,1);
 --srow:minmax(200px,1.6fr) .7fr 1.1fr .5fr .5fr .95fr minmax(80px,auto)}}
 *{{box-sizing:border-box}}
-body{{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);font-size:14px;
+body{{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);font-size:13.5px;
 line-height:1.5}}
 /* Natoma-grammar shell (founder, 2026-08-07): grouped left sidebar + one content column.
    Pure CSS grid — the radio-tab mechanics and the `~ .sheet` selectors are untouched. Direct
@@ -1991,22 +2051,22 @@ display:grid;grid-template-columns:196px minmax(0,1fr);gap:0 26px;align-items:st
 .sheet>:not(.rail):not(.pane){{grid-column:1/-1}}
 .bhead{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
 .brandmark{{width:22px;height:22px;display:block}}
-.ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12.5px;
+.ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12px;
 border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
-.ngrp{{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+.ngrp{{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--fai);font-weight:500;margin:16px 10px 4px}}
 .ngrp:first-child{{margin-top:2px}}
 .brand{{font-weight:700;letter-spacing:-.02em;font-size:15px}}
-.bsub{{font-family:var(--mono);font-size:10px;color:var(--fai)}}
+.bsub{{font-family:var(--mono);font-size:10.5px;color:var(--fai)}}
 input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}#n0:focus-visible ~ .sheet label.pill[for=n0]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n1:focus-visible ~ .sheet label.pill[for=n1]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n2:focus-visible ~ .sheet label.pill[for=n2]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n3:focus-visible ~ .sheet label.pill[for=n3]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n4:focus-visible ~ .sheet label.pill[for=n4]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n5:focus-visible ~ .sheet label.pill[for=n5]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n6:focus-visible ~ .sheet label.pill[for=n6]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n7:focus-visible ~ .sheet label.pill[for=n7]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n8:focus-visible ~ .sheet label.pill[for=n8]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}
 .rail{{grid-column:1;display:flex;flex-direction:column;gap:2px;background:none;border:none;
 padding:0;margin:0;position:sticky;top:18px}}
 .pane{{grid-column:2}}
-.pill{{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut);
+.pill{{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--mut);
 padding:7px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
 .pill .ct{{margin-left:auto}}
 .pill .dot{{width:6px;height:6px;border-radius:50%;background:var(--fai)}}
-.pill .ct{{font-size:11.5px;color:var(--fai)}}
+.pill .ct{{font-size:12px;color:var(--fai)}}
 .ct.alert{{color:var(--bad);font-weight:600}}
 #n0:checked~.sheet label[for=n0],#n1:checked~.sheet label[for=n1],
 #n2:checked~.sheet label[for=n2],#n3:checked~.sheet label[for=n3],
@@ -2042,7 +2102,7 @@ transition:background 160ms var(--ease),transform 160ms var(--ease)}}
 a.act-btn{{text-decoration:none;display:inline-block}}
 .abar{{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px}}
 .abar:empty{{display:none}}
-.abanner{{width:100%;padding:10px 13px;border-radius:10px;font-size:12.5px;margin:0 0 13px;
+.abanner{{width:100%;padding:10px 13px;border-radius:10px;font-size:12px;margin:0 0 13px;
 border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .abanner.done{{border-color:var(--ok);background:var(--ok-bg);color:var(--ok)}}
 /* A result is coloured by WHAT IT FOUND, never by the fact that it finished — `.done.bad` and
@@ -2053,24 +2113,24 @@ border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .arows td{{padding:5px 8px;border-top:1px solid var(--line);vertical-align:top}}
 .arows td.nm{{font-family:var(--mono);white-space:nowrap;width:1%}}
 .fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--acc);
-background:var(--acc-soft);color:var(--ink);font-size:11.5px;line-height:1.5}}
+background:var(--acc-soft);color:var(--ink);font-size:12px;line-height:1.5}}
 .nba{{display:flex;gap:8px;align-items:baseline;margin:0 16px 13px;padding:11px 13px;
-border-radius:10px;font-size:13px;border:1px solid var(--line);background:var(--card)}}
+border-radius:10px;font-size:13.5px;border:1px solid var(--line);background:var(--card)}}
 .nba.ok{{border-color:var(--ok);background:var(--ok-bg);color:var(--ok)}}
 .nba.warn{{border-color:var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .nba.bad{{border-color:var(--bad);background:var(--bad-bg);color:var(--bad)}}
 .filters{{display:flex;align-items:center;gap:9px;padding:0 16px 13px;flex-wrap:wrap;margin:0}}
-.fq{{font:inherit;font-size:12.5px;padding:6px 11px;border:1px solid var(--line);
+.fq{{font:inherit;font-size:12px;padding:6px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--ink);min-width:230px}}
 .fq::placeholder{{color:var(--mut)}}
-.filters select{{font:inherit;font-size:12.5px;padding:6px 11px;border:1px solid var(--line);
+.filters select{{font:inherit;font-size:12px;padding:6px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--ink)}}
 .filter-btn{{font:inherit;font-size:12px;padding:6px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
 .filter-btn:active{{transform:scale(.97)}}
 .clearf{{font-size:12px;color:var(--acc)}}
-.count{{margin-left:auto;font-size:12.5px;color:var(--mut)}}
+.count{{margin-left:auto;font-size:12px;color:var(--mut)}}
 .count b{{color:var(--ink);font-weight:600}}
 .thead{{display:grid;grid-template-columns:var(--srow);gap:12px;align-items:center;
 padding:9px 16px;background:var(--rail);border-top:1px solid var(--line);
@@ -2084,44 +2144,44 @@ padding:11px 16px;border-bottom:1px solid var(--line)}}
 a.who{{color:inherit;text-decoration:none}}
 .split{{display:grid;grid-template-columns:minmax(0,1fr) 380px}}
 .side{{border-left:1px solid var(--line);border-top:1px solid var(--line);padding:16px 16px 20px}}
-.side h3{{margin:0;font-size:14px;font-weight:640}}
+.side h3{{margin:0;font-size:13.5px;font-weight:640}}
 .shead{{display:flex;align-items:center;justify-content:space-between;gap:8px}}
 .dacts{{margin-top:10px}}
-.kv{{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;margin:14px 0 0;font-size:12.5px}}
+.kv{{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;margin:14px 0 0;font-size:12px}}
 .kv dt{{color:var(--fai)}}
 .kv dd{{margin:0;font-variant-numeric:tabular-nums}}
 /* the drawer is 380px; a four-column tool table only fits with a fixed layout and wrapping
    names — without this, long tool names push the verdict columns past the card edge */
 .side .mini{{table-layout:fixed}}
-.side .mini th,.side .mini td{{font-size:11px;padding:5px 4px 5px 0}}
+.side .mini th,.side .mini td{{font-size:10.5px;padding:5px 4px 5px 0}}
 .side .mini th:first-child,.side .mini td:first-child{{overflow-wrap:anywhere}}
-.side .mini .chip{{font-size:10px;padding:2px 7px}}
+.side .mini .chip{{font-size:10.5px;padding:2px 7px}}
 .side .mini .dim{{font-size:10.5px}}
 .mark{{width:26px;height:26px;border-radius:7px;background:var(--acc-soft);color:var(--acc);
-display:grid;place-items:center;font-size:11px;font-weight:700;flex:none}}
+display:grid;place-items:center;font-size:10.5px;font-weight:700;flex:none}}
 .who .nm{{font-family:var(--sans);font-weight:600;font-size:13.5px;display:block;
 line-height:1.3}}
-.who .id{{font-family:var(--mono);font-size:11px;color:var(--fai);display:block}}
-.n{{text-align:right;font-variant-numeric:tabular-nums;font-size:13px}}
+.who .id{{font-family:var(--mono);font-size:10.5px;color:var(--fai);display:block}}
+.n{{text-align:right;font-variant-numeric:tabular-nums;font-size:13.5px}}
 .n b{{font-weight:650}}
-.n s{{text-decoration:none;color:var(--fai);font-size:11.5px}}
-.chip{{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:550;
+.n s{{text-decoration:none;color:var(--fai);font-size:12px}}
+.chip{{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:550;
 padding:3px 10px;border-radius:999px;white-space:nowrap;color:var(--mut);
 background:var(--unv-bg)}}
 .chip i{{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}}
 .chip.mode{{background:transparent;border:1px solid var(--line)}}
 /* Finding evidence trail: every reproduction attempt, opened by a GET link (no script). */
-.tll{{margin-left:10px;font-size:11.5px;color:var(--acc);text-decoration:none;white-space:nowrap}}
+.tll{{margin-left:10px;font-size:12px;color:var(--acc);text-decoration:none;white-space:nowrap}}
 .tll:hover{{text-decoration:underline}}
 .tlrow>td{{padding:0 0 14px 0;background:var(--acc-soft)}}
 .tlbox{{margin:0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
 background:var(--card)}}
-.tlhead{{font-size:11.5px;color:var(--mut);margin-bottom:8px}}
+.tlhead{{font-size:12px;color:var(--mut);margin-bottom:8px}}
 .tlt{{width:100%;table-layout:fixed}}
 .tlt th{{font-size:10.5px}}
-.tlt td{{vertical-align:top;padding:6px 8px;font-size:11.5px;overflow-wrap:anywhere}}
-.tlfoot{{margin-top:8px;font-size:11px;overflow-wrap:anywhere}}
-.tlnote{{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:11.5px;
+.tlt td{{vertical-align:top;padding:6px 8px;font-size:12px;overflow-wrap:anywhere}}
+.tlfoot{{margin-top:8px;font-size:10.5px;overflow-wrap:anywhere}}
+.tlnote{{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;
 color:var(--warn);background:var(--warn-bg)}}
 .mono{{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)}}
 .chip.ok{{color:var(--ok);background:var(--ok-bg)}}
@@ -2146,12 +2206,12 @@ margin:2px 0 10px}}
 .legend b{{font-variant-numeric:tabular-nums}}
 .cbar{{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:12px;align-items:center;
 margin:9px 0}}
-.cbar .lb{{font-family:var(--mono);font-size:11.5px;color:var(--mut);overflow:hidden;
+.cbar .lb{{font-family:var(--mono);font-size:12px;color:var(--mut);overflow:hidden;
 text-overflow:ellipsis;white-space:nowrap}}
 .track{{height:9px;background:var(--rail);border-radius:999px;overflow:hidden}}
 .fill{{height:100%;background:var(--acc);border-radius:999px}}
-.cbar .vl{{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--ink)}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}
+.cbar .vl{{font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink)}}
+table{{width:100%;border-collapse:collapse;font-size:13.5px}}
 /* A wide table must scroll INSIDE the card, never be clipped by its overflow:hidden — the
    Findings table's last column was cut off with no way to reach it (founder's audit,
    2026-08-15). */
@@ -2161,31 +2221,32 @@ text-align:left;font-weight:500;padding:9px 16px;background:var(--rail);
 border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
 td{{padding:10px 16px;border-bottom:1px solid var(--line);vertical-align:middle}}
 td.num{{text-align:right;font-variant-numeric:tabular-nums;width:60px}}
-.nm{{font-family:var(--mono);font-size:12.5px}}
+td{{line-height:1.45}}
+.nm{{font-family:var(--mono);font-size:12px}}
 .dim{{color:var(--mut)}}
 .dd{{border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:#FBFBFC;
 padding:14px 16px}}
 .ddgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px 20px;
-font-size:12.5px;margin-bottom:12px}}
+font-size:12px;margin-bottom:12px}}
 .ddgrid .k{{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--fai)}}
 .ddh{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 font-weight:500;margin:14px 0 8px}}
-.mini{{font-size:12.5px}}
+.mini{{font-size:12px}}
 .mini th{{background:none;border-top:none;padding:5px 0}}
 .mini td{{padding:5px 0;background:none}}
 .unobs{{background:var(--rail);border-radius:10px;padding:10px 12px;margin:0 0 8px;
 font-size:12px;color:var(--mut);line-height:1.5}}
 .note{{margin:0 16px 13px;padding:10px 12px;border-radius:10px;background:var(--rail);
-font-size:12.5px;color:var(--mut);line-height:1.5}}
+font-size:12px;color:var(--mut);line-height:1.5}}
 .note.ok{{background:var(--ok-bg);color:var(--ok)}}
 .note.warn{{background:var(--warn-bg);color:var(--warn)}}
 .whysum{{cursor:pointer;color:var(--acc);font-size:12px}}
 /* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
 .sessdrill{{margin-top:4px}}
-.sessdrill .mini{{margin-top:6px;font-size:11.5px}}
-.sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:11px}}
-.whyfull{{white-space:pre-wrap;font-size:11.5px;color:var(--mut);margin-top:6px;max-width:60ch;
+.sessdrill .mini{{margin-top:6px;font-size:12px}}
+.sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:10.5px}}
+.whyfull{{white-space:pre-wrap;font-size:12px;color:var(--mut);margin-top:6px;max-width:60ch;
 line-height:1.5}}
 h2{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 font-weight:500;margin:18px 16px 8px}}
@@ -2207,29 +2268,29 @@ border-radius:8px;margin:0 5px 10px 0;color:var(--mut);cursor:pointer}}
 .fr{{padding:20px 16px 24px;max-width:620px}}
 .fr h2{{margin:0 0 7px;font-size:19px;font-weight:640;letter-spacing:-.02em;text-transform:none;
 color:var(--ink)}}
-.fr>p{{color:var(--mut);margin:0 0 20px;font-size:13px;max-width:62ch}}
+.fr>p{{color:var(--mut);margin:0 0 20px;font-size:13.5px;max-width:62ch}}
 .fr ol{{list-style:none;margin:0;padding:0;counter-reset:s}}
 .fr li{{counter-increment:s;display:grid;grid-template-columns:26px 1fr;gap:12px;padding:14px 0;
 border-top:1px solid var(--line)}}
 .fr li::before{{content:counter(s);width:22px;height:22px;border-radius:7px;
-background:var(--acc-soft);color:var(--acc);font-size:11px;font-weight:700;display:grid;
+background:var(--acc-soft);color:var(--acc);font-size:10.5px;font-weight:700;display:grid;
 place-items:center}}
 .fr b{{display:block;font-size:13.5px}}
 /* the numbered pseudo-element is grid item 1; the description must stay in column 2 or it
    wraps one word per line inside the 26px number column (latent in the mockup's own CSS) */
-.fr li span{{grid-column:2;color:var(--mut);font-size:12.5px}}
+.fr li span{{grid-column:2;color:var(--mut);font-size:12px}}
 .jrny{{list-style:none;margin:0;padding:0 16px 14px}}
 .jstep{{display:grid;grid-template-columns:1fr;gap:2px;padding:8px 0;border-bottom:1px solid var(--line)}}
 .jstep:last-child{{border-bottom:0}}
-.jstep b{{font-size:13px}}
-.jstep span{{color:var(--mut);font-size:12.5px}}
+.jstep b{{font-size:13.5px}}
+.jstep span{{color:var(--mut);font-size:12px}}
 .jstep i{{font-style:normal;color:var(--acc)}}
 .jstep.done b{{color:var(--ok)}}
 .jstep.now b{{color:var(--acc)}}
 .jstep.todo b{{color:var(--fai)}}
-code{{font-family:var(--mono);font-size:11.5px;background:var(--rail);padding:2px 6px;
+code{{font-family:var(--mono);font-size:12px;background:var(--rail);padding:2px 6px;
 border-radius:6px}}
-.snip{{font-family:var(--mono);font-size:11.5px;background:var(--rail);margin:0 16px 13px;
+.snip{{font-family:var(--mono);font-size:12px;background:var(--rail);margin:0 16px 13px;
 padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 @media (hover:hover) and (pointer:fine){{
   .gbtn:hover,.filter-btn:hover,.act-sm:hover{{border-color:var(--acc);color:var(--acc)}}
@@ -2257,10 +2318,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
   .side{{border-left:none}}
 }}
 </style></head><body>
-<input type="radio" name="nav" id="n0" checked aria-label="Servers tab"><input type="radio" name="nav" id="n1" aria-label="Agents tab">
-<input type="radio" name="nav" id="n2" aria-label="Evidence tab"><input type="radio" name="nav" id="n3" aria-label="Decisions tab">
-<input type="radio" name="nav" id="n4" aria-label="Activity tab"><input type="radio" name="nav" id="n5" aria-label="Trust tab">
-<input type="radio" name="nav" id="n6" aria-label="Findings tab"><input type="radio" name="nav" id="n7" aria-label="Gateway tab"><input type="radio" name="nav" id="n8" aria-label="Monitor tab">
+{_radio_tabs(tab)}
 <div class="sheet">
   <div class="bhead"><img src="/brand.svg" alt="Nativerse" class="brandmark"><span class="brand">mcpgawk</span>
     <!-- WHICH BUILD AM I LOOKING AT. A running panel never reloads its code: on 2026-07-30 the
@@ -2999,7 +3057,7 @@ def principal_upstreams(keys_file: str | None) -> dict[str, list[str]]:
         return {}
 
 
-def run_monitor_start() -> dict[str, Any]:
+def run_monitor_start(include_local: bool = False) -> dict[str, Any]:
     """Start continuous monitoring from the panel, watching what this machine already has.
 
     THE GAP THIS CLOSES (audit 2026-08-02): monitoring was production-grade and NOTHING started
@@ -3027,6 +3085,9 @@ def run_monitor_start() -> dict[str, Any]:
     # (bootstrap_config_from_machine). There is no --from-machine flag; passing one would abort
     # with "unrecognized arguments" while this page happily reported success.
     cmd = [_sys.executable, "-m", "mcpgawk", "monitor", "run"]
+    if include_local:
+        # The click on the labelled button IS the consent --include-local asks for.
+        cmd.append("--include-local")
     log = tempfile.NamedTemporaryFile(prefix="mcpgawk-monitor-", suffix=".log", delete=False)
     try:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
@@ -3098,6 +3159,21 @@ def monitor_status(home: Path | str | None = None) -> dict[str, Any]:
         store = SqliteMonitorStore(str(db), read_only=True)
         try:
             out["servers"] = status_rows(store)
+            # The tab said "7 unresolved alert(s)" and rendered none of them ([FOUNDER]
+            # 2026-08-15: logs should be captured and made VISIBLE here). Newest first.
+            out["alerts"] = [
+                {"server": a.server_id, "kind": a.kind.value, "detail": a.detail,
+                 "raised_at": a.raised_at, "state": a.state}
+                for a in store.pending_alerts() + store.dead_lettered_alerts()][:20]
+            if not out["alerts"]:
+                try:
+                    rows = store._conn.execute(
+                        "select server_id, kind, detail, raised_at, state from alerts "
+                        "order by id desc limit 20").fetchall()
+                    out["alerts"] = [{"server": r[0], "kind": r[1], "detail": r[2],
+                                      "raised_at": r[3], "state": r[4]} for r in rows]
+                except Exception:                  # noqa: BLE001 — the count still renders
+                    pass
         finally:
             store.close()
     except Exception as exc:                      # noqa: BLE001 — a broken db is a page note
@@ -3117,8 +3193,13 @@ def _monitor_start_button(mon: dict[str, Any]) -> str:
         return ""
     return (f'<form method="POST" action="/" style="margin:0 16px 13px">'
             f'<input type="hidden" name="token" value="{_esc(token)}">'
-            f'<button class="act-btn" name="act" value="monitor-start">Start monitoring</button>'
-            f'</form>')
+            f'<input type="hidden" name="tab" value="n8">'
+            f'<button class="act-btn" name="act" value="monitor-start">Start monitoring '
+            f'(remote servers)</button> '
+            f'<button class="act-btn" name="act" value="monitor-start-local" title="Polling a '
+            f'local server SPAWNS it every interval, running its code with the credentials in '
+            f'its config — this button is that consent">Start monitoring incl. local servers'
+            f'</button></form>')
 
 
 def _monitor_pane(mon: dict[str, Any]) -> str:
@@ -3196,8 +3277,29 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
                       'interval, running its code with the credentials in its config. Start '
                       'monitoring with <code>--include-local</code> to poll them '
                       'deliberately.</div>')
-    return (frame + state + err + head + stale_note
-            + '<table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
+    alert_rows = ""
+    for a in (mon.get("alerts") or [])[:20]:
+        detail = str(a.get("detail") or "")
+        shown = _esc(detail[:140]) + ("…" if len(detail) > 140 else "")
+        full = (f'<details class="sessdrill"><summary class="whysum">{shown}</summary>'
+                f'<div class="whyfull">{_esc(detail)}</div></details>'
+                if len(detail) > 140 else _esc(detail))
+        alert_rows += (
+            f'<tr><td class="dim"><span title="{_esc(str(a.get("raised_at") or ""))}">'
+            f'{_esc(_ago(str(a.get("raised_at") or "")))}</span></td>'
+            f'<td class="nm">{_esc(str(a.get("server") or ""))}</td>'
+            f'<td><span class="chip warn">{_esc(str(a.get("kind") or ""))}</span></td>'
+            f'<td>{full}</td>'
+            f'<td class="dim">{_esc(str(a.get("state") or ""))}</td></tr>')
+    alerts_tbl = ""
+    if alert_rows:
+        alerts_tbl = ('<h2>alerts · what monitoring raised, in its own words</h2>'
+                      '<table><thead><tr><th>when</th><th>server</th><th>kind</th>'
+                      '<th>detail</th><th>delivery</th></tr></thead>'
+                      f'<tbody>{alert_rows}</tbody></table>')
+    return (frame + state + err + head + stale_note + alerts_tbl
+            + '<h2>servers under watch</h2>'
+              '<table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
               '<th>open alerts</th><th>when</th></tr></thead>'
               f'<tbody>{"".join(parts)}</tbody></table>')
 
@@ -3409,7 +3511,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
                 + f'<div class="note">{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
                 + f'<form method="POST" action="/" class="filters">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
-                  f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
+                  f'<input name="name" placeholder="agent name<input type="hidden" name="tab" value="n7">, e.g. claude-code@laptop" '
                   f'maxlength="80" required>'
                   f'<select name="role"><option value="">no grants yet</option>{opts}</select>'
                   f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key'
@@ -3460,6 +3562,7 @@ def _playground_form(live: dict[str, Any], token: str) -> str:
             f'handlers, the same policy, and the decision lands in the trail below.</div>{note}'
             f'<form method="POST" action="/" class="filters">'
             f'<input type="hidden" name="token" value="{_esc(token)}">{picker}'
+            f'<input type="hidden" name="tab" value="n7">'
             f'<input name="key" placeholder="agent key (Bearer)" maxlength="200">'
             f'<input name="arguments" placeholder=\'{{"arg": "value"}}\' maxlength="400">'
             f'<button class="act-btn sm" name="act" value="gw-call">Call through gateway</button>'
@@ -4467,7 +4570,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                           q=(q.get("q") or [""])[0][:80],
                           tier_filter=(q.get("tier") or [""])[0][:20],
                           sel=(q.get("sel") or [""])[0][:120],
-                          tl=(q.get("tl") or [""])[0][:200]).encode("utf-8")
+                          tl=(q.get("tl") or [""])[0][:200],
+                          tab=(q.get("tab") or [""])[0][:3]).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4493,7 +4597,13 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                  b"did not come from you. The token is in your terminal.")
                 return
             act = (form.get("act") or [""])[0]
-            if act in ("issue-key", "monitor-start", "gw-call", "keep", "protect", "approve"):
+            # The redirect must land the human back on the tab they acted from — radio-tab
+            # state dies with the page load, and every action used to dump them on Servers.
+            _rtab = (form.get("tab") or [""])[0]
+            _rtab = _rtab if _rtab in {t for t, _ in _TAB_LABELS} else "n0"
+            _back = f"/?t={urllib.parse.quote(token)}&tab={_rtab}#action"
+            if act in ("issue-key", "monitor-start", "monitor-start-local", "gw-call",
+                       "keep", "protect", "approve"):
                 # The synchronous actions get the same two rules as the background ones:
                 # never stomp a running action's banner (busy = SAID, not silent), and every
                 # result renders under ITS OWN label — driven live 2026-08-14, "Start
@@ -4507,6 +4617,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                     _k = (form.get("key") or [""])[0]
                     _begin_action({"issue-key": f"issue-key · {(form.get('name') or [''])[0]}",
                                    "monitor-start": "monitor",
+                                   "monitor-start-local": "monitor (incl. local)",
                                    # never the gw-call key: it is the agent's credential
                                    "gw-call": "gateway call",
                                    "keep": "keep blocked",
@@ -4531,8 +4642,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                level="ok" if res.get("ok") else "bad",
                                secret=res.get("secret") or "", snippet=res.get("snippet") or "",
                                at=_now())
-            elif act == "monitor-start":
-                res = run_monitor_start()
+            elif act in ("monitor-start", "monitor-start-local"):
+                res = run_monitor_start(include_local=(act == "monitor-start-local"))
                 _ACTION.update(message=res.get("message") or "", rows=[],
                                level="ok" if res.get("ok") else "bad",
                                secret="", snippet="", at=_now())
@@ -4583,8 +4694,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
                     _ACTION.update(message=f"approve refused — {blocked}", at=_now())
                     self.send_response(303)
-                    self.send_header("Location",
-                                 f"/?t={urllib.parse.quote(token)}#action")
+                    self.send_header("Location", _back)
                     self.end_headers()
                     return
                 try:
@@ -4598,8 +4708,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # Carry the token back, or the redirect would land the human on a read-only page and
             # the buttons would vanish after the first click.
             self.send_response(303)
-            self.send_header("Location",
-                                 f"/?t={urllib.parse.quote(token)}#action")
+            self.send_header("Location", _back)
             self.end_headers()
 
     try:

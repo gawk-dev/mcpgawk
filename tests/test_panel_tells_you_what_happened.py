@@ -85,7 +85,11 @@ def test_the_post_action_redirect_anchors_at_the_result():
 
     src = Path(__file__).parent.parent / "src" / "mcpgawk" / "panel.py"
     text = src.read_text(encoding="utf-8")
-    assert text.count('#action"') >= 2, "a post-action redirect lost its anchor"
+    # Both POST redirects go through the one _back URL, which carries the anchor AND the tab
+    # the human acted from (tab state dies with a page load — founder, 2026-08-15).
+    assert 'tab={_rtab}#action' in text, "the redirect lost its anchor or its tab"
+    assert text.count('send_header("Location", _back)') >= 2, \
+        "a post-action redirect stopped using the anchored, tab-carrying URL"
     assert 'id="action"' in text, "the anchor target does not exist in the page"
 
 
