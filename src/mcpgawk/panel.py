@@ -4420,8 +4420,54 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         # degrades HONESTLY on its own: no Docker, or a command it cannot containerize, falls
         # back to the proxy-only sandbox and records sandboxDegradedReason per server, which is
         # surfaced in the rows below — never silently upgraded into a stronger claim.
-        rc, engine_output = _verify.run_captured(
-            [cfg, "--isolate", *audit_args, "--out", str(report_path)], timeout=1200)
+        # IN-BAND SIGN-IN, SURFACED LIVE ([FOUNDER] 2026-08-15 "go ahead with kite"): the
+        # engine now runs a session-bound server's own login tool and WAITS for the human.
+        # The URL leaves the engine as an audit event; a tailer thread lifts it onto the
+        # banner while the run is still going, so the human sees the link the moment it
+        # exists instead of after the timeout.
+        import threading
+        _auth_stop = threading.Event()
+
+        def _tail_auth_events() -> None:
+            audit_p = run_dir / "audit.jsonl"
+            pos = 0
+            while not _auth_stop.wait(2.0):
+                try:
+                    with open(audit_p, encoding="utf-8", errors="replace") as fh:
+                        fh.seek(pos)
+                        for line in fh:
+                            pos = fh.tell()
+                            try:
+                                ev = json.loads(line)
+                            except ValueError:
+                                continue
+                            if ev.get("type") == "auth-needed" and ev.get("url"):
+                                _ACTION.update(
+                                    login_url=str(ev["url"]),
+                                    notice=f"{ev.get('server')} signs in through its own "
+                                           f"'{ev.get('tool')}' tool — open the link on this "
+                                           f"banner to authorise THIS verify session. The run "
+                                           f"waits up to 5 minutes.")
+                            elif ev.get("type") == "auth-ok":
+                                _ACTION.update(login_url="",
+                                               notice=f"{ev.get('server')}: signed in — "
+                                                      f"the checks are running.")
+                            elif ev.get("type") == "auth-timeout":
+                                _ACTION.update(login_url="",
+                                               notice=f"{ev.get('server')}: sign-in was not "
+                                                      f"completed in 5 minutes — auth-needing "
+                                                      f"checks will fail honestly.")
+                except OSError:
+                    pass
+
+        _tailer = threading.Thread(target=_tail_auth_events, daemon=True)
+        if audit_args:
+            _tailer.start()
+        try:
+            rc, engine_output = _verify.run_captured(
+                [cfg, "--isolate", *audit_args, "--out", str(report_path)], timeout=1200)
+        finally:
+            _auth_stop.set()
         prof_after = -1.0
         try:
             prof_after = behaviour_profile_path().stat().st_mtime

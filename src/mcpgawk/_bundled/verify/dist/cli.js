@@ -236,6 +236,24 @@ licenseOpts = {}) {
                     if (e.type === "sandbox-degraded") {
                         err(`⚠  ${e.server}: ${e.reason}`);
                     }
+                    if (e.type === "auth-needed") {
+                        err(`\n  ${e.server}: this server's sign-in lives in its own '${e.tool}' tool.`);
+                        err(`  Open this link to authorise THIS verify session (waiting up to 5 min):`);
+                        err(`    ${e.url}\n`);
+                    }
+                    if (e.type === "auth-ok") {
+                        err(`  ${e.server}: signed in — continuing with the checks.`);
+                    }
+                    if (e.type === "auth-timeout") {
+                        err(`  ${e.server}: sign-in was not completed in 5 minutes — proceeding; ` +
+                            `auth-needing checks will fail honestly.`);
+                    }
+                    if ((e.type === "auth-needed" || e.type === "auth-ok" ||
+                        e.type === "auth-timeout") && auditLogPath) {
+                        // The panel tails this file to lift the sign-in URL onto the banner mid-run.
+                        // Written as-is: the URL is exactly what the human is shown, the file is 0600.
+                        appendFileSync(auditLogPath, `${JSON.stringify(e)}\n`);
+                    }
                     if (e.type === "raw-observation" && auditLogPath) {
                         // Masked AT THE WRITE. `resultTextExcerpt` is 2000 chars of whatever the tool
                         // returned, and on 2026-08-13 a fixture this engine CONVICTED for credential-exposure

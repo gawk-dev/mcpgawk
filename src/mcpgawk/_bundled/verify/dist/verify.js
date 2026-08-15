@@ -5,7 +5,7 @@ import { annotationSignal, classifyTool } from "./classify.js";
 import { DISCOVERY_QUERIES, detectDynamicDispatch, discoverQueryParam, discoverToolOf, executorToolOf, inferExecutorEnvelope, parseHiddenCatalog, } from "./dispatch.js";
 import { isRemote, } from "./model.js";
 import { pinInventory } from "./pins.js";
-import { CheckRunner, callToolText, dispatchedProbe, listTools, remoteProbe, sandboxedProbe, sandboxedProbeReused, } from "./runner.js";
+import { CheckRunner, isMcpRemoteProxy, callToolText, dispatchedProbe, listTools, remoteProbe, sandboxedProbe, sandboxedProbeReused, } from "./runner.js";
 /**
  * `--isolate` (opt-in, NOT the default): Docker is required for full protection. When it's
  * reachable and the server's command maps onto a known runtime — plain `node`/`python` AND the
@@ -20,6 +20,18 @@ import { CheckRunner, callToolText, dispatchedProbe, listTools, remoteProbe, san
  * deliberate stronger pass. Unlike the old `--network none` backend, isolation no longer costs
  * the SSRF-canary/undeclared-egress signal — allowlisted hosts stay reachable through the proxy.
  */
+/** The server's own sign-in tool, when auth lives IN-BAND (kite's `login` returns a broker
+ * URL bound to the calling session). Name-driven and deliberately narrow: `login`, `log_in`,
+ * `login_url` shapes match; anything containing `out` (logout) never does. */
+export function findInbandLoginTool(tools) {
+    return tools.find((t) => /(^|[._-])log[_-]?in($|[._-])/i.test(t.name) && !/out/i.test(t.name));
+}
+/** The first URL in a login tool's prose, stripped of trailing punctuation — servers wrap the
+ * link in sentences ("Click here: https://… to continue."). Null when there is none. */
+export function firstUrlIn(text) {
+    const m = text.match(/https?:\/\/\S+/);
+    return m ? m[0].replace(/[)\]}"',.]+$/, "") : null;
+}
 async function selectIsolatedSandbox(server) {
     if (!canProxyContainerize(server.command ?? "")) {
         return {
@@ -151,7 +163,26 @@ export async function verifyServer(server, opts = {}) {
         sandbox = new ProcessSandbox(); // default: fast, HTTP(S)-visible — pass `isolate: true` for OS-level containment
         sandboxBackend = "proxy";
     }
-    const probe = remote ? remoteProbe(server) : sandboxedProbe(server, sandbox);
+    // An mcp-remote proxy's upstream IS the server — the sandbox blocking it killed every
+    // probe call (kite: mcp-remote exited the moment a tools/call needed the network, so even
+    // the server's own login tool answered "Connection closed"; measured 2026-08-15). The
+    // proxied URL's host is first-party by construction and joins the allowlist; genuinely
+    // undeclared egress to anywhere ELSE stays observed and blocked exactly as before.
+    let effectiveServer = server;
+    if (!remote && isMcpRemoteProxy(server)) {
+        const upstream = (server.args ?? []).find((a) => /^https?:\/\//.test(a));
+        if (upstream) {
+            try {
+                const host = new URL(upstream).host;
+                const allowed = new Set([...(server.allowedHosts ?? []), host]);
+                effectiveServer = { ...server, allowedHosts: [...allowed] };
+            }
+            catch {
+                /* an unparseable arg is not a URL; nothing to allow */
+            }
+        }
+    }
+    const probe = remote ? remoteProbe(server) : sandboxedProbe(effectiveServer, sandbox);
     const checks = remote ? CHECKS.filter((c) => c.applicability === "output") : CHECKS;
     emit({ type: "server", server: server.name, transport, mode });
     const tools = await listTools(server);
@@ -232,6 +263,45 @@ export async function verifyServer(server, opts = {}) {
     // kite sit "verified-looking" with 0 of 22 tools exercised for two weeks ([FOUNDER]
     // 2026-08-14: the user's security outranks the server's labels).
     const labelSignal = annotationSignal(tools);
+    // IN-BAND SIGN-IN ([FOUNDER] 2026-08-15 "go ahead with kite"): a server whose auth lives in
+    // its own tools (kite: `login` returns a broker URL bound to THIS session) has never had a
+    // tool genuinely exercised — the reads fail until a human authorises the session. When a
+    // login-shaped tool exists and a probe read fails, call the server's own login tool in the
+    // SAME session, hand the URL out as an audit event, and wait for the human (bounded).
+    // Only for safe-mode local runs on a persistent session; everything else is unchanged.
+    const loginTool = findInbandLoginTool(tools);
+    if (mode === "safe" && !remote && loginTool && isMcpRemoteProxy(server)) {
+        const preflight = tools.find((t) => classifyTool(t, labelSignal).callable);
+        if (preflight) {
+            const first = await probe(preflight.name, {});
+            // The unauthenticated answer, normalised — kite says "Failed to execute get_gtts" with
+            // ok=true, so phrase-lists misread it (the first cut called that signed-in and burned a
+            // run: 0/60 with the human never asked). Auth is COMPLETE only when the same read's
+            // answer CHANGES from this shape.
+            const unauthedShape = (r) => (r.ok ? r.obs.resultText : r.detail ?? "").trim().slice(0, 120);
+            const firstShape = unauthedShape(first);
+            const failed = !first.ok || /not (logged in|authenticated)|login|forbidden|unauthorized|failed to execute/i
+                .test(first.ok ? first.obs.resultText : "");
+            if (failed) {
+                const login = await probe(loginTool.name, {});
+                const url = login.ok ? firstUrlIn(login.obs.resultText) : null;
+                if (url) {
+                    emit({ type: "auth-needed", server: server.name, tool: loginTool.name, url });
+                    let authed = false;
+                    for (let i = 0; i < 30; i++) {
+                        await new Promise((r) => setTimeout(r, 10_000));
+                        const again = await probe(preflight.name, {});
+                        if (again.ok && unauthedShape(again) !== firstShape) {
+                            authed = true;
+                            break;
+                        }
+                    }
+                    emit(authed ? { type: "auth-ok", server: server.name }
+                        : { type: "auth-timeout", server: server.name });
+                }
+            }
+        }
+    }
     const noisyAxes = [
         ...(labelSignal.destructiveInformative ? [] : ["destructiveHint:true on every tool"]),
         ...(labelSignal.readOnlyVetoInformative ? [] : ["readOnlyHint:false on every tool"]),
