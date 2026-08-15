@@ -4,7 +4,7 @@
     <img alt="mcpgawk by nativerse" src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/wordmark-light.png" width="320">
   </picture>
 </p>
-<p align="center"><em>Make MCP lean and honest.</em></p>
+<p align="center"><em>One gateway in the path. On your machine.</em></p>
 
 # mcpgawk
 
@@ -16,12 +16,14 @@
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-blue?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
 [![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
 
-A local-first command that measures what a [Model Context Protocol](https://modelcontextprotocol.io)
-server costs and what it can do. It runs on your machine and uploads nothing.
+Your agents call [Model Context Protocol](https://modelcontextprotocol.io) servers that can
+change what their tools do *after* you approved them, and the agent will call the new one without
+noticing. mcpgawk reads every server your agents can reach, checks every call against a baseline
+you approved, and blocks the ones that changed. It runs on your machine and uploads nothing.
 
 It is also how the [gawk gateway](https://gawk.dev) knows what it fronts: gawk Platform puts one
 endpoint in front of your MCP fleet — per-principal keys, policy, tamper-evident audit — and this
-free scanner is the seeing layer underneath it.
+free layer is the seeing and the blocking underneath it.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
