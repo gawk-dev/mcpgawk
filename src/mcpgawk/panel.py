@@ -1184,7 +1184,7 @@ def _radio_tabs(tab: str) -> str:
         f'aria-label="{label} tab">' for t, label in _TAB_LABELS)
 
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
-           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "") -> str:
+           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "", stale_token: bool = False) -> str:
     """The panel.
 
     Built against how LiteLLM, OpenRouter, Snyk and Stainless actually present this, not invented:
@@ -1209,6 +1209,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # synthetic d in tests must not require the key.
     global _D_FOR_ROLES
     _D_FOR_ROLES = {**d, "_token": token}
+    # The silent read-only fallback for a WRONG key bit the founder four times in one night —
+    # a present-but-stale key now announces itself as loudly as the dead-panel banner does.
+    # Identical for every wrong key: it must teach nothing about the right one.
+    stale_banner = ""
+    if stale_token:
+        stale_banner = ('<div class="stalekey">This link&#39;s session key is STALE — the '
+                        'panel restarted after it was printed, so every button is hidden. '
+                        'Use the fresh link from the terminal running '
+                        '<code>mcpgawk panel</code>.</div>')
     gwpane = _gateway_pane(d.get("gateway") or gateway_status(), token, action)
     monpane = _monitor_pane(d.get("monitor") or {"installed": False, "db_present": False})
     pending = d.get("pending") or []
@@ -1594,12 +1603,17 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             # The engine truncates at 2000 chars ON PURPOSE (a spot-check trail, never a mirror of
             # the server's data). Say so where it happens rather than implying this is everything.
             trunc = " …(excerpt — the engine keeps the first 2000 chars only)" if len(body) >= 2000 else ""
+            # The 403 in this cell is usually OURS — the tool relaying the sandbox's refusal.
+            # The note below the table said so and the founder still read the rows as "all the
+            # findings are 403 errors" (2026-08-15): the label has to sit ON the row.
+            ours = ('<span class="chip warn">our sandbox\'s block</span> '
+                    if "403" in body and "blocked by sandbox" in body else "")
             rows.append(
                 f'<tr><td class="dim">#{_esc(a.get("attempt"))}</td>'
                 f'<td><span class="chip {"ok" if okflag else "warn"}">'
                 f'{"observed" if okflag else "could not run"}</span></td>'
                 f'<td class="dim">{_esc(hosts)}</td>'
-                f'<td class="dim mono">{_esc((body or a.get("infraDetail") or "—")[:400])}'
+                f'<td class="dim mono">{ours}{_esc((body or a.get("infraDetail") or "—")[:400])}'
                 f'{_esc(trunc)}</td></tr>')
         ran = sum(1 for a in tlm["attempts"] if a.get("ok"))
         head = (f'{len(tlm["attempts"])} attempt(s) recorded · {ran} produced an observation · '
@@ -1617,7 +1631,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<tr class="tlrow"><td colspan="6"><div class="tlbox">'
                 f'<div class="tlhead">{_esc(head)}</div>'
                 f'<table class="tlt"><thead><tr><th>attempt</th><th>outcome</th>'
-                f'<th>where it went</th><th>what the tool reported</th></tr></thead>'
+                f'<th>where it went</th><th>what came back</th></tr></thead>'
                 f'<tbody>{"".join(rows)}</tbody></table>'
                 f'{blocked_note}'
                 f'<div class="dim tlfoot">Raw record: '
@@ -2242,6 +2256,9 @@ font-size:12px;color:var(--mut);line-height:1.5}}
 .note.ok{{background:var(--ok-bg);color:var(--ok)}}
 .note.warn{{background:var(--warn-bg);color:var(--warn)}}
 .whysum{{cursor:pointer;color:var(--acc);font-size:12px}}
+.stalekey{{grid-column:1/-1;background:var(--bad);color:#fff;border-radius:10px;
+padding:11px 16px;font-size:13.5px;font-weight:550;margin-bottom:14px}}
+.stalekey code{{color:#fff}}
 /* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
 .sessdrill{{margin-top:4px}}
 .sessdrill .mini{{margin-top:6px;font-size:12px}}
@@ -2320,6 +2337,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 </style></head><body>
 {_radio_tabs(tab)}
 <div class="sheet">
+  {stale_banner}
   <div class="bhead"><img src="/brand.svg" alt="Nativerse" class="brandmark"><span class="brand">mcpgawk</span>
     <!-- WHICH BUILD AM I LOOKING AT. A running panel never reloads its code: on 2026-07-30 the
          founder read a 25-minute-old process three times and reported "nothing changed" —
@@ -2415,7 +2433,10 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <!-- Findings moved to their own screen (2026-07-31). Evidence keeps PROVENANCE — what ran,
            when, and how it went. Rendering the same findings in two places is two answers. -->
       <div class="note">Findings live on their own screen. This page is provenance: what ran, when,
-        and how it went.</div>
+        and how it went. <b>scan</b> = the surface was enumerated · <b>verify</b> = behaviour was
+        exercised in the sandbox · <b>ok</b> = ran and found nothing · <b>findings</b> = something
+        to review on Findings · <b>error</b> = the run itself failed · <b>fleet-wide</b> = every
+        server, not one target.</div>
       <table><thead><tr><th>started</th><th>what</th><th>result</th><th>target</th></tr></thead>
       <tbody>{runs}</tbody></table>
     </div>
@@ -2443,9 +2464,15 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
         <div class="tools"><a class="gbtn" href="/export/calls.jsonl">Export .jsonl</a>
           <a class="gbtn" href="/export/calls.csv">Export .csv</a></div></div>
       <h2>what actually ran</h2>
+      <div class="note">Per server, from the last behavioural run: which sandbox actually held it
+        (<b>proxied-container</b> = full OS isolation · <b>proxy</b> = HTTP-only, weaker ·
+        <b>none</b> = remote, cannot be sandboxed), how many tools were genuinely exercised, and
+        how many were deliberately not invoked — an untested tool is never a clean one.</div>
       <table><thead><tr><th>server</th><th>isolation used</th><th>tools checked</th>
       <th>not invoked</th></tr></thead><tbody>{isorows}</tbody></table>
       <h2>where everything lives</h2>
+      <div class="note">Every store this product writes, by full path — all local, nothing leaves
+        this machine. Open them yourself; nothing here is asking to be trusted unread.</div>
       <table><thead><tr><th>what</th><th>path</th></tr></thead><tbody>{pathrows}</tbody></table>
       <h2>this build</h2>
       <table><tbody>
@@ -3178,6 +3205,61 @@ def run_gateway_setup() -> dict[str, Any]:
                        f"will hold backend credentials; that belongs in your hands): {start_cmd}"}
 
 
+def run_gateway_start() -> dict[str, Any]:
+    """Generate (if needed) and START the gateway, detached, from the panel.
+
+    The tokened click IS the consent — the same model as monitor-start, which already launches
+    a credential-inheriting daemon from this page ([FOUNDER] 2026-08-15: expecting a manual
+    command was "pathetic experience"; the earlier no-auto-start stance was inconsistent with
+    the product's own consent model). Fail-closed is untouched: a missing ${VAR} or a bad
+    config kills the child in its first second, and its OWN last words land on the banner —
+    the same honest wait-and-report as monitoring."""
+    import subprocess
+    import sys as _sys
+    import tempfile
+    import time
+
+    gw = gateway_status()
+    live = gw.get("live") or {}
+    if live.get("listen"):
+        return {"ok": False, "message": f"a gateway is already running at {live['listen']}"}
+    cfg = behaviour_profile_path().parent / "gateway" / "gateway.yaml"
+    if not cfg.is_file():
+        res = run_gateway_setup()
+        if not res.get("ok"):
+            return res
+    cmd = [_sys.executable, "-m", "mcpgawk", "enforce", "serve", "--gateway-config", str(cfg)]
+    log = tempfile.NamedTemporaryFile(prefix="mcpgawk-gateway-", suffix=".log", delete=False)
+    try:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
+                                start_new_session=True)
+    except Exception as exc:                      # noqa: BLE001 — the reason goes ON the page
+        return {"ok": False, "message": f"could not start the gateway: {exc}"}
+    # Config errors (an unset ${VAR}, a bad key) exit fast and MUST be reported as the child
+    # said them; backends then connect serially, so a healthy child is simply still running.
+    for _ in range(30):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    if proc.poll() is not None:
+        try:
+            lines = [ln.strip() for ln in Path(log.name).read_text(errors="replace").splitlines()
+                     if ln.strip()]
+        except OSError:
+            lines = []
+        cause = next((ln for ln in lines
+                      if any(w in ln.lower() for w in
+                             ("licen", "error", "could not", "refus", "not set", "unknown",
+                              "traceback", "failed", "crash"))), None)
+        detail = f" — {cause or (lines[-1] if lines else f'exit {proc.returncode}')}"
+        return {"ok": False, "message": f"the gateway did not stay up{detail}"}
+    return {"ok": True,
+            "message": f"gateway starting (pid {proc.pid}) — backends connect one by one and "
+                       f"this tab flips to RUNNING when the endpoint is served. A server that "
+                       f"cannot be reached stays honestly 'unavailable' without sinking the "
+                       f"rest. Log: {log.name}"}
+
+
 def run_monitor_start(include_local: bool = False) -> dict[str, Any]:
     """Start continuous monitoring from the panel, watching what this machine already has.
 
@@ -3734,18 +3816,20 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
         _gw_dir = behaviour_profile_path().parent / "gateway"
         if (_gw_dir / "gateway.yaml").exists():
             live_html += (
-                '<div class="note">Your generated gateway config is ready. Start it in your '
-                'terminal — it will hold backend credentials, and custody belongs in your '
-                'hands: <code>mcpgawk enforce serve --gateway-config '
+                '<div class="note">Your generated config: <code>'
+                f'{_esc(str(_gw_dir / "gateway.yaml"))}</code> — start it with the button '
+                'below, or by hand: <code>mcpgawk enforce serve --gateway-config '
                 f'{_esc(str(_gw_dir / "gateway.yaml"))}</code></div>')
-        elif _gtok:
+        if _gtok:
+            _glabel = ("Start gateway" if (_gw_dir / "gateway.yaml").exists()
+                       else "Generate config from this fleet & start gateway")
             live_html += (
                 f'<form method="POST" action="/" style="margin:0 16px 13px">'
                 f'<input type="hidden" name="token" value="{_esc(_gtok)}">'
                 f'<input type="hidden" name="tab" value="n7">'
-                f'<button class="act-btn" name="act" value="gateway-setup" title="Writes a '
-                f'loopback gateway config + principals file from your current fleet — no '
-                f'secrets, no process started">Generate gateway config from this fleet'
+                f'<button class="act-btn" name="act" value="gateway-start" title="Generates a '
+                f'loopback config from your fleet if none exists (no secrets written), then '
+                f'starts the gateway detached — your click is the consent">{_glabel}'
                 f'</button></form>')
         live_html += ('<div class="note">No gateway running right now — the trail below is '
                       'from earlier sessions. Start one: <code>mcpgawk enforce serve '
@@ -4704,9 +4788,10 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # point of the gate, which exists because an agent asked to approve its own unblocking
             # will do it. Reading stays open; holding the token is what buys the buttons.
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            shown = token if secrets.compare_digest(
-                (q.get("t") or [""])[0], token) else ""
+            _traw = (q.get("t") or [""])[0]
+            shown = token if secrets.compare_digest(_traw, token) else ""
             body = render(collect(), token=shown, action=dict(_ACTION),
+                          stale_token=bool(_traw) and not shown,
                           q=(q.get("q") or [""])[0][:80],
                           tier_filter=(q.get("tier") or [""])[0][:20],
                           sel=(q.get("sel") or [""])[0][:120],
@@ -4743,7 +4828,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             _rtab = _rtab if _rtab in {t for t, _ in _TAB_LABELS} else "n0"
             _back = f"/?t={urllib.parse.quote(token)}&tab={_rtab}#action"
             if act in ("issue-key", "monitor-start", "monitor-start-local", "gw-call",
-                       "gateway-setup", "keep", "protect", "approve"):
+                       "gateway-setup", "gateway-start", "keep", "protect", "approve"):
                 # The synchronous actions get the same two rules as the background ones:
                 # never stomp a running action's banner (busy = SAID, not silent), and every
                 # result renders under ITS OWN label — driven live 2026-08-14, "Start
@@ -4759,6 +4844,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                    "monitor-start": "monitor",
                                    "monitor-start-local": "monitor (incl. local)",
                                    "gateway-setup": "gateway setup",
+                                   "gateway-start": "gateway start",
                                    # never the gw-call key: it is the agent's credential
                                    "gw-call": "gateway call",
                                    "keep": "keep blocked",
@@ -4785,8 +4871,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                at=_now())
             elif act in ("monitor-start", "monitor-start-local"):
                 res = run_monitor_start(include_local=(act == "monitor-start-local"))
-            elif act == "gateway-setup":
-                res = run_gateway_setup()
+            elif act in ("gateway-setup", "gateway-start"):
+                res = run_gateway_setup() if act == "gateway-setup" else run_gateway_start()
                 _ACTION.update(message=res.get("message") or "", rows=[],
                                level="ok" if res.get("ok") else "bad",
                                secret="", snippet="", at=_now())

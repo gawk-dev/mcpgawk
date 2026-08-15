@@ -486,3 +486,47 @@ def test_gateway_setup_resolves_dxt_placeholders_or_folds(monkeypatch, tmp_path)
     assert "${__dirname}" not in cfg, "a dxt placeholder reached the generated config"
     assert "stubborn" in cfg and "unresolved placeholders" in cfg, \
         "an unresolvable entry must fold with its reason"
+
+
+def test_gateway_start_reports_the_childs_own_last_words_or_that_it_is_up(monkeypatch, tmp_path):
+    """[FOUNDER] 2026-08-15: the tokened click IS the consent — one press generates (if
+    needed) and starts the gateway detached, same model as monitor-start. Fail-closed stays:
+    a child that dies in its first second has its OWN words put on the banner."""
+    import subprocess
+
+    from mcpgawk import discover, panel
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    monkeypatch.setattr(panel, "gateway_status", lambda *a, **k: {"live": {}})
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "figma": {"url": "https://mcp.figma.com/mcp"}})
+
+    class DeadChild:
+        pid = 4242
+        returncode = 2
+        def poll(self):
+            return 2
+    def dead_popen(cmd, stdout=None, stderr=None, start_new_session=False):
+        stdout.write(b"mcpgawk enforce: --gateway-config: X is not set in the environment\n")
+        stdout.flush()
+        return DeadChild()
+    monkeypatch.setattr(subprocess, "Popen", dead_popen)
+    res = panel.run_gateway_start()
+    assert not res["ok"]
+    assert "not set in the environment" in res["message"], \
+        "the child's own last words must reach the banner"
+
+    class LiveChild:
+        pid = 4243
+        def poll(self):
+            return None
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: LiveChild())
+    res = panel.run_gateway_start()
+    assert res["ok"] and "4243" in res["message"] and "RUNNING" in res["message"]
+
+    # And never a second gateway on top of a live one.
+    monkeypatch.setattr(panel, "gateway_status",
+                        lambda *a, **k: {"live": {"listen": "http://127.0.0.1:8080/mcp"}})
+    res = panel.run_gateway_start()
+    assert not res["ok"] and "already running" in res["message"]
