@@ -32,7 +32,11 @@ def _event(tool: str = "mcp__vault-rag__vault_search", secret: str = "TOP-SECRET
         "hook_event_name": "PreToolUse",
         "session_id": "sess-1",
         "tool_name": tool,
-        "tool_input": {"query": secret, "token": secret},
+        # A secret VALUE under benign NAMES: these tests are about the spool's privacy
+        # property. A credential-shaped NAME (the old "token") now trips the smuggled-field
+        # deny when an earlier test left vault-rag approved-with-props in the shared session
+        # store — a different, deliberate behaviour with its own tests (test_guard).
+        "tool_input": {"query": secret, "note": secret},
     })
 
 
