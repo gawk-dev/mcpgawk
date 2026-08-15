@@ -93,7 +93,20 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         from .probe import HTTP_TIMEOUT
         timeout = HTTP_TIMEOUT
         if getattr(args, "login", False):
-            from .oauth_login import build_login_provider
+            from .oauth_login import build_login_provider, store_preregistered_client
+            if getattr(args, "oauth_client_id", None):
+                _secret = (os.environ.get(args.oauth_client_secret_env)
+                           if getattr(args, "oauth_client_secret_env", None) else None)
+                if getattr(args, "oauth_client_secret_env", None) and not _secret:
+                    print(f"mcpgawk scan: --oauth-client-secret-env "
+                          f"{args.oauth_client_secret_env} is not set in the environment",
+                          file=sys.stderr)
+                    return 2
+                _ruri = store_preregistered_client(
+                    url, args.oauth_client_id, _secret,
+                    getattr(args, "oauth_redirect_uri", None))
+                print(f"  Using your pre-registered OAuth client. The provider must have "
+                      f"this EXACT redirect URI registered: {_ruri}", file=sys.stderr)
             auth, server = build_login_provider(url)
             timeout = 330.0
         # `--http`/`--sse` orders the attempts; it does not decide what we believe. The one case we
@@ -229,6 +242,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--login", action="store_true",
                    help="for a remote --http/--sse server that needs OAuth: open the browser, sign "
                         "in once, and scan (token stored locally in ~/.gawk/oauth)")
+    s.add_argument("--oauth-client-id",
+                   help="with --login, for a server that REFUSES automatic client registration "
+                        "(figma, Slack — enterprise posture): use this pre-registered OAuth "
+                        "client id. Register the pinned redirect URI mcpgawk prints with the "
+                        "provider first")
+    s.add_argument("--oauth-client-secret-env", metavar="VAR",
+                   help="environment variable holding the pre-registered client's secret "
+                        "(never passed on the command line; omit for a public client + PKCE)")
+    s.add_argument("--oauth-redirect-uri",
+                   help="override the pinned redirect URI (must match the provider's "
+                        "registration EXACTLY)")
     s.add_argument("--only", help="comma-separated server names to scan from the config")
     s.add_argument("--yes", "-y", action="store_true",
                    help="launch discovered/configured local (stdio) servers WITHOUT the consent "

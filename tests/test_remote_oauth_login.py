@@ -209,3 +209,33 @@ def test_a_new_flow_never_wears_the_last_flows_failure():
         assert oauth_login.last_flow_error() is None
     finally:
         server.shutdown()
+
+
+def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_path, monkeypatch):
+    """The figma/Slack class: a server that 403s Dynamic Client Registration only accepts a
+    client registered in advance — whose redirect URI must match EXACTLY (the Claude Code
+    2.1.231 bug class). store_preregistered_client pins the port; build_login_provider binds
+    that exact port and matches the stored auth method."""
+    from pathlib import Path as _P
+
+    from mcpgawk import oauth_login
+    monkeypatch.setattr(oauth_login, "_STORE_DIR", _P(str(tmp_path)))
+    if True:
+        uri = oauth_login.store_preregistered_client(
+            "https://mcp.example.com/mcp", "client-abc", "sekret-xyz")
+        assert uri == f"http://127.0.0.1:{oauth_login.PINNED_CALLBACK_PORT}/callback"
+
+        provider, server = oauth_login.build_login_provider("https://mcp.example.com/mcp")
+        try:
+            assert server.server_port == oauth_login.PINNED_CALLBACK_PORT, \
+                "a registered redirect URI cannot move"
+            meta = provider.context.client_metadata
+            assert str(meta.redirect_uris[0]) == uri
+            assert meta.token_endpoint_auth_method == "client_secret_post"
+        finally:
+            server.shutdown()
+
+        # A second binder on the pinned port fails LOUDLY, never silently re-registers elsewhere.
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError, match="cannot move"):
+            oauth_login.build_login_provider("https://mcp.example.com/mcp")

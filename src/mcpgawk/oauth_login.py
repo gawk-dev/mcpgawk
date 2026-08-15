@@ -131,6 +131,44 @@ class FileTokenStorage:
         self._write(d)
 
 
+#: The PINNED callback port for pre-registered OAuth clients. A DCR-refusing server (figma,
+#: Slack — enterprise posture) only accepts redirect URIs registered in advance, and a redirect
+#: that moves is exactly the bug Claude Code shipped 2.1.231 to fix. Dynamic registration keeps
+#: its ephemeral port; pre-registered clients use this one, always.
+PINNED_CALLBACK_PORT = 33418
+
+
+def store_preregistered_client(server_url: str, client_id: str,
+                               client_secret: str | None = None,
+                               redirect_uri: str | None = None) -> str:
+    """Store a PRE-REGISTERED OAuth client for a server that refuses Dynamic Client
+    Registration (403 on the registration endpoint — figma's measured behaviour, 2026-08-14).
+
+    Returns the redirect URI the operator must register with the provider — pinned, because a
+    pre-registered client's redirect must match EXACTLY. The client info lands in the same
+    0600 store the tokens use; `build_login_provider` then skips DCR and binds the pinned port.
+    """
+    uri = redirect_uri or f"http://127.0.0.1:{PINNED_CALLBACK_PORT}/callback"
+    info = OAuthClientInformationFull(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uris=[AnyUrl(uri)],
+        token_endpoint_auth_method="client_secret_post" if client_secret else "none",
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        client_name="mcpgawk",
+    )
+    storage = FileTokenStorage(server_url)
+    asyncio.run(storage.set_client_info(info))
+    # Mark it OPERATOR-registered: the SDK also stores client info after ordinary dynamic
+    # registration (with an ephemeral redirect port), and pinning THAT port broke every
+    # second login. Only a client the operator supplied carries an immovable redirect.
+    d = storage._read()
+    d["preregistered"] = True
+    storage._write(d)
+    return uri
+
+
 def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientProvider, HTTPServer]:
     """Construct an OAuthClientProvider that opens the system browser for approval and catches the
     redirect on a local loopback port. Returns (provider, callback_server); the caller MUST call
@@ -159,14 +197,32 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
         def log_message(self, *args) -> None:  # silence default request logging
             pass
 
-    # Bind first (port 0 = ephemeral) so the redirect URI is known before client registration.
-    server = HTTPServer(("127.0.0.1", 0), _Handler)
-    redirect_uri = f"http://127.0.0.1:{server.server_port}/callback"
+    # A PRE-REGISTERED client (stored via store_preregistered_client) pins everything: its
+    # redirect URI is registered with the provider and cannot move, so the callback binds that
+    # exact port — loudly failing if it is taken beats silently authing with a mismatched
+    # redirect (Claude Code 2.1.231's bug class). Otherwise: ephemeral port + DCR, as before.
+    _pre_store = FileTokenStorage(server_url)
+    _pre = (asyncio.run(_pre_store.get_client_info())
+            if _pre_store._read().get("preregistered") else None)
+    if _pre is not None and _pre.redirect_uris:
+        _pre_uri = urlparse(str(_pre.redirect_uris[0]))
+        try:
+            server = HTTPServer(("127.0.0.1", _pre_uri.port or PINNED_CALLBACK_PORT), _Handler)
+        except OSError as exc:
+            raise RuntimeError(
+                f"the pre-registered redirect port {_pre_uri.port} is in use ({exc}) — a "
+                f"registered redirect URI cannot move; free the port and retry") from exc
+        redirect_uri = str(_pre.redirect_uris[0])
+    else:
+        # Bind first (port 0 = ephemeral) so the redirect URI is known before registration.
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        redirect_uri = f"http://127.0.0.1:{server.server_port}/callback"
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     client_metadata = OAuthClientMetadata(
         redirect_uris=[AnyUrl(redirect_uri)],
-        token_endpoint_auth_method="none",              # public client + PKCE
+        token_endpoint_auth_method=(_pre.token_endpoint_auth_method
+                                    if _pre is not None else "none"),  # public client + PKCE
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         scope=scope or None,
