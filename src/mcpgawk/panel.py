@@ -1218,8 +1218,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                         'panel restarted after it was printed, so every button is hidden. '
                         'Use the fresh link from the terminal running '
                         '<code>mcpgawk panel</code>.</div>')
+    # A walk of an outdated install must announce itself — same class of confusion as the
+    # stale key, so it renders in the same place with the same weight.
+    stale_banner += _staleness_note()
     gwpane = _gateway_pane(d.get("gateway") or gateway_status(), token, action)
     monpane = _monitor_pane(d.get("monitor") or {"installed": False, "db_present": False})
+    # Seeded server-side so the log is never empty while it waits for its first live event —
+    # a sweep is on a 300s cycle, and five minutes of blank "live" pane reads as broken.
+    slog = _session_log_html(session_log_lines())
     pending = d.get("pending") or []
     act = d.get("activity") or {}
     calls = d.get("recent_calls") or []
@@ -1555,7 +1561,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         '<form method="GET" action="/" class="filters">'
         + '<input type="hidden" name="tab" value="n0">'
         + (f'<input type="hidden" name="t" value="{_esc(token)}">' if token else "")
-        + f'<input class="fq" type="search" name="q" value="{_esc(q)}" '
+        + f'<input class="fq" type="search" name="q" aria-label="filter servers" value="{_esc(q)}" '
           'placeholder="search server, key or agent">'
         + f'<select name="tier"><option value="">every tier</option>{_tiers}</select>'
         + '<button class="filter-btn" type="submit">filter</button>'
@@ -1801,11 +1807,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         '<tr><td colspan="5" class="dim">No calls recorded yet — use your agent once.</td></tr>'
 
     # --- evidence -------------------------------------------------------------------------------
+    # A "running" row whose recording process is GONE renders as interrupted, not running —
+    # found live 2026-08-15: a panel restart killed an in-flight fleet verify and the row
+    # would have said "running" forever. Same liveness test monitor_status already applies.
+    def _run_status(r) -> tuple[str, str]:
+        status = getattr(r, "status", "")
+        if status == "running":
+            import socket as _sock
+
+            from . import runlog as _rl
+            alive = (getattr(r, "host", "") == _sock.gethostname()
+                     and _rl._pid_alive(getattr(r, "pid", None)))
+            if not alive:
+                return "interrupted — the process that ran it is gone", "warn"
+            return status, "ok"
+        return status, ("bad" if status == "error"
+                else "warn" if status in ("findings", "incomplete") else "ok")
+
     runs = "".join(
         f'<tr><td class="dim">{_esc(str(getattr(r, "started_at", ""))[:19])}</td>'
         f'<td class="nm">{_esc(getattr(r, "kind", ""))}</td>'
-        f'<td><span class="chip {"bad" if getattr(r, "status", "") == "error" else ("warn" if getattr(r, "status", "") == "findings" else "ok")}">'
-        f'{_esc(getattr(r, "status", ""))}</span></td>'
+        f'<td><span class="chip {_run_status(r)[1]}">{_esc(_run_status(r)[0])}</span></td>'
         f'<td class="dim">{_esc(str(getattr(r, "target", "") or "fleet-wide")[:56])}</td></tr>'
         for r in (d.get("runs") or [])) or \
         '<tr><td colspan="4" class="dim">Nothing recorded yet.</td></tr>'
@@ -2035,7 +2057,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     _ct_agt = f'<span class="ct">{agent_gaps} gap(s)</span>' if agent_gaps else ""
     _span = (f'{str(span_first or "")[:10]} → {str(span_last or "")[:10]}'
              if span_first else "nothing recorded yet")
-    return f"""<!doctype html><html><head><meta charset="utf-8">{refresh}<script src="/panel.js" defer></script>
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{refresh}<script src="/panel.js" defer></script>
 <title>mcpgawk</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 /* LIKE FOR LIKE with LiteLLM's admin console — DESIGN.md; the approved target is
@@ -2047,15 +2069,19 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
    sage/cream field, white floating cards, ink-navy type, ONE hot orange accent used sparingly.
    Danger is deepened to crimson so an alarm never reads as the brand colour. */
 :root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;
---ink:#1D2A30;--mut:#5C6B66;--fai:#8A968F;--acc:#E8502B;--accent:#E8502B;--acc-soft:#FCEAE3;
---ok:#157A40;--ok-bg:#E9F3EA;--warn:#B26A00;--warn-bg:#FBF1E3;
+--ink:#1D2A30;--mut:#5C6B66;--fai:#626D66;--acc:#E8502B;--accent:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;
+--ok:#157A40;--ok-bg:#E9F3EA;--warn:#96590A;--warn-bg:#FBF1E3;
 --bad:#B3261E;--bad-bg:#F9E9E7;--unv:#707B74;--unv-bg:#EDF0EB;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
 --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
 --ease:cubic-bezier(.23,1,.32,1);
 --srow:minmax(200px,1.6fr) .7fr 1.1fr .5fr .5fr .95fr minmax(80px,auto)}}
 *{{box-sizing:border-box}}
-body{{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);font-size:13.5px;
+/* INSTRUMENT fusion ([FOUNDER] 2026-08-15): the two-voice rebrand's product voice FUSES
+   with this shipped system rather than replacing it — same tokens, plus the paper dot-grid
+   ground and floating-surface elevation from the approved direction sample. */
+body{{margin:0;background:radial-gradient(rgba(29,42,48,.09) 1px, transparent 1.4px) 0 0/26px 26px,
+var(--page);color:var(--ink);font-family:var(--sans);font-size:13.5px;
 line-height:1.5}}
 /* Natoma-grammar shell (founder, 2026-08-07): grouped left sidebar + one content column.
    Pure CSS grid — the radio-tab mechanics and the `~ .sheet` selectors are untouched. Direct
@@ -2098,7 +2124,8 @@ color:var(--acc);font-weight:600;border-color:transparent}}
 #n3:checked~.sheet #p3,#n4:checked~.sheet #p4,#n5:checked~.sheet #p5,
 #n6:checked~.sheet #p6,#n7:checked~.sheet #p7,#n8:checked~.sheet #p8{{display:block}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:12px;
-box-shadow:0 1px 2px rgba(20,22,30,.04);overflow:hidden;margin-bottom:16px}}
+box-shadow:0 16px 40px rgba(35,42,38,.09),0 2px 6px rgba(35,42,38,.05);
+overflow:hidden;margin-bottom:18px}}
 .chead{{display:flex;align-items:center;gap:12px;padding:14px 16px;flex-wrap:wrap}}
 .chead h1{{margin:0;font-size:15px;font-weight:640;letter-spacing:-.01em}}
 .tools{{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
@@ -2143,7 +2170,7 @@ border-radius:8px;background:var(--card);color:var(--ink)}}
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
 .filter-btn:active{{transform:scale(.97)}}
-.clearf{{font-size:12px;color:var(--acc)}}
+.clearf{{font-size:12px;color:var(--acc-ink)}}
 .count{{margin-left:auto;font-size:12px;color:var(--mut)}}
 .count b{{color:var(--ink);font-weight:600}}
 .thead{{display:grid;grid-template-columns:var(--srow);gap:12px;align-items:center;
@@ -2185,7 +2212,7 @@ background:var(--unv-bg)}}
 .chip i{{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}}
 .chip.mode{{background:transparent;border:1px solid var(--line)}}
 /* Finding evidence trail: every reproduction attempt, opened by a GET link (no script). */
-.tll{{margin-left:10px;font-size:12px;color:var(--acc);text-decoration:none;white-space:nowrap}}
+.tll{{margin-left:10px;font-size:12px;color:var(--acc-ink);text-decoration:none;white-space:nowrap}}
 .tll:hover{{text-decoration:underline}}
 .tlrow>td{{padding:0 0 14px 0;background:var(--acc-soft)}}
 .tlbox{{margin:0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
@@ -2229,7 +2256,27 @@ table{{width:100%;border-collapse:collapse;font-size:13.5px}}
 /* A wide table must scroll INSIDE the card, never be clipped by its overflow:hidden — the
    Findings table's last column was cut off with no way to reach it (founder's audit,
    2026-08-15). */
-.tscroll{{overflow-x:auto}}
+/* A wide table scrolls INSIDE its card — and the scroll must be VISIBLE and reachable.
+   overflow:auto alone failed a real walk twice: macOS hides scrollbars until a horizontal
+   gesture, a plain mouse wheel has no horizontal axis, so to a human the cut-off column
+   simply did not exist ([FOUNDER] 2026-08-15: "it is not scrollable"). The scrollbar is
+   therefore always painted when there is overflow, the region is keyboard-focusable
+   (arrow keys scroll it), and a right-edge fade says "there is more" without words. */
+.tscroll{{overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--fai) var(--rail)}}
+.tscroll::-webkit-scrollbar{{height:8px}}
+.tscroll::-webkit-scrollbar-track{{background:var(--rail);border-radius:999px}}
+.tscroll::-webkit-scrollbar-thumb{{background:var(--fai);border-radius:999px}}
+.tscroll::-webkit-scrollbar-thumb:hover{{background:var(--mut)}}
+.tscroll:focus-visible{{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}}
+.tscroll.more{{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 36px),transparent);
+mask-image:linear-gradient(90deg,#000 calc(100% - 36px),transparent)}}
+/* Session log — mono, dated, bounded; colours come from the same state tokens as everything
+   else so a warn line here matches a warn pill everywhere. */
+#slog{{max-height:340px;overflow-y:auto;font-family:var(--mono);font-size:11.5px}}
+.slrow{{display:flex;gap:10px;padding:4px 2px;border-bottom:1px solid var(--line);color:var(--mut)}}
+.slrow:last-child{{border-bottom:none}}
+.slwhen{{color:var(--fai);white-space:nowrap}}
+.slok{{color:var(--ok)}}.slwarn{{color:var(--warn)}}.slbad{{color:var(--bad)}}
 th{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 text-align:left;font-weight:500;padding:9px 16px;background:var(--rail);
 border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
@@ -2255,10 +2302,15 @@ font-size:12px;color:var(--mut);line-height:1.5}}
 font-size:12px;color:var(--mut);line-height:1.5}}
 .note.ok{{background:var(--ok-bg);color:var(--ok)}}
 .note.warn{{background:var(--warn-bg);color:var(--warn)}}
-.whysum{{cursor:pointer;color:var(--acc);font-size:12px}}
+.whysum{{cursor:pointer;color:var(--acc-ink);font-size:12px}}
 .stalekey{{grid-column:1/-1;background:var(--bad);color:#fff;border-radius:10px;
 padding:11px 16px;font-size:13.5px;font-weight:550;margin-bottom:14px}}
 .stalekey code{{color:#fff}}
+/* Same confusion class as a stale key — a walked page whose code is behind its checkout —
+   warn-toned because reading it is fine; believing it current is not. */
+.stalecode{{grid-column:1/-1;background:var(--warn-bg);color:var(--warn);border:1px solid
+var(--warn);border-radius:10px;padding:11px 16px;font-size:13.5px;margin-bottom:14px}}
+.stalecode code{{color:var(--warn)}}
 /* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
 .sessdrill{{margin-top:4px}}
 .sessdrill .mini{{margin-top:6px;font-size:12px}}
@@ -2403,7 +2455,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <div class="note">First-party egress — a server reaching its own vendor API — is listed and
         folded, not hidden. 42 of 42 findings on a real fleet were that; a detector that fires on
         normal traffic teaches you to ignore it.</div>
-      <div class="tscroll"><table><thead><tr><th>server</th><th>tool</th><th>finding</th>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>server</th><th>tool</th><th>finding</th>
       <th>severity</th><th>what it contacted</th><th>reproduced</th></tr></thead>
       <tbody>{frows}</tbody></table></div>
     </div>
@@ -2413,17 +2465,17 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
     <div class="card">
       <div class="chead"><h1>Agents</h1>
         <div class="tools"><span class="count">{covered} covered · {uncovered} not</span></div></div>
-      <table><thead><tr><th>agent</th><th>coverage</th><th>servers</th><th>detail</th><th></th></tr>
-      </thead><tbody>{arows}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>agent</th><th>coverage</th><th>servers</th><th>detail</th><th></th></tr>
+      </thead><tbody>{arows}</tbody></table></div>
       <h2>sessions · one row per agent run</h2>
-      <table><thead><tr><th>session</th><th>agent</th><th class="num">calls</th>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>session</th><th>agent</th><th class="num">calls</th>
       <th class="num">denied</th><th class="num">servers</th><th>last</th></tr></thead>
-      <tbody>{sess}</tbody></table>
+      <tbody>{sess}</tbody></table></div>
       <h2>group by</h2>
       <div class="gwrap">{groups}</div>
       <h2>recent calls · arguments are never recorded</h2>
-      <table><thead><tr><th>time</th><th>verdict</th><th>tool</th><th>agent</th><th>basis</th></tr>
-      </thead><tbody>{log}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>time</th><th>verdict</th><th>tool</th><th>agent</th><th>basis</th></tr>
+      </thead><tbody>{log}</tbody></table></div>
     </div>
   </section>
 
@@ -2437,8 +2489,8 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
         exercised in the sandbox · <b>ok</b> = ran and found nothing · <b>findings</b> = something
         to review on Findings · <b>error</b> = the run itself failed · <b>fleet-wide</b> = every
         server, not one target.</div>
-      <table><thead><tr><th>started</th><th>what</th><th>result</th><th>target</th></tr></thead>
-      <tbody>{runs}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>started</th><th>what</th><th>result</th><th>target</th></tr></thead>
+      <tbody>{runs}</tbody></table></div>
     </div>
   </section>
 
@@ -2450,8 +2502,8 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <div class="note">Approving moves trust, so it is gated: the button below carries this
       session's token (in your terminal), which an agent that opened this page cannot supply. Review
       the change in Servers first — approval here is the same act as <code>mcpgawk decide</code>.</div>
-      <table><thead><tr><th style="width:18%">server</th><th>what changed</th><th>severity</th>
-      <th></th></tr></thead><tbody>{dec}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th style="width:18%">server</th><th>what changed</th><th>severity</th>
+      <th></th></tr></thead><tbody>{dec}</tbody></table></div>
     </div>
   </section>
 
@@ -2468,12 +2520,12 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
         (<b>proxied-container</b> = full OS isolation · <b>proxy</b> = HTTP-only, weaker ·
         <b>none</b> = remote, cannot be sandboxed), how many tools were genuinely exercised, and
         how many were deliberately not invoked — an untested tool is never a clean one.</div>
-      <table><thead><tr><th>server</th><th>isolation used</th><th>tools checked</th>
-      <th>not invoked</th></tr></thead><tbody>{isorows}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>server</th><th>isolation used</th><th>tools checked</th>
+      <th>not invoked</th></tr></thead><tbody>{isorows}</tbody></table></div>
       <h2>where everything lives</h2>
       <div class="note">Every store this product writes, by full path — all local, nothing leaves
         this machine. Open them yourself; nothing here is asking to be trusted unread.</div>
-      <table><thead><tr><th>what</th><th>path</th></tr></thead><tbody>{pathrows}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>what</th><th>path</th></tr></thead><tbody>{pathrows}</tbody></table></div>
       <h2>this build</h2>
       <table><tbody>
         <tr><td class="nm">code last modified</td><td class="dim">{_esc(_CODE_AT)}</td></tr>
@@ -2493,14 +2545,14 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
       <div class="filters"><span class="count" style="margin-left:0">{_activity_headline(act_summary)}
         · {len(notable)} denied · {_esc(_span)}</span></div>
       <h2>Needs your attention — blocked calls, with the full reason</h2>
-      <table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
-      <th>basis</th><th>why (verbatim)</th></tr></thead><tbody>{acts_notable}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
+      <th>basis</th><th>why (verbatim)</th></tr></thead><tbody>{acts_notable}</tbody></table></div>
       <h2>The full record — every checked call, newest first</h2>
       <div class="note">Tool arguments are never recorded — the log is metadata, so it can never
       become the richest secret on your disk. <b>When</b> · <b>agent</b> (how &amp; who) ·
       <b>server.tool</b> (what &amp; where) · <b>decision</b> &amp; <b>basis</b> (why).</div>
-      <table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
-      <th>basis</th><th>why</th></tr></thead><tbody>{acts_full}</tbody></table>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
+      <th>basis</th><th>why</th></tr></thead><tbody>{acts_full}</tbody></table></div>
     </div>
   </section>
 
@@ -2515,6 +2567,14 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
     <div class="card">
       <div class="chead"><h1>Monitor</h1></div>
       {monpane}
+    </div>
+    <div class="card">
+      <div class="chead"><h1>Session log</h1>
+        <div class="tools"><span class="count">live — updates as things happen</span></div></div>
+      <div class="note">Runs, monitor sweeps, alerts and archived evidence, newest first — the
+      same record <code>runs.db</code>, <code>monitor.db</code> and <code>verify-runs/</code>
+      hold, streamed here while this page is open.</div>
+      <div id="slog">{slog}</div>
     </div>
   </section>
 </div>
@@ -2674,6 +2734,45 @@ def _build_identity() -> tuple[str, str]:
 
 
 _CODE_AT, _STARTED = _build_identity()
+
+
+def _staleness_note(module_file: Path | None = None) -> str:
+    """A loud line when this INSTALL is older than the source checkout it was built from.
+
+    [FOUNDER] 2026-08-15: a full release-gate walk drove an install 12 hours behind the
+    checkout — palette, redirects and scroll fixes all existed and none were on the walked
+    page, and nothing said so. Dev-machine only by construction: the uv tool receipt records
+    the source directory it was built from; a customer install has no checkout on disk and a
+    checkout run has no receipt above it, so both render nothing. Never breaks the page.
+    """
+    try:
+        me = (module_file or Path(__file__)).resolve()
+        receipt = next((p / "uv-receipt.toml" for p in me.parents
+                        if (p / "uv-receipt.toml").is_file()), None)
+        if receipt is None:
+            return ""
+        import re as _re
+        m = _re.search(r'directory\s*=\s*"([^"]+)"', receipt.read_text(encoding="utf-8"))
+        if not m:
+            return ""
+        src = Path(m.group(1)) / "src" / "mcpgawk"
+        if not src.is_dir():
+            return ""
+        newest_src = max((f.stat().st_mtime for f in src.glob("*.py")), default=0.0)
+        here = me.parent
+        newest_installed = max((f.stat().st_mtime for f in here.glob("*.py")), default=0.0)
+        behind = newest_src - newest_installed
+        if behind < 60:
+            return ""
+        hours, mins = int(behind // 3600), int(behind % 3600 // 60)
+        age = f"{hours}h {mins}m" if hours else f"{mins}m"
+        return (f'<div class="stalecode">This install is <b>{age} behind its source '
+                f'checkout</b> — the page you are walking predates the newest code in '
+                f'{_esc(str(src.parent.parent))}. Reinstall to walk current code: '
+                f'<code>uv tool install --force --reinstall --no-cache {_esc(m.group(1))}</code>'
+                f'</div>')
+    except Exception:  # noqa: BLE001 — a freshness hint must never break the page
+        return ""
 
 
 class _ActionState(dict):
@@ -3384,6 +3483,96 @@ def monitor_status(home: Path | str | None = None) -> dict[str, Any]:
     return out
 
 
+def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
+    """The machine's recent activity as ONE dated stream, newest first — runs starting and
+    finishing, monitor sweeps, alerts raised, evidence archived.
+
+    [FOUNDER] 2026-08-15: "where are the session logs getting updated and shown" — until now,
+    nowhere. A monitor sweep or a verify archiving evidence happened in another process and an
+    open panel page showed nothing until a manual reload; the record existed (runs.db,
+    monitor.db, verify-runs/) and no surface streamed it. This derives from the SAME readers
+    the CLI uses — `runlog.list_runs`, `monitor_status` — never a parallel parse.
+
+    Timestamps are ABSOLUTE (as recorded), never "2m ago": the /events loop diffs the rendered
+    fragment against the last one sent, and a relative time ticks every second, so the diff
+    would never settle and the stream would rewrite the DOM once a second forever.
+    """
+    from . import runlog
+
+    lines: list[dict[str, str]] = []
+    try:
+        # A machine that has never recorded a run has no db — that is a normal state, not a
+        # broken one, and must not render as an error line.
+        if Path(runlog.default_path()).is_file():
+            import socket as _sock
+            for r in runlog.list_runs(limit=15):
+                what = " ".join(x for x in (getattr(r, "kind", ""), getattr(r, "target", ""))
+                                if x)
+                status = getattr(r, "status", "")
+                # The same liveness rule as the Evidence table: dead recorder ≠ running.
+                if status == "running" and not (getattr(r, "host", "") == _sock.gethostname()
+                                                and runlog._pid_alive(getattr(r, "pid", None))):
+                    status = "interrupted"
+                summary = (getattr(r, "summary", "") or "").strip()
+                text = f"{what} · {status}" + (f" — {summary[:90]}" if summary else "")
+                lines.append({"when": getattr(r, "started_at", "") or "", "text": text,
+                              "level": {"ok": "ok", "findings": "warn", "error": "bad",
+                                        "incomplete": "warn",
+                                        "interrupted": "warn"}.get(status, "")})
+    except Exception as exc:  # noqa: BLE001 — one unreadable source must not blank the log,
+        lines.append({"when": "",   # and must not vanish silently either
+                      "text": f"run log unreadable ({exc.__class__.__name__})", "level": "bad"})
+    try:
+        mon = monitor_status()
+        if mon.get("running") and mon.get("since"):
+            lines.append({"when": str(mon["since"]),
+                          "text": "monitor daemon running (300s cycle)", "level": "ok"})
+        for a in (mon.get("alerts") or [])[:8]:
+            state = a.get("state") or ""
+            lines.append({"when": str(a.get("raised_at") or ""),
+                          "text": f"alert · {a.get('server')} · {a.get('kind')}"
+                                  + (f" · {state}" if state else ""),
+                          "level": "warn" if state in ("", "pending") else ""})
+        for s in (mon.get("servers") or []):
+            if s.get("last_check"):
+                ok = s.get("last_ok")
+                lines.append({"when": str(s["last_check"]),
+                              "text": f"monitor checked {s.get('server_id')} · "
+                                      + ("clean" if ok else "not clean" if ok is False
+                                         else "unknown"),
+                              "level": "ok" if ok else "warn" if ok is False else ""})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rd = verify_runs_dir()
+        if rd.is_dir():
+            dirs = sorted((p for p in rd.iterdir() if p.is_dir()), reverse=True)[:5]
+            for p in dirs:
+                lines.append({"when": p.name,
+                              "text": f"evidence archived · verify run {p.name}", "level": ""})
+    except OSError:
+        pass
+    # One textual sort works because every writer records ISO-shaped timestamps; a source that
+    # recorded none sorts last rather than being invented a time.
+    lines.sort(key=lambda x: x["when"], reverse=True)
+    return lines[:limit]
+
+
+def _session_log_html(lines: list[dict[str, str]]) -> str:
+    """The log as a token-free fragment — same rows for the seeded page and the /events stream,
+    so what you see live is exactly what a reload would show."""
+    if not lines:
+        return ('<div class="note">Nothing recorded yet — runs, monitor sweeps, alerts and '
+                'archived evidence will appear here as they happen.</div>')
+    rows = []
+    for ln in lines:
+        when = _esc(str(ln.get("when") or "")[:19].replace("T", " "))
+        cls = {"ok": "slok", "warn": "slwarn", "bad": "slbad"}.get(ln.get("level") or "", "")
+        rows.append(f'<div class="slrow {cls}"><span class="slwhen">{when}</span>'
+                    f'<span>{_esc(ln.get("text") or "")}</span></div>')
+    return "".join(rows)
+
+
 def _monitor_start_button(mon: dict[str, Any]) -> str:
     """Offered only where it can work: the pillar installed, and not already running. A button
     that cannot do its job is the pattern the sign-in button already avoids."""
@@ -3497,14 +3686,14 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
     alerts_tbl = ""
     if alert_rows:
         alerts_tbl = ('<h2>alerts · what monitoring raised, in its own words</h2>'
-                      '<table><thead><tr><th>when</th><th>server</th><th>kind</th>'
+                      '<div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>when</th><th>server</th><th>kind</th>'
                       '<th>detail</th><th>delivery</th></tr></thead>'
-                      f'<tbody>{alert_rows}</tbody></table>')
+                      f'<tbody>{alert_rows}</tbody></table></div>')
     return (frame + state + err + head + stale_note + alerts_tbl
             + '<h2>servers under watch</h2>'
-              '<table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
+              '<div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>server</th><th>last check</th><th>baseline</th>'
               '<th>open alerts</th><th>when</th></tr></thead>'
-              f'<tbody>{"".join(parts)}</tbody></table>')
+              f'<tbody>{"".join(parts)}</tbody></table></div>')
 
 
 def gateway_roles(keys_file: str | None) -> list[str]:
@@ -3715,7 +3904,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
                 + f'<form method="POST" action="/" class="filters">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
                   f'<input type="hidden" name="tab" value="n7">'
-                  f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
+                  f'<input name="name" aria-label="agent name" placeholder="agent name, e.g. claude-code@laptop" '
                   f'maxlength="80" required>'
                   f'<select name="role"><option value="">no grants yet</option>{opts}</select>'
                   f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key'
@@ -3734,7 +3923,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
             + f'<form method="POST" action="/" class="filters">'
               f'<input type="hidden" name="token" value="{_esc(token)}">'
               f'<input type="hidden" name="tab" value="n7">'
-              f'<input name="name" placeholder="agent name, e.g. claude-code@laptop" '
+              f'<input name="name" aria-label="agent name" placeholder="agent name, e.g. claude-code@laptop" '
               f'maxlength="80" required>{role_field}'
               f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key</button>'
               f'</form>')
@@ -3768,8 +3957,8 @@ def _playground_form(live: dict[str, Any], token: str) -> str:
             f'<form method="POST" action="/" class="filters">'
             f'<input type="hidden" name="token" value="{_esc(token)}">{picker}'
             f'<input type="hidden" name="tab" value="n7">'
-            f'<input name="key" placeholder="agent key (Bearer)" maxlength="200">'
-            f'<input name="arguments" placeholder=\'{{"arg": "value"}}\' maxlength="400">'
+            f'<input name="key" aria-label="agent key" placeholder="agent key (Bearer)" maxlength="200">'
+            f'<input name="arguments" aria-label="tool arguments, JSON" placeholder=\'{{"arg": "value"}}\' maxlength="400">'
             f'<button class="act-btn sm" name="act" value="gw-call">Call through gateway</button>'
             f'</form>')
 
@@ -4340,24 +4529,57 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
     # when a ${user_config.*} value only Claude Desktop holds makes launching genuinely
     # impossible. Those servers stay in the fleet and are reported as unverified WITH the reason
     # (see _remedy) — never silently dropped, which would read as "nothing to check here".
+    # THROUGH-GATEWAY ROUTING ([FOUNDER] 2026-08-15, generalised for every sign-in server): a
+    # server whose sign-in is session-bound cannot be verified by a fresh spawn — kite's own
+    # mcp-remote even collides with the gateway's on its fixed callback port. When a gateway is
+    # LIVE and already fronts the server, verify talks to the gateway endpoint and addresses the
+    # backend's namespaced tools; the in-band sign-in then authenticates the gateway's own
+    # persistent session, which stays usable afterwards. Applies to ANY server needing sign-in.
+    _gw = gateway_status()
+    _gw_live = (_gw.get("live") or {}).get("listen")
+    _gw_backends: set[str] = set()
+    if _gw_live:
+        try:
+            import yaml as _yaml
+            _cfgp = behaviour_profile_path().parent / "gateway" / "gateway.yaml"
+            if _cfgp.is_file():
+                _doc = _yaml.safe_load(_cfgp.read_text(encoding="utf-8")) or {}
+                _gw_backends = set((_doc.get("backends") or {}).keys())
+        except Exception:  # noqa: BLE001 — no readable config = no through-gateway routing
+            _gw_backends = set()
+
     local = {}
+    gatewayed = {}
     for n, e in entries.items():
         if not (isinstance(e, dict) and e.get("command")):
+            continue
+        # A session-bound sign-in server the live gateway fronts routes THROUGH the gateway.
+        if (_gw_live and n in _gw_backends
+                and _login_button_applicable(e, n)):
+            _url = str(_gw_live)
+            if not _url.startswith("http"):
+                _url = f"http://{_url}"
+            if not _url.rstrip("/").endswith("/mcp"):
+                _url = _url.rstrip("/") + "/mcp"
+            gatewayed[n] = {"url": _url, "transport": "http", "backendPrefix": n}
             continue
         launchable = dxt.resolve_for_launch(e) or e
         local[n] = {k: launchable[k] for k in ("command", "args", "env") if k in launchable}
     # ONE SERVER AT A TIME IS THE DEFAULT SHAPE, not a special case. The fleet button made every
     # answer cost five silent minutes, so the founder clicked it, waited, and left the page. A row
     # action returns in seconds and is the unit a user actually thinks in: "what about THIS server?"
+    all_targets = {**local, **gatewayed}
     if only:
-        if only not in local:
+        if only not in all_targets:
             return {"ok": False, "message": f"{only} is not a local server on this machine"}
-        local = {only: local[only]}
-    if not local:
+        local = {only: local[only]} if only in local else {}
+        gatewayed = {only: gatewayed[only]} if only in gatewayed else {}
+        all_targets = {**local, **gatewayed}
+    if not all_targets:
         return {"ok": False, "message": "no local servers to verify"}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
                                      prefix="mcpgawk-panel-verify-") as fh:
-        _json.dump({"mcpServers": local}, fh)
+        _json.dump({"mcpServers": all_targets}, fh)
         cfg = fh.name
     try:
         # --out KEEPS THE FINDINGS. Without it the engine's 21 convictions existed only in this
@@ -4553,7 +4775,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
                     hosts = [str(x) for x in (ev.get("egress") or ev.get("hosts") or [])]
                     tool = str(f.get("tool") or (f.get("candidate") or {}).get("toolName") or "?")
-                    if first_party(sname, hosts, local.get(sname)):
+                    if first_party(sname, hosts, all_targets.get(sname)):
                         folded_map[sname] = folded_map.get(sname, 0) + 1
                     else:
                         real_map.setdefault(sname, set()).add(tool)
@@ -4565,8 +4787,8 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         # clean fleet reported as an unverified one, and "observed 2 of 8" understated real work.
         seen = {n for n, o in ran_map.items()
                 if isinstance(o, dict) and (o.get("toolsChecked") or 0) > 0} | set(seen_map)
-        got = sorted(n for n in local if n in seen)
-        missing = sorted(n for n in local if n not in seen)
+        got = sorted(n for n in all_targets if n in seen)
+        missing = sorted(n for n in all_targets if n not in seen)
         # Per-server rows for the PAGE. Sending the user to a terminal to find out which server
         # failed is the CLI-only habit this surface exists to replace.
         def _verdict(n: str) -> tuple[str, str, str]:
@@ -4597,10 +4819,11 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         needs_auth = 0
         for n in missing:
             note = _engine_note(engine_output, n)
-            outcome, detail = _nothing_recorded_outcome(note, local[n])
+            _spec = all_targets.get(n) or {}
+            outcome, detail = _nothing_recorded_outcome(note, _spec)
             needs_auth += outcome == "needs your sign-in"
             rows.append({"server": n, "outcome": outcome, "level": "bad", "detail": detail,
-                         "fix": _remedy(note, local[n])})
+                         "fix": _remedy(note, _spec)})
 
         # THE HEADLINE IS THE WORST THING FOUND, not "the action completed". This banner was green
         # while reporting 5 of 8 unverified and 21 convictions — success styling on a bad result,
@@ -4675,6 +4898,30 @@ _PANEL_JS = """\
       setTimeout(function () { el.textContent = old; }, 1500);
     });
   });
+  // A table that CAN scroll must LOOK like it: the right-edge fade appears only while there
+  // is genuinely more to the right, and clears at the end of the scroll.
+  var markScrollables = function () {
+    var els = document.querySelectorAll(".tscroll");
+    for (var i = 0; i < els.length; i++) (function (el) {
+      var update = function () {
+        el.classList.toggle("more", el.scrollWidth - el.clientWidth - el.scrollLeft > 4);
+      };
+      if (!el.getAttribute("data-sc")) {
+        el.setAttribute("data-sc", "1");
+        el.addEventListener("scroll", update, {passive: true});
+        // Explicit, not left to the browser: a focused scroll region moves on arrow keys in
+        // every engine, the same 40px step, and never steals keys typed into a child control.
+        el.addEventListener("keydown", function (ev) {
+          if (ev.target !== el) return;
+          if (ev.key === "ArrowRight") { el.scrollLeft += 40; ev.preventDefault(); }
+          if (ev.key === "ArrowLeft")  { el.scrollLeft -= 40; ev.preventDefault(); }
+        });
+      }
+      update();
+    })(els[i]);
+  };
+  markScrollables();
+  window.addEventListener("resize", markScrollables);
   var bar = document.getElementById("action");
   if (!bar || !window.EventSource) return;   // no bar or ancient browser: noscript refresh rules
   var wasRunning = null;
@@ -4708,6 +4955,8 @@ _PANEL_JS = """\
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (typeof d.html === "string") bar.innerHTML = d.html;  // server-escaped fragment
+    var slog = document.getElementById("slog");
+    if (slog && typeof d.log === "string" && d.log) slog.innerHTML = d.log;
     if (wasRunning === true && d.running === false) {
       es.close();
       location.reload();      // one settle with fresh rows, instead of a refresh loop
@@ -4787,11 +5036,24 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                     (qs.get("t") or [""])[0], token) else ""
                 last = None
                 deadline = time.monotonic() + 30 * 60   # a tab left open re-connects on its own
+                # The session log rides the same stream, recomputed every 5th tick — it reads
+                # sqlite and a directory listing, and once a second per viewer would be churn
+                # for a record whose fastest writer is a 300s sweep cycle. Token-free content
+                # only: the same rows the read-only page already seeds.
+                log_html = ""
+                tick = 0
                 try:
                     while time.monotonic() < deadline:
+                        if tick % 5 == 0:
+                            try:
+                                log_html = _session_log_html(session_log_lines())
+                            except Exception:  # noqa: BLE001 — the banner must keep streaming
+                                pass
+                        tick += 1
                         state = dict(_ACTION)
                         payload = json.dumps({"running": bool(state.get("running")),
-                                              "html": _action_banner(state, stream_token)})
+                                              "html": _action_banner(state, stream_token),
+                                              "log": log_html})
                         if payload != last:
                             self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                             self.wfile.flush()

@@ -151,7 +151,7 @@ export async function listTools(server) {
         return await listToolsWith(await connectEither(async () => {
             await client.connect(transport);
             return client;
-        }, () => modernFor(server)));
+        }, () => modernFor(server)), server.backendPrefix);
     }
     catch (e) {
         // A server that cannot start produces a useless protocol-level message ("MCP error -32000:
@@ -163,11 +163,18 @@ export async function listTools(server) {
         throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
     }
 }
-async function listToolsWith(client) {
+async function listToolsWith(client, backendPrefix) {
     try {
         const res = await client.listTools();
-        return res.tools.map((t) => ({
-            name: t.name,
+        const sep = "__";
+        const pfx = backendPrefix ? `${backendPrefix}${sep}` : "";
+        return res.tools
+            // Through a gateway the listing carries every backend's tools; keep only THIS one and
+            // present its real (unprefixed) names, so classification and the report read as if we
+            // spoke to the server directly.
+            .filter((t) => !pfx || t.name.startsWith(pfx))
+            .map((t) => ({
+            name: pfx ? t.name.slice(pfx.length) : t.name,
             description: t.description ?? "",
             inputSchema: t.inputSchema,
             annotations: t.annotations,
@@ -323,7 +330,9 @@ export function sandboxedProbeReused(server, sandbox) {
         // Same sandbox, same override — a modern fallback outside the container would be a bypass.
         () => modernFor(server, sess.envOverrides, spawnOverride));
     };
-    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: toolName, arguments: args }, undefined, {
+    const sep = "__";
+    const wire = (toolName) => server.backendPrefix ? `${server.backendPrefix}${sep}${toolName}` : toolName;
+    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
     }));
     const probe = async (toolName, args) => {
@@ -415,7 +424,9 @@ export function remoteProbe(server) {
         await c.connect(remoteTransport(server));
         return c;
     }, () => modernFor(server));
-    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: toolName, arguments: args }, undefined, {
+    const sep = "__";
+    const wire = (toolName) => server.backendPrefix ? `${server.backendPrefix}${sep}${toolName}` : toolName;
+    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
     }));
     const probe = async (toolName, args) => {

@@ -27,7 +27,14 @@ function interpolateRecord(r) {
 export function toConfig(name, raw) {
     if (typeof raw.url === "string" && raw.url) {
         const t = raw.transport === "sse" ? "sse" : "http";
-        return { name, url: raw.url, transport: t, headers: interpolateRecord(record(raw.headers)) };
+        return {
+            name,
+            url: raw.url,
+            transport: t,
+            headers: interpolateRecord(record(raw.headers)),
+            // Through-gateway routing: which backend of the gateway endpoint this entry addresses.
+            backendPrefix: typeof raw.backendPrefix === "string" ? raw.backendPrefix : undefined,
+        };
     }
     if (typeof raw.command !== "string") {
         throw new Error(`server '${name}': needs either "command" (local) or "url" (remote)`);

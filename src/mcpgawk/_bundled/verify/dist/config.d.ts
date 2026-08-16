@@ -8,6 +8,7 @@ export interface RawServer {
     url?: unknown;
     transport?: unknown;
     headers?: unknown;
+    backendPrefix?: unknown;
 }
 /** Normalise one raw server block into a typed {@link ServerConfig}. Throws on an unusable block
  * (including an unresolved `${VAR}` reference in `headers`/`env` — see {@link interpolateEnv}). */

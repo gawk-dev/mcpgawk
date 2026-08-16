@@ -171,6 +171,7 @@ export declare function serverCompleteness(r: DispatchCoverage & {
     readonly checkErrors: readonly CheckError[];
     readonly checksPlanned?: number;
     readonly checksCompleted?: number;
+    readonly authIncomplete?: string;
 }): Completeness;
 /** Completeness for the WHOLE run: every server complete, at least one server, at least one tool
  * anywhere, and no server that failed outright. */

@@ -163,7 +163,14 @@ def test_a_dead_flow_is_one_honest_line_never_a_traceback_or_a_circle():
         "Registration failed: 403 Forbidden")
     assert "refuses automatic client registration" in line
     assert "403" in line, "the server's own refusal must be quoted"
-    assert "--login" not in line, "circular advice inside the login flow"
+    # Pin updated deliberately 2026-08-15: BYO-client shipped, so the DCR refusal now names
+    # the way THROUGH (--login WITH a pre-registered client) — that is an escape hatch, not
+    # the circular bare-retry the original pin banned. The founder's next scan after the
+    # feature shipped still read "check figma's documentation"; the message and the
+    # capability must never drift apart again.
+    assert "--oauth-client-id" in line, "the refusal must name the BYO-client way through"
+    assert "developer console" in line and "redirect URI" in line
+    assert "retry with `--login`" not in line, "bare retry advice is still circular"
 
     generic = _signin_failure_line(
         "x", "authentication required — the endpoint is live but refused this scan; "
@@ -239,3 +246,42 @@ def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_pat
         import pytest as _pytest
         with _pytest.raises(RuntimeError, match="cannot move"):
             oauth_login.build_login_provider("https://mcp.example.com/mcp")
+
+
+def test_sdk_child_cleanup_warnings_lose_their_traceback_but_keep_their_line(capsys):
+    """The founder's first-run banner opened with the SDK's terminate_posix_process_tree
+    traceback — twice (killpg EPERM on a macOS process group, logged with exc_info and printed
+    by Python's last-resort handler, since this CLI configures none). The one-line fact is
+    honest and stays; the stack frames are not for the operator's terminal. The filter lives on
+    the HANDLER because the record comes from a child logger and propagated records skip
+    ancestor loggers' filters."""
+    import logging
+
+    from mcpgawk import cli
+
+    import sys as _sys
+
+    cli.main(["runs"])                      # any command installs the last-resort filter
+    capsys.readouterr()
+    flt = next((f for f in logging.lastResort.filters
+                if type(f).__name__ == "_SdkCleanupNoise"), None)
+    assert flt is not None, "the last-resort filter was never installed"
+
+    def rec(name: str) -> logging.LogRecord:
+        try:
+            raise PermissionError(1, "Operation not permitted")
+        except PermissionError:
+            return logging.LogRecord(
+                name=name, level=logging.WARNING, pathname="utilities.py", lineno=32,
+                msg="No permission to signal some of process group %d; waiting for it to "
+                    "exit anyway", args=(38056,), exc_info=_sys.exc_info())
+
+    sdk = rec("mcp.os.posix.utilities")
+    assert flt.filter(sdk) is True, "the record must still be emitted — only the dump goes"
+    rendered = logging.Formatter().format(sdk)
+    assert "No permission to signal" in rendered, "the honest one-liner must survive"
+    assert "Traceback" not in rendered, rendered
+
+    other = rec("urllib3.connectionpool")
+    flt.filter(other)
+    assert other.exc_info is not None, "non-SDK records must keep their tracebacks"

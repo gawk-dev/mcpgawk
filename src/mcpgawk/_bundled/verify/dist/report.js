@@ -82,6 +82,11 @@ export function serverCompleteness(r) {
     if (dispatchForcesIncomplete(r)) {
         reasons.push("a dynamic-dispatch catalog was not fully enumerated AND probed");
     }
+    if (r.authIncomplete) {
+        // A run whose every read answered "not signed in" completed its checks against auth-failure
+        // responses — those are verdicts about the login wall, not the tools behind it.
+        reasons.push(r.authIncomplete);
+    }
     return {
         checksPlanned: planned,
         checksCompleted: completed,

@@ -93,7 +93,14 @@ def test_panel_js_and_events_are_served():
         first = r.readline().decode()
         assert first.startswith("data: "), first
         payload = json.loads(first[len("data: "):])
-        assert set(payload) == {"running", "html"}, payload
+        # Pin updated deliberately 2026-08-15: the session log rides the same stream ([FOUNDER]
+        # "where are the session logs getting updated and shown"). Still exactly these keys —
+        # a new payload member remains a decision, not drift.
+        assert set(payload) == {"running", "html", "log"}, payload
+        assert isinstance(payload["log"], str), "the log fragment is pre-rendered HTML"
+        # Token-free by construction: the fragment must never carry the action token.
+        if token:
+            assert token not in payload["log"]
 
 
 def test_the_stream_is_token_gated_like_the_page():

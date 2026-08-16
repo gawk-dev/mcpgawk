@@ -530,3 +530,229 @@ def test_gateway_start_reports_the_childs_own_last_words_or_that_it_is_up(monkey
                         lambda *a, **k: {"live": {"listen": "http://127.0.0.1:8080/mcp"}})
     res = panel.run_gateway_start()
     assert not res["ok"] and "already running" in res["message"]
+
+
+def test_a_signin_server_fronted_by_a_live_gateway_is_verified_through_it(monkeypatch, tmp_path):
+    """[FOUNDER] 2026-08-15, generalised: a session-bound sign-in server the live gateway already
+    fronts must be verified THROUGH the gateway (no colliding second spawn; the in-band sign-in
+    authenticates the gateway's own persistent session). The config the engine receives points
+    at the gateway URL with the backend prefix — never a local command."""
+    import json as _json
+
+    from mcpgawk import discover, dxt, panel, remote_login, verify as _verify
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "gateway.yaml").write_text(
+        "backends:\n  kite:\n    command: npx\n    args: [\"mcp-remote\", \"https://mcp.kite.trade/mcp\"]\n")
+    monkeypatch.setattr(panel, "gateway_status",
+                        lambda *a, **k: {"live": {"listen": "127.0.0.1:8080"}})
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "kite": {"command": "npx", "args": ["mcp-remote", "https://mcp.kite.trade/mcp"]}})
+    monkeypatch.setattr(dxt, "resolve_for_launch", lambda e: dict(e))
+    # kite qualifies for sign-in (its store record carries a login tool).
+    monkeypatch.setattr(remote_login, "login_url", lambda e, name="", path=None: "")
+    monkeypatch.setattr(panel, "_login_button_applicable", lambda entry, name="": True)
+    monkeypatch.setattr(_verify, "unavailable_reason", lambda: None)
+
+    captured = {}
+
+    def fake_engine(argv, timeout=None):
+        cfg_path = argv[0]
+        captured["cfg"] = _json.loads(open(cfg_path).read())
+        return 2, "kite: incomplete"
+    monkeypatch.setattr(_verify, "run_captured", fake_engine)
+
+    panel.run_verify_fleet("kite")
+    spec = captured["cfg"]["mcpServers"]["kite"]
+    assert "command" not in spec, "a gateway-fronted sign-in server was spawned locally again"
+    assert spec.get("backendPrefix") == "kite"
+    assert spec["url"].startswith("http://127.0.0.1:8080") and spec["url"].endswith("/mcp")
+
+
+def test_without_a_live_gateway_a_signin_server_is_still_verified_locally(monkeypatch, tmp_path):
+    """The routing is opportunistic: no gateway, or the gateway does not front this server, and
+    verify spawns its own copy exactly as before — the direct in-band dance still applies."""
+    import json as _json
+
+    from mcpgawk import discover, dxt, panel, remote_login, verify as _verify
+
+    monkeypatch.setattr(panel, "behaviour_profile_path", lambda: tmp_path / "behaviour.json")
+    monkeypatch.setattr(panel, "gateway_status", lambda *a, **k: {"live": None})
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {
+        "kite": {"command": "npx", "args": ["mcp-remote", "https://mcp.kite.trade/mcp"]}})
+    monkeypatch.setattr(dxt, "resolve_for_launch", lambda e: dict(e))
+    monkeypatch.setattr(remote_login, "login_url", lambda e, name="", path=None: "")
+    monkeypatch.setattr(panel, "_login_button_applicable", lambda entry, name="": True)
+    monkeypatch.setattr(_verify, "unavailable_reason", lambda: None)
+
+    captured = {}
+    monkeypatch.setattr(_verify, "run_captured",
+                        lambda argv, timeout=None: (captured.update(
+                            cfg=_json.loads(open(argv[0]).read())) or (2, "x")))
+    panel.run_verify_fleet("kite")
+    spec = captured["cfg"]["mcpServers"]["kite"]
+    assert spec.get("command") == "npx", "a local sign-in server lost its own-spawn path"
+    assert "backendPrefix" not in spec
+
+
+def test_the_session_log_is_one_dated_stream_newest_first(monkeypatch, tmp_path):
+    """[FOUNDER] 2026-08-15: "where are the session logs getting updated and shown" — the
+    record existed in runs.db, monitor.db and verify-runs/ and NO surface streamed it. The log
+    merges all three, newest first, with absolute timestamps (a relative time would re-render
+    every second and the /events diff would never settle)."""
+    import types
+
+    from mcpgawk import panel, runlog
+
+    run = types.SimpleNamespace(kind="verify", target="kite", status="ok",
+                                started_at="2026-08-15T06:58:49Z", summary="")
+    monkeypatch.setattr(runlog, "list_runs", lambda **kw: [run])
+    monkeypatch.setattr(panel, "monitor_status", lambda home=None: {
+        "running": True, "since": "2026-08-15T07:22:00Z",
+        "alerts": [{"server": "resend", "kind": "drift", "detail": "x",
+                    "raised_at": "2026-08-15T07:30:00Z", "state": "pending"}],
+        "servers": [{"server_id": "browserstack", "last_check": "2026-08-15T07:25:00Z",
+                     "last_ok": True}]})
+    rd = tmp_path / "verify-runs"
+    (rd / "2026-08-15T06-58-49Z").mkdir(parents=True)
+    monkeypatch.setattr(panel, "verify_runs_dir", lambda: rd)
+
+    lines = panel.session_log_lines()
+    texts = [ln["text"] for ln in lines]
+    assert any("verify kite" in t for t in texts), "a recorded run is missing from the stream"
+    assert any("alert · resend" in t for t in texts), "a raised alert is missing"
+    assert any("monitor checked browserstack" in t for t in texts), "a sweep row is missing"
+    assert any("evidence archived" in t for t in texts), "an archived run dir is missing"
+    whens = [ln["when"] for ln in lines if ln["when"]]
+    assert whens == sorted(whens, reverse=True), "the stream must be newest first"
+    html = panel._session_log_html(lines)
+    assert "slrow" in html and "07:30:00" in html
+
+
+def test_the_page_seeds_the_session_log_so_live_is_never_blank(monkeypatch):
+    """A sweep is on a 300s cycle; an empty pane that only fills on the first live event reads
+    as broken for five minutes — the exact complaint the surface answers. The page must carry
+    the same fragment the /events stream later replaces."""
+    from mcpgawk import panel
+
+    monkeypatch.setattr(panel, "session_log_lines",
+                        lambda limit=30: [{"when": "2026-08-15T07:00:00Z",
+                                           "text": "verify kite · ok", "level": "ok"}])
+    html = panel.render(
+        {"entries": {}, "store": {"servers": {}}, "pending": [], "findings": [],
+         "recent_calls": [], "hooks": {}, "adapters": {}, "unscannable": [], "observed": {}},
+        token="", action=None)
+    assert 'id="slog"' in html, "the session log pane is missing from the page"
+    assert "verify kite · ok" in html, "the seeded rows never reached the page"
+
+
+def test_a_scrolling_table_is_reachable_by_wheel_keyboard_and_screen_reader(monkeypatch):
+    """[FOUNDER] 2026-08-15, twice: "the horizontal scroll is not even there in findings" /
+    "it is not scrollable". overflow:auto alone is invisible on macOS (no scrollbar until a
+    horizontal gesture a plain mouse cannot make) — so every scroll region must paint its
+    scrollbar, take keyboard focus, and name itself to a screen reader."""
+    from mcpgawk import panel
+
+    monkeypatch.setattr(panel, "session_log_lines", lambda limit=30: [])
+    html = panel.render(
+        {"entries": {}, "store": {"servers": {}}, "pending": [], "findings": [],
+         "recent_calls": [], "hooks": {}, "adapters": {}, "unscannable": [], "observed": {}},
+        token="", action=None)
+    import re as _re
+    regions = _re.findall(r'<div class="tscroll"[^>]*>', html)
+    assert regions, "the scroll regions vanished from the page"
+    for r in regions:
+        assert 'tabindex="0"' in r, f"keyboard-unreachable scroll region: {r}"
+        assert 'role="region"' in r and "aria-label" in r, f"unnamed scroll region: {r}"
+    assert "::-webkit-scrollbar" in html and "scrollbar-width:thin" in html, \
+        "the scrollbar must be painted, not left to a hidden-until-gesture default"
+    assert "markScrollables" in panel._PANEL_JS, "the there-is-more fade lost its updater"
+
+
+def test_a_run_whose_recorder_died_says_interrupted_not_running(monkeypatch):
+    """Found live 2026-08-15: a panel restart killed an in-flight fleet verify and the
+    Evidence row (and session log line) would have claimed "running" forever — the recording
+    process was gone. A running status is only believed while its recorder's pid is alive on
+    this host."""
+    import socket
+    import types
+
+    from mcpgawk import panel, runlog
+
+    dead = types.SimpleNamespace(kind="verify", target="fleet", status="running",
+                                 started_at="2026-08-15T07:45:21Z", summary="",
+                                 host=socket.gethostname(), pid=99999999)
+    monkeypatch.setattr(runlog, "list_runs", lambda **kw: [dead])
+    monkeypatch.setattr(runlog, "default_path", lambda: __file__)  # any existing file
+    monkeypatch.setattr(panel, "monitor_status", lambda home=None: {})
+    monkeypatch.setattr(panel, "verify_runs_dir", lambda: panel.Path("/nonexistent"))
+
+    lines = panel.session_log_lines()
+    assert any("verify fleet · interrupted" in ln["text"] for ln in lines), lines
+
+    html = panel.render(
+        {"entries": {}, "store": {"servers": {}}, "pending": [], "findings": [],
+         "recent_calls": [], "hooks": {}, "adapters": {}, "unscannable": [], "observed": {},
+         "runs": [dead]},
+        token="", action=None)
+    assert "interrupted — the process that ran it is gone" in html
+    assert ">running<" not in html, "a dead recorder's row must not render as running"
+
+
+def test_a_stale_install_announces_how_far_behind_its_checkout_it_is(tmp_path):
+    """[FOUNDER] 2026-08-15: a full release-gate walk drove an install 12 hours behind the
+    checkout — palette, redirects and scroll fixes all existed, none were on the walked page,
+    and nothing said so. The panel now reads the uv receipt beside its own install, compares
+    source mtimes, and puts the gap ON the page. No receipt (a checkout run, a customer
+    install) or a current install renders nothing."""
+    import os
+    import time
+
+    from mcpgawk.panel import _staleness_note
+
+    # Fake install: tool_root/uv-receipt.toml + tool_root/site/mcpgawk/panel.py
+    checkout = tmp_path / "checkout"
+    (checkout / "src" / "mcpgawk").mkdir(parents=True)
+    tool_root = tmp_path / "tool"
+    installed = tool_root / "site" / "mcpgawk"
+    installed.mkdir(parents=True)
+    (tool_root / "uv-receipt.toml").write_text(
+        f'[tool]\nrequirements = [{{ name = "mcpgawk", directory = "{checkout}" }}]\n')
+    inst_py = installed / "panel.py"
+    inst_py.write_text("# installed")
+    src_py = checkout / "src" / "mcpgawk" / "panel.py"
+    src_py.write_text("# newer source")
+
+    old = time.time() - 3 * 3600
+    os.utime(inst_py, (old, old))
+    note = _staleness_note(module_file=inst_py)
+    import re as _re
+    assert _re.search(r"[23]h \d+m behind its source", note), note
+    assert "uv tool install --force --reinstall --no-cache" in note
+
+    # Same mtimes → current → silence; and no receipt at all → silence.
+    os.utime(inst_py, None)
+    os.utime(src_py, (old, old))
+    assert _staleness_note(module_file=inst_py) == ""
+    assert _staleness_note(module_file=src_py) == ""
+
+
+def test_an_incomplete_run_never_wears_the_clean_colour(monkeypatch):
+    """[FOUNDER] pixel audit 2026-08-15: the Evidence chip for an INCOMPLETE verify rendered
+    in the ok green — 'incomplete' was missing from both status→tone maps and fell through to
+    the clean tone. A run that proved nothing must read as warn, in the table and the log."""
+    import types
+
+    from mcpgawk import panel
+
+    run = types.SimpleNamespace(kind="verify", target="kite", status="incomplete",
+                                started_at="2026-08-15T10:27:35Z", summary="", host="", pid=0)
+    html = panel.render(
+        {"entries": {}, "store": {"servers": {}}, "pending": [], "findings": [],
+         "recent_calls": [], "hooks": {}, "adapters": {}, "unscannable": [], "observed": {},
+         "runs": [run]},
+        token="", action=None)
+    import re as _re
+    chip = _re.search(r'<span class="chip (\w+)">incomplete</span>', html)
+    assert chip and chip.group(1) == "warn", (html and chip and chip.group(0)) or "chip missing"

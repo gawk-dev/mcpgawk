@@ -113,6 +113,19 @@ export type AuditEvent = {
 export declare function findInbandLoginTool<T extends {
     name: string;
 }>(tools: readonly T[]): T | undefined;
+/** An answer that still reads as "you are not signed in", whatever the ok-flag says — kite
+ * reports auth failures as ok:true "Failed to execute <tool>". One regex for the preflight
+ * and the post-sign-in retry, so the two ends of the dance cannot drift apart. */
+export declare function authFailureShaped(text: string): boolean;
+/** Signed-in means the answer CHANGED **into one that no longer reads as an auth failure**.
+ * Change alone was the entire signal until 2026-08-15, and the first through-gateway kite run
+ * proved it insufficient: one transient variance in the still-failing answer flipped auth-ok
+ * ten seconds in, the human was never asked, and every later read still failed.
+ *
+ * The shape comparison uses the truncated normalisation; the failure test gets the retry's
+ * FULL text — the same input the preflight's test gets. Running it on the 120-char shape
+ * would let a long answer whose failure phrase sits past the truncation flip auth-ok. */
+export declare function signInComplete(firstShape: string, againShape: string, againOk: boolean, againFullText: string): boolean;
 /** The first URL in a login tool's prose, stripped of trailing punctuation — servers wrap the
  * link in sentences ("Click here: https://… to continue."). Null when there is none. */
 export declare function firstUrlIn(text: string): string | null;

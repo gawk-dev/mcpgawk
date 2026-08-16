@@ -890,6 +890,22 @@ def _protect() -> int:
 
     store = history.load(history.default_path())
     print(protect.protection_report(store, guard_line, unchecked=[]))
+    # ONBOARDING STAGE 5 ([FOUNDER] 2026-08-15: onboarding ends at protect + PANEL, and the
+    # first run offers the bridge): until now the flow finished and the control surface was
+    # never mentioned — a user completed the scan and had no idea a panel existed. TTY only,
+    # a real question (the answer IS the consent), default yes; off a TTY, one honest hint
+    # line and no prompt — a pipe must never hang on input().
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            ans = input("\n  See all of this live — servers, decisions, evidence — in the "
+                        "control panel? [Y/n] ")
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans.strip().lower() in ("", "y", "yes"):
+            from .panel import serve as panel_serve
+            panel_serve(port=7718, open_browser=True)
+    else:
+        print("\n  The control panel shows all of this live: mcpgawk panel")
     return rc
 
 
@@ -1061,6 +1077,24 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(line_buffering=True)
         except ValueError:                # a detached buffer — nothing to line-buffer
             pass
+
+    # The MCP SDK logs child-cleanup warnings WITH exc_info (terminate_posix_process_tree's
+    # killpg can hit EPERM on macOS process groups), and this CLI configures no handlers, so
+    # Python's last-resort handler printed the full traceback into the founder's first-run
+    # banner — twice, 2026-08-15. The one-line fact stays ("No permission to signal …; waiting
+    # for it to exit anyway" is honest and complete); the stack frames are for us, not the
+    # operator's terminal. Filter on the handler, not the logger: the record is emitted by a
+    # CHILD logger and propagated records skip ancestor loggers' filters.
+    import logging as _logging
+    if _logging.lastResort is not None and not any(
+            type(f).__name__ == "_SdkCleanupNoise" for f in _logging.lastResort.filters):
+        class _SdkCleanupNoise(_logging.Filter):
+            def filter(self, record: _logging.LogRecord) -> bool:
+                if record.name.startswith("mcp"):
+                    record.exc_info = None
+                    record.exc_text = None
+                return True
+        _logging.lastResort.addFilter(_SdkCleanupNoise())
 
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw or raw[0] != "scan":
@@ -1478,9 +1512,15 @@ def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> 
     honest answer names that instead of sending the user in a circle."""
     err = " ".join((flow_error or snap_error or "no detail").split())
     if "Registration failed" in err:
-        return (f"  {name}: sign-in is not possible from here — this server refuses automatic "
-                f"client registration ({err[:120]}). It only accepts OAuth clients it already "
-                f"knows about; check {name}'s documentation for its supported MCP clients.")
+        # This class is no longer a dead end: BYO-client shipped 2026-08-15 — but the founder's
+        # very next scan still read "check figma's documentation", because this message predated
+        # the feature and nothing tied the two together. The refusal now names our own way
+        # through it.
+        return (f"  {name}: this server refuses automatic client registration ({err[:120]}) — "
+                f"it only accepts OAuth clients it already knows about. The way through: create "
+                f"an OAuth app in {name}'s developer console, register the redirect URI mcpgawk "
+                f"prints, then run once:  mcpgawk scan --login <url> --oauth-client-id <id> "
+                f"[--oauth-client-secret-env VAR]")
     # Scan-path advice is circular inside the login flow itself: we ARE `--login`.
     err = err.split("; retry with")[0]
     return f"  {name}: sign-in did not complete — {err[:160]}"

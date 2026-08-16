@@ -26,6 +26,23 @@ import { CheckRunner, isMcpRemoteProxy, callToolText, dispatchedProbe, listTools
 export function findInbandLoginTool(tools) {
     return tools.find((t) => /(^|[._-])log[_-]?in($|[._-])/i.test(t.name) && !/out/i.test(t.name));
 }
+/** An answer that still reads as "you are not signed in", whatever the ok-flag says — kite
+ * reports auth failures as ok:true "Failed to execute <tool>". One regex for the preflight
+ * and the post-sign-in retry, so the two ends of the dance cannot drift apart. */
+export function authFailureShaped(text) {
+    return /not (logged in|authenticated)|login|forbidden|unauthorized|failed to execute/i.test(text);
+}
+/** Signed-in means the answer CHANGED **into one that no longer reads as an auth failure**.
+ * Change alone was the entire signal until 2026-08-15, and the first through-gateway kite run
+ * proved it insufficient: one transient variance in the still-failing answer flipped auth-ok
+ * ten seconds in, the human was never asked, and every later read still failed.
+ *
+ * The shape comparison uses the truncated normalisation; the failure test gets the retry's
+ * FULL text — the same input the preflight's test gets. Running it on the 120-char shape
+ * would let a long answer whose failure phrase sits past the truncation flip auth-ok. */
+export function signInComplete(firstShape, againShape, againOk, againFullText) {
+    return againOk && againShape !== firstShape && !authFailureShaped(againFullText);
+}
 /** The first URL in a login tool's prose, stripped of trailing punctuation — servers wrap the
  * link in sentences ("Click here: https://… to continue."). Null when there is none. */
 export function firstUrlIn(text) {
@@ -270,7 +287,12 @@ export async function verifyServer(server, opts = {}) {
     // SAME session, hand the URL out as an audit event, and wait for the human (bounded).
     // Only for safe-mode local runs on a persistent session; everything else is unchanged.
     const loginTool = findInbandLoginTool(tools);
-    if (mode === "safe" && !remote && loginTool && isMcpRemoteProxy(server)) {
+    // Fire for a session-bound sign-in over ANY persistent session: the direct mcp-remote proxy
+    // (local, one reused spawn) OR through a running gateway (remote, one reused client). Both
+    // keep a single session so the login and the later reads share it — the whole point.
+    const persistentSession = isMcpRemoteProxy(server) || Boolean(server.backendPrefix);
+    let authIncomplete;
+    if (mode === "safe" && loginTool && persistentSession) {
         const preflight = tools.find((t) => classifyTool(t, labelSignal).callable);
         if (preflight) {
             const first = await probe(preflight.name, {});
@@ -280,8 +302,7 @@ export async function verifyServer(server, opts = {}) {
             // answer CHANGES from this shape.
             const unauthedShape = (r) => (r.ok ? r.obs.resultText : r.detail ?? "").trim().slice(0, 120);
             const firstShape = unauthedShape(first);
-            const failed = !first.ok || /not (logged in|authenticated)|login|forbidden|unauthorized|failed to execute/i
-                .test(first.ok ? first.obs.resultText : "");
+            const failed = !first.ok || authFailureShaped(first.ok ? first.obs.resultText : "");
             if (failed) {
                 const login = await probe(loginTool.name, {});
                 const url = login.ok ? firstUrlIn(login.obs.resultText) : null;
@@ -291,13 +312,23 @@ export async function verifyServer(server, opts = {}) {
                     for (let i = 0; i < 30; i++) {
                         await new Promise((r) => setTimeout(r, 10_000));
                         const again = await probe(preflight.name, {});
-                        if (again.ok && unauthedShape(again) !== firstShape) {
+                        if (signInComplete(firstShape, unauthedShape(again), again.ok, again.ok ? again.obs.resultText : "")) {
                             authed = true;
                             break;
                         }
                     }
                     emit(authed ? { type: "auth-ok", server: server.name }
                         : { type: "auth-timeout", server: server.name });
+                    if (!authed) {
+                        authIncomplete =
+                            "sign-in never completed (auth-timeout) — every read answered as " +
+                                "unauthenticated, so nothing behavioural was proven";
+                    }
+                }
+                else {
+                    authIncomplete =
+                        "reads answer as unauthenticated and the server has a login tool, but no " +
+                            "sign-in URL could be obtained from it — nothing behavioural was proven";
                 }
             }
         }
@@ -396,6 +427,7 @@ export async function verifyServer(server, opts = {}) {
         sandboxBackend,
         sandboxDegradedReason,
         labelNoiseNote,
+        authIncomplete,
         dynamicDispatch: dynamicDispatch.length > 0 ? dynamicDispatch : undefined,
         hiddenCatalog: hiddenCatalog.length > 0 ? hiddenCatalog : undefined,
         hiddenProbed: hiddenProbed.length > 0 ? hiddenProbed : undefined,
