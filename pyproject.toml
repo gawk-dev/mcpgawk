@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcpgawk"
 version = "0.1.29"
-description = "A local-first CLI that measures what an MCP server costs and what it can do. Nothing leaves your machine."
+description = "One gateway in front of every MCP server your agents can reach — every call checked against a baseline you approved. Local-first: nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
