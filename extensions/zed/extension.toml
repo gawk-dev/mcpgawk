@@ -1,0 +1,9 @@
+id = "mcpgawk"
+name = "mcpgawk"
+version = "0.1.29"
+schema_version = 1
+authors = ["Nativerse Ventures"]
+description = "Ask Zed's agent what MCP servers you can reach and what each one can do — scanned on your machine, nothing uploaded. Blocking calls and catching post-approval drift live in the mcpgawk CLI, not in this extension."
+repository = "https://github.com/gawk-dev/mcpgawk"
+
+[context_servers.mcpgawk]
