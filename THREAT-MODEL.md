@@ -33,12 +33,57 @@ measurement layers import no network library — they cannot exfiltrate what the
 (enforced by a test). Public Server Card discovery is fetched with **no auth headers and no
 redirect-following**, so a discovery endpoint can never capture your credentials.
 
+## Beyond the scan — what else is in the trust boundary
+
+The sections above describe `scan`, which reads what a server claims. Three other capabilities
+change what is being trusted, so each states its own limit here.
+
+### `verify` — behaviour, observed
+Runs the server in a sandbox and reports what it did: data exfiltration, SSRF, tool poisoning,
+secret leaks. A finding is reproduced in a fresh sandbox before it is reported. **Safe mode is the
+default**: only tools provably read-only are driven, and every tool it skips is named as skipped —
+never counted as clean. Egress is watched through a proxy; `--isolate` adds a stricter pass on top
+rather than replacing it.
+
+### `guard` — the call, checked before it runs
+A single pre-execution hook checks every MCP tool call against the surface you approved, locally,
+before the call reaches the server. **It works on 6 of the 21 supported clients** — the others
+expose no hook point, and are named rather than silently omitted. A client with no hook point is
+not protected in place; route it through the gateway instead.
+
+### `enforce` — the gateway
+One endpoint in front of the fleet. Each caller gets its own key, so a blocked call has a name
+against it. Scope enforcement is **deny-by-default**. Both the call and the response are evaluated.
+Whether an evaluator error fails open or closed is **explicit and set by your config** — it is not
+guessed.
+
+### `monitor` — after you approved it
+Re-checks approved servers on a schedule and raises an alert when a surface moves. This is the
+post-approval drift case: a server you already trusted changing later.
+
+## The audit log, stated precisely
+Every guard decision is written synchronously and **hash-chained**: each row is
+`sha256(prev_hash || canonical(fields))`, so an in-place edit, a reorder or a mid-deletion breaks
+the link and `verify_chain()` names the first broken row.
+
+What the chain alone **cannot** catch, and we do not pretend it can: a local party who holds the
+database can truncate the tail or recompute a fresh, internally-valid chain. Only an **off-box
+anchor** closes that — ship the chain head somewhere you do not control, and truncation or a
+wholesale rewrite is then detectable at the anchored count. The guarantee is therefore:
+**tamper-evident up to the last anchored head**; rows after it are chain-consistent and
+crash-integral but still rewritable locally. Do not read it as more than that.
+
+**Tool arguments are never recorded.** The log is metadata — when, which agent, which server.tool,
+the decision and its basis — so it cannot become the richest secret on your disk.
+
 ## Honest limits
 - **Bounded signals are heuristics.** They are tuned for zero false positives on the (non-adversarial)
   corpus they were tested against — they are **not** a guarantee against a crafted evasion.
-- mcpgawk **cannot** determine a description's true *intent*, detect runtime exfiltration, or judge
-  whether a capability is dangerous *in your context* — those need semantics or runtime it deliberately
-  does not do (to stay local and no-phone-home). It surfaces; you decide.
+- mcpgawk **cannot** determine a description's true *intent*, or judge whether a capability is
+  dangerous *in your context*. It surfaces; you decide.
+- Static scanning alone cannot see behaviour. That is why `verify` exists: it runs the server in a
+  sandbox and reports what it actually did. Read the two apart — a scan is what a server *claims*,
+  a verify run is what it *did*.
 - The token number is an **index**, not a billing-exact Claude count.
 
 If you can reproduce a finding, it's real — every number is reproducible by re-running the command.

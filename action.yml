@@ -1,9 +1,9 @@
 name: 'mcpgawk MCP hygiene gate'
-description: 'Scan your MCP servers in CI and fail the build if one is too heavy or trips a signal. Local, nothing uploaded.'
-author: 'nativerse'
+description: 'Fail the build when an MCP server your agents can reach changes, costs too much context, or can do more than you approved. Runs on the runner; nothing is uploaded.'
+author: 'Nativerse Ventures'
 branding:
   icon: 'shield'
-  color: 'blue'
+  color: 'orange'
 
 inputs:
   config:
