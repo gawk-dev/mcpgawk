@@ -10,10 +10,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
 [![Python](https://img.shields.io/pypi/pyversions/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-C8401F.svg)](LICENSE)
 [![CI](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml/badge.svg)](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml)
 [![Open VSX](https://img.shields.io/open-vsx/v/gawk-dev/mcpgawk?label=VS%20Code%20%2F%20Cursor)](https://open-vsx.org/extension/gawk-dev/mcpgawk)
-[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-blue?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-C8401F?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
 [![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
 
 Your agents call [Model Context Protocol](https://modelcontextprotocol.io) servers that can
@@ -21,31 +21,48 @@ change what their tools do *after* you approved them, and the agent will call th
 noticing. mcpgawk reads every server your agents can reach, checks every call against a baseline
 you approved, and blocks the ones that changed. It runs on your machine and uploads nothing.
 
-It is also how the [gawk gateway](https://gawk.dev) knows what it fronts: gawk Platform puts one
-endpoint in front of your MCP fleet — per-principal keys, policy, tamper-evident audit — and this
-free layer is the seeing and the blocking underneath it.
+The same engine powers **mcpgawk Platform**, which puts one endpoint in front of the whole fleet
+with a key per caller, policy on every call and a tamper-evident audit log. This free layer is the
+seeing and the blocking underneath it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif" alt="mcpgawk scanning an MCP server — tools, token cost, and capability flags, locally" width="760">
+  <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif"
+       alt="mcpgawk demo: a server is approved, changes afterwards, and the guard blocks the tool that appeared">
 </p>
-<p align="center"><sub>Real output. Reproducible on your machine — no account, nothing uploaded.</sub></p>
+<p align="center"><sub><code>mcpgawk demo</code> — its own output, in a sandbox that touches nothing of yours.
+Run the same command and you get the same thing.</sub></p>
 
 ## Why
 
-Connect an MCP server and it loads all its tools into your AI's context. Every request. Used or not.
-You pay for those tokens, and you haven't checked what the tools can do. mcpgawk shows you both, locally.
+A server you approved can change what its tools do afterwards. Nothing in MCP tells your agent that
+happened — it just calls the new tool. That is the rug-pull, and it is the case mcpgawk is built for.
+
+Two things follow from being able to see a server properly. You find out what each one can reach
+before you trust it, and you find out what it costs: every tool is loaded into your context on every
+request, used or not.
 
 ## How it's different
 
-- **vs. cloud scanners** (e.g. Snyk/Invariant `mcp-scan`) — they upload your inventory to a server and
-  gate the verdict. mcpgawk runs entirely on your machine; nothing is uploaded, ever.
-- **vs. lazy-load gateways** — they cut tokens but tell you nothing about the *risk* surface.
-  gawk's own [gateway](https://gawk.dev) takes that seat with the risk surface measured — this
-  scanner is how it knows.
-- **mcpgawk does both** — cost **and** trust — locally, reproducibly, in one command.
+- **It blocks, it does not only report.** A scanner tells you afterwards. `mcpgawk guard` installs one
+  pre-execution hook and a tool that appeared after you approved the server does not run.
+- **It runs the server, not just reads it.** `mcpgawk verify` drives tools in a sandbox and reports
+  what they actually did — exfiltration, SSRF, poisoning — reproduced before it is reported.
+- **Nothing is uploaded.** Cloud scanners send your inventory to a server and gate the verdict there.
+  Every decision here is made on your machine, with no account and nothing to sign in to.
+- **It says what it did not check.** Skipped tools are named as skipped, never counted as clean.
 
 ## Features
 
+- 🛑 **Block a changed tool before it runs** — `mcpgawk guard install` puts one pre-execution hook in
+  your agent's loop. The decision is local, in about 10ms, with nothing to sign in to. Works on **6 of
+  the 21 supported clients**; the rest have no hook point and are named, not glossed over.
+- 🧪 **Run it, don't just read it** — `mcpgawk verify` drives tools in a sandbox and reports what they
+  did: exfiltration, SSRF, tool poisoning, secret leaks. Safe mode drives only provably read-only
+  tools, and every tool it skips is named as skipped.
+- 🧑‍⚖️ **Approval needs a person** — `mcpgawk decide` opens a local screen for what changed. The buttons
+  live on the tokened link printed in your terminal, so an agent that opened the page cannot approve
+  its own way past a block.
+- 🖥️ **One local panel** — `mcpgawk panel`: every server, every decision, every piece of evidence.
 - 🔌 **Any transport** — stdio, streamable-HTTP, SSE, and OAuth remotes (via the `mcp-remote` bridge).
 - 💸 **Token cost index** — exactly what each tool adds to your context at connect, plus the 3 heaviest tools.
 - 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema, plus a
@@ -75,12 +92,26 @@ mcpgawk scan mcp.json
 
 ## When to run it
 
+- **Once, then leave it on** — `mcpgawk guard install`. After that a tool that appears on a server
+  you already approved does not get called.
 - **Before you add a server** — see what it costs and what it can do, before you trust it.
 - **When your agent feels slow or picks the wrong tool** — it's often MCP bloat (too many / too-heavy tools).
 - **On every PR** — the CI gate catches drift and creeping token cost.
 - **If you *publish* an MCP server** — see what it costs your users and how it reads to a client, and fix it (usually one line per tool). Lean + well-annotated is a differentiator.
 
 ## Use
+
+```bash
+mcpgawk                                  # first run: every agent config on this machine
+mcpgawk demo                             # the whole arc in a sandbox — approve, drift, block
+mcpgawk guard install                    # put the baseline in your agent's loop
+mcpgawk guard status                     # is protection actually on?
+mcpgawk decide                           # what changed, and approve it as a human
+mcpgawk panel                            # the local page: servers, decisions, evidence
+mcpgawk verify mcp.json                  # run the servers and watch what they do
+```
+
+Scanning on its own, if that is all you want:
 
 ```bash
 mcpgawk scan mcp.json                                              # a whole config
