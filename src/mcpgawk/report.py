@@ -495,7 +495,10 @@ def write_bundle(bundle: Bundle, dest: Path, note: str | None = None) -> Path:
     return dest
 
 
-def run(output: str | None = None, note: str | None = None) -> int:
+def run(output: str | None = None, note: str | None = None, strict: bool = False) -> int:
+    from .report_redact import set_strict
+
+    set_strict(strict)
     bundle = collect(note)
     dest = Path(output) if output else Path.cwd() / f"mcpgawk-report-{_utc()}.zip"
     try:
@@ -505,6 +508,10 @@ def run(output: str | None = None, note: str | None = None) -> int:
         print("try `mcpgawk report --output ~/mcpgawk-report.zip`", file=sys.stderr)
         return 1
     print(render_summary(bundle, note))
+    mode = ("STRICT — hosts, package names and command arguments removed as well"
+            if strict else
+            "full — run with --strict if your employer will not let internal hostnames leave")
+    print(f"  redaction: {mode}")
     size_kb = max(1, written.stat().st_size // 1024)
     print(f"  written: {written}  ({size_kb} KB)")
     print(f"  send it to {SUPPORT_ADDRESS} — nothing was uploaded.")

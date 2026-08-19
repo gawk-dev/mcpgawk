@@ -35,6 +35,16 @@ def _bundle_text(path: Path) -> str:
         )
 
 
+@pytest.fixture(autouse=True)
+def _default_mode():
+    """Mode is process state; reset it so one test cannot decide another's expectations."""
+    from mcpgawk import report_redact
+
+    report_redact.set_strict(False)
+    yield
+    report_redact.set_strict(False)
+
+
 @pytest.fixture()
 def machine(tmp_path, monkeypatch):
     """A machine with a verify run that saw a secret, a token URL and a user's holdings."""
@@ -103,6 +113,49 @@ def test_a_beta_grant_in_the_environment_never_reaches_the_bundle(machine, tmp_p
     assert "monitor.db" in text
 
 
+def test_the_default_bundle_stays_comprehensive(machine, tmp_path):
+    """The beta exists to ship a production-grade product, and that needs the whole picture.
+
+    Guarding the DEFAULT explicitly, because the failure mode here is mine: it is always
+    tempting to redact one more field, and each one silently costs a bug we can no longer
+    diagnose. Removing an identifier from the default is a product decision, not a tidy-up,
+    and this test is what makes it a deliberate one.
+    """
+    dest = tmp_path / "full.zip"
+    assert report.run(output=str(dest)) == 0
+    text = _bundle_text(dest)
+    assert "api.kite.trade" in text, "egress destinations are the finding, not noise"
+    assert "get_holdings" in text and "undeclared-egress" in text
+
+
+def test_a_regulated_testers_server_command_never_leaves_their_machine():
+    """A real beta tester's config, from a large healthcare enterprise, under --strict.
+
+    One `stdio:` target names their internal MCP endpoint, their Okta client id and their
+    private artifactory host. None of that is a credential, and no detector would flag it —
+    but a tester at a regulated company cannot email it, so a bundle that carries it is a
+    bundle that never gets sent, and the feature does not exist for the buyers it was built
+    for. Allow-list, not deny-list: a token survives only if it cannot identify anyone.
+    """
+    from mcpgawk.report_redact import redact_command, set_strict
+
+    set_strict(True)
+    out = redact_command(
+        'stdio:npx -y mcp-remote https://mcp-atlassian-server.srv.acme.io/mcp/ 8085 '
+        '--static-oauth-client-info {"client_id":"0oazmbclz7cmBZnR8297"} '
+        '--header X-Jira-Token: ${JIRA_PERSONAL_TOKEN}')
+    for identifier in ("mcp-atlassian-server", "srv.acme.io", "0oazmbclz7cmBZnR8297"):
+        assert identifier not in out, f"{identifier} reached the bundle"
+    # the diagnosis survives: what runs it, that it proxies over https, which flags, which env
+    assert "npx" in out and "https-url" in out
+    assert "--static-oauth-client-info" in out
+    assert "${JIRA_PERSONAL_TOKEN}" in out, "an env REFERENCE is not a secret and is diagnostic"
+
+    unpinned = redact_command("stdio:pnpm dlx @acme/ide-jira-mcp@latest stdio")
+    assert "acme" not in unpinned
+    assert "@latest" in unpinned, "whether a package is pinned is the security finding"
+
+
 def test_an_oauth_callback_is_not_safe_just_because_its_parameters_look_innocent():
     """`redact.redact_url` masks SECRET-NAMED parameters; `code` and `state` are neither.
 
@@ -127,6 +180,23 @@ def test_the_person_is_removed_even_when_the_path_is_mangled():
         pytest.skip("username too short to strike as a literal — path scrubbing only")
     assert user not in scrub_paths(f"/private/tmp/x/-Users-{user}-devtools/y")
     assert user not in scrub_paths(f"/Users/{user}/.npm/x.js")
+
+
+def test_strict_mode_names_no_host_of_theirs_anywhere(machine, tmp_path):
+    """Under --strict: the claim a security team can verify in one grep.
+
+    Not "we remove the sensitive ones" — a tester cannot audit that, and neither can their
+    reviewer. Every non-loopback host goes. Loopback stays because it describes OUR
+    plumbing ("the gateway was listening"), not their estate.
+    """
+    import re
+
+    dest = tmp_path / "hosts.zip"
+    assert report.run(output=str(dest), strict=True) == 0
+    urls = set(re.findall(r"[a-z]+://[^\s\"'<>,;)}\]]+", _bundle_text(dest)))
+    leaked = [u for u in urls
+              if not re.match(r"^[a-z]+://(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", u)]
+    assert not leaked, f"the bundle names hosts the tester's employer runs: {leaked}"
 
 
 def test_a_fresh_machine_produces_a_bundle_and_not_a_crash(tmp_path, monkeypatch):

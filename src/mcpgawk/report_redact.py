@@ -44,6 +44,31 @@ CONTENT_FIELDS = frozenset({
 #: Here we keep scheme, host, path and every parameter NAME, and mask every VALUE.
 URL_FIELDS = frozenset({"url", "uri", "endpoint", "redirect_uri", "callback"})
 
+#: TWO MODES, because one bundle cannot serve both objectives.
+#:
+#: The beta exists to ship a production-grade product, and that needs the COMPREHENSIVE
+#: bundle: which servers, which hosts, which packages, which arguments. That is the default
+#: and it is what we diagnose from.
+#:
+#: `strict` additionally removes identifiers — hosts, package names, command arguments — for
+#: a tester whose employer will not let internal infrastructure leave the machine. It is the
+#: difference between a bundle that is less useful and a bundle that is never sent.
+#:
+#: What is masked in BOTH modes is not a policy choice: credentials, server responses, env
+#: values and the person's own name are never diagnosis in any mode.
+_STRICT = False
+
+
+def set_strict(strict: bool) -> None:
+    """Choose the mode for this process. One-shot CLI: module state is the whole lifetime."""
+    global _STRICT
+    _STRICT = bool(strict)
+
+
+def is_strict() -> bool:
+    return _STRICT
+
+
 _HOME = re.compile(r"/(?:Users|home)/[^/\s\"']+")
 _WINHOME = re.compile(r"([A-Za-z]:\\{1,2})Users\\{1,2}[^\\\s\"']+")
 
@@ -109,6 +134,8 @@ def redact_query_values(url: str) -> str:
         parts = urlsplit(url)
     except ValueError:
         return "<redacted: unparseable url>"
+    if _STRICT and parts.scheme:
+        return f"<{parts.scheme}-url>"
     if parts.query:
         names = [name for name, _ in parse_qsl(parts.query, keep_blank_values=True)]
         masked = "&".join(f"{name}=<redacted>" for name in names) if names else "<redacted>"
@@ -120,13 +147,33 @@ def redact_query_values(url: str) -> str:
     return scrub_paths(urlunsplit(parts))
 
 
-def clean_text(value: str) -> str:
-    """The full free-text treatment: home paths, then URLs, then credential shapes.
+#: Hosts that describe OUR OWN plumbing rather than the customer's estate. A loopback
+#: address says "the gateway was listening", which is diagnosis; every other host is
+#: somewhere the tester's employer runs infrastructure.
+_LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "[::1]", "::1")
+_ANY_URL = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*)://([^\s\"'<>,;)}\]]+)")
 
-    Order matters and mirrors `runlog._mask`: URLs are masked before the generic pass, so a
-    credential inside a query string is caught as a URL parameter rather than mangled first.
+
+def _mask_host(match: re.Match) -> str:
+    scheme, rest = match.group(1), match.group(2)
+    host = rest.split("/")[0]
+    if any(host.startswith(loop) for loop in _LOOPBACK):
+        return match.group(0)
+    return f"<{scheme}-url>"
+
+
+def clean_text(value: str) -> str:
+    """The full free-text treatment: home paths, then hosts, then credential shapes.
+
+    Every non-loopback host is removed, not just the ones a detector calls sensitive. That
+    is what lets the bundle carry a claim a security team can verify in one grep: no
+    hostname of theirs appears anywhere in it. We lose our own diagnostic URLs (pypi.org in
+    a currency message) — a cheap price for a file that can actually be sent.
     """
-    return redact(redact_urls_in_text(scrub_paths(value))) or ""
+    text = scrub_paths(value)
+    if _STRICT:
+        text = _ANY_URL.sub(_mask_host, text)
+    return redact(redact_urls_in_text(text)) or ""
 
 
 def announce(value: Any) -> str:
@@ -149,7 +196,9 @@ def redact_record(record: Any) -> Any:
     if isinstance(record, dict):
         out: dict[str, Any] = {}
         for key, value in record.items():
-            if key in CONTENT_FIELDS:
+            if key in TARGET_FIELDS and isinstance(value, str):
+                out[key] = redact_command(value)
+            elif key in CONTENT_FIELDS:
                 out[key] = announce(value)
             elif key in URL_FIELDS and isinstance(value, str):
                 out[key] = redact_query_values(value)
@@ -191,3 +240,78 @@ def redact_jsonl(path: Path) -> tuple[str, int, int]:
             records += 1
             lines.append(json.dumps(redact_record(decoded), separators=(",", ":")))
     return ("\n".join(lines) + "\n" if lines else ""), records, undecodable
+
+
+#: Fields carrying a server's command line or endpoint. `runlog` stores these as
+#: `stdio:<the whole command>`, and on an enterprise machine that one string names the
+#: internal MCP endpoint, the OAuth client id, and the private artifactory host.
+TARGET_FIELDS = frozenset({"target", "command", "cmdline", "argv", "server_command"})
+
+_PREFIXES = ("stdio:", "http:", "https:", "sse:")
+#: Tokens safe to keep verbatim: subcommands, short flags, numbers. No dots, no slashes,
+#: no `@`, nothing long enough to be an identifier.
+_PLAIN = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
+_ENV_REF = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+
+
+def _token(tok: str) -> str:
+    """Classify one argv token and return it, or a label saying what it was.
+
+    Allow-list, not deny-list: a token is kept only when it CANNOT identify anything —
+    a subcommand, a flag name, a port. Everything else is labelled by kind, because the
+    kind is the diagnosis (`<url>` tells us it proxies somewhere; the host does not).
+    """
+    if _ENV_REF.match(tok):
+        return tok                                   # ${JIRA_PERSONAL_TOKEN} — a reference
+    if not _STRICT:
+        # Comprehensive mode: the argument is the diagnosis. Only structured blobs, which
+        # are where a client id or a token hides, are collapsed.
+        if tok.startswith(("{", "[")) or ('":' in tok):
+            return f"<json: {len(tok)} chars>"
+        return tok
+    if tok.startswith("-"):
+        name, sep, _ = tok.partition("=")
+        return f"{name}=<redacted>" if sep else name  # flag NAMES are the diagnosis
+    if "://" in tok:
+        return f"<{tok.split('://', 1)[0]}-url>"
+    if tok.startswith(("{", "[")) or ('":' in tok):
+        return f"<json: {len(tok)} chars>"
+    if "@" in tok and not tok.startswith("@" ) or tok.startswith("@"):
+        _, _, tag = tok.rpartition("@")
+        # The VERSION is the security finding (`@latest` is unpinned); the package is not ours.
+        return f"<package>@{tag}" if tag and _PLAIN.match(tag) else "<package>"
+    if "/" in tok or "\\" in tok:
+        return "<path-or-image>"
+    if _PLAIN.match(tok):
+        return tok
+    return f"<arg: {len(tok)} chars>"
+
+
+def redact_command(value: str) -> str:
+    """Keep the SHAPE of a server command, drop everything that identifies the customer.
+
+    A beta tester at a regulated company cannot email us their internal MCP endpoint,
+    their OAuth client id or their private registry host — so a diagnostic bundle that
+    carries them is a bundle that never gets sent, and the feature does not exist for
+    exactly the buyers it was built for.
+
+    What survives is what we actually diagnose from: the program, the transport, the flag
+    names, whether a package is pinned, and which env vars are referenced.
+    """
+    prefix = ""
+    body = value
+    for candidate in _PREFIXES:
+        if value.startswith(candidate):
+            prefix, body = candidate, value[len(candidate):]
+            break
+    if not prefix:
+        return clean_text(value)
+    if "://" in body and " " not in body.strip():
+        return f"{prefix}<{body.split('://', 1)[0]}-url>"
+    tokens = body.split()
+    if not tokens:
+        return value
+    program = Path(tokens[0]).name or tokens[0]
+    kept = [program if _PLAIN.match(program) else "<program>"]
+    kept += [_token(t) for t in tokens[1:]]
+    return prefix + " ".join(kept)

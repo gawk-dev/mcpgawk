@@ -438,6 +438,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rp.add_argument("--output", metavar="PATH",
                     help="write here instead of ./mcpgawk-report-<timestamp>.zip")
+    rp.add_argument("--strict", action="store_true",
+                    help="also remove hostnames, package names and command arguments — for a "
+                         "machine whose owner will not let internal infrastructure leave it "
+                         "(credentials, server responses and env values are always removed)")
     rp.add_argument("--note", metavar="TEXT",
                     help="what you were doing when it went wrong — travels in the bundle")
 
@@ -1311,7 +1315,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if args.cmd == "report":
         from .report import run as _report
-        return _report(output=args.output, note=args.note)
+        return _report(output=args.output, note=args.note, strict=args.strict)
 
     if args.cmd == "runs":
         return _runs(args)
