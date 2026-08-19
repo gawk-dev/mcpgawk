@@ -193,10 +193,92 @@ def test_strict_mode_names_no_host_of_theirs_anywhere(machine, tmp_path):
 
     dest = tmp_path / "hosts.zip"
     assert report.run(output=str(dest), strict=True) == 0
-    urls = set(re.findall(r"[a-z]+://[^\s\"'<>,;)}\]]+", _bundle_text(dest)))
+    text = _bundle_text(dest)
+    urls = set(re.findall(r"[a-z]+://[^\s\"'<>,;)}\]]+", text))
     leaked = [u for u in urls
               if not re.match(r"^[a-z]+://(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", u)]
+    # BARE hosts too. The first version of this test looked only for `scheme://` and passed
+    # while a real --strict bundle still named 17 hosts, because the egress records that carry
+    # our best findings look like {"host": "api.example.com:443"} with no scheme to spot.
+    # A test that checks a narrower thing than it claims is worse than no test.
+    bare = {h for h in re.findall(r'"host(?:name)?":\s*"([^"]+)"', text)}
+    leaked += [h for h in bare
+               if not h.startswith("<") and not h.startswith(("127.", "0.0.0.0", "[::1]"))
+               and "localhost" not in h]
     assert not leaked, f"the bundle names hosts the tester's employer runs: {leaked}"
+    assert "api.kite.trade" not in text, "the egress host survived strict mode"
+
+
+def test_the_privacy_notice_describes_the_mode_that_actually_ran(machine, tmp_path):
+    """The notice a tester reads before deciding to send the file must match the file.
+
+    Caught on a real run: the block still described an earlier design and told the reader
+    that web addresses lose their values, while the default bundle was carrying hostnames,
+    package names and command lines. A tester would have read it, believed hostnames were
+    stripped, and sent it anyway. That is a claim the computation does not support — inside
+    the command built to find exactly that.
+    """
+    from mcpgawk import report_redact
+
+    full = report.render_summary(report.collect())
+    assert "KEPT" in full and "--strict" in full
+    assert "addresses your servers" in full, "full mode must SAY it keeps hostnames"
+
+    report_redact.set_strict(True)
+    try:
+        strict = report.render_summary(report.collect())
+    finally:
+        report_redact.set_strict(False)
+    assert "REMOVED because you asked for --strict" in strict
+    assert "KEPT, because they are usually the finding" not in strict, (
+        "the strict bundle must not tell the reader it kept hostnames"
+    )
+
+
+def test_every_claim_the_summary_prints_is_true_of_the_file_it_wrote(machine, tmp_path):
+    """The gate for the class, not for the two instances that were caught by hand.
+
+    Both defects a human found in the first ninety seconds of using this command were in
+    printed text that no test read: a privacy notice describing a design that had been
+    replaced, and a mode line promising hosts were removed while seventeen remained. The
+    unit tests were green throughout, because they tested the redactors and never the page.
+
+    So: parse what the command PRINTS and check each claim against the bundle it produced.
+    A summary is a set of assertions about a file, and assertions are checkable.
+    """
+    import re
+
+    dest = tmp_path / "claims.zip"
+    assert report.run(output=str(dest)) == 0
+    bundle = report.collect()
+    summary = report.render_summary(bundle)
+
+    with zipfile.ZipFile(dest) as archive:
+        manifest = {s["name"]: s for s in json.loads(archive.read("manifest.json"))["sections"]}
+        present = set(archive.namelist())
+
+    # 1. every state word printed matches the manifest's state for that section
+    for line in summary.splitlines():
+        m = re.match(r"\s+(?:ok|--|!!|\?\?)\s+(\S+)\s+(included|empty|unavailable)\b", line)
+        if not m:
+            continue
+        name, printed = m.group(1), m.group(2)
+        assert name in manifest, f"the summary prints a section '{name}' the manifest does not have"
+        assert manifest[name]["state"] == printed, (
+            f"summary says {name} is {printed}, manifest says {manifest[name]['state']}"
+        )
+
+    # 2. a section the summary calls `included` must have actually put a file in the zip
+    for name, section in manifest.items():
+        if section["state"] == INCLUDED_STATE and section.get("bytes"):
+            assert present, "an included section claimed bytes but the archive is empty"
+
+    # 3. the headline files the summary implies exist, exist
+    for required in ("summary.txt", "manifest.json"):
+        assert required in present, f"{required} is promised by the format and missing"
+
+
+INCLUDED_STATE = "included"
 
 
 def test_a_fresh_machine_produces_a_bundle_and_not_a_crash(tmp_path, monkeypatch):

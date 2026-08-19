@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.30"
+version = "0.1.29"
 description = "One gateway in front of every MCP server your agents can reach — every call checked against a baseline you approved. Local-first: nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"

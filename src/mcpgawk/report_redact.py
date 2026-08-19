@@ -147,11 +147,37 @@ def redact_query_values(url: str) -> str:
     return scrub_paths(urlunsplit(parts))
 
 
+_ANY_URL = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*)://([^\s\"'<>,;)}\]]+)")
+
+
 #: Hosts that describe OUR OWN plumbing rather than the customer's estate. A loopback
 #: address says "the gateway was listening", which is diagnosis; every other host is
 #: somewhere the tester's employer runs infrastructure.
 _LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "[::1]", "::1")
-_ANY_URL = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*)://([^\s\"'<>,;)}\]]+)")
+
+#: Fields naming a network destination as a BARE host, with no scheme to spot it by. The
+#: egress records that carry our best findings look like {"host": "api.example.com:443"} —
+#: no `://` anywhere, so URL masking walks straight past them. Found by grepping a real
+#: --strict bundle, which still named 17 hosts while the mode line promised none.
+HOST_FIELDS = frozenset({"host", "hostname", "authority", "netloc", "remote_host"})
+
+_PSEUDONYMS: dict[str, str] = {}
+
+
+def reset_pseudonyms() -> None:
+    _PSEUDONYMS.clear()
+
+
+def pseudonym(host: str) -> str:
+    """A stable stand-in per bundle, so the ANALYSIS survives strict mode.
+
+    Blanking every host would answer "did it talk to anything" with nothing. A consistent
+    label keeps what we actually reason about — how many distinct destinations there were,
+    which repeated, whether one server contacted many — while naming none of them.
+    """
+    if any(host.startswith(loop) for loop in _LOOPBACK):
+        return host
+    return _PSEUDONYMS.setdefault(host, f"<host-{len(_PSEUDONYMS) + 1}>")
 
 
 def _mask_host(match: re.Match) -> str:
@@ -196,7 +222,9 @@ def redact_record(record: Any) -> Any:
     if isinstance(record, dict):
         out: dict[str, Any] = {}
         for key, value in record.items():
-            if key in TARGET_FIELDS and isinstance(value, str):
+            if _STRICT and key in HOST_FIELDS and isinstance(value, str):
+                out[key] = pseudonym(value)
+            elif key in TARGET_FIELDS and isinstance(value, str):
                 out[key] = redact_command(value)
             elif key in CONTENT_FIELDS:
                 out[key] = announce(value)

@@ -38,7 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .report_redact import clean_text, redact_jsonl, redact_record, scrub_paths
+from .report_redact import (clean_text, is_strict, redact_jsonl, redact_record,
+                            scrub_paths)
 
 INCLUDED = "included"
 EMPTY = "empty"
@@ -465,9 +466,31 @@ def render_summary(bundle: Bundle, note: str | None = None) -> str:
         lines += ["WHAT THE TESTER WAS DOING", "", "  " + clean_text(note), ""]
     lines += [
         "PRIVACY", "",
-        "  Server responses are removed by field name, home directories appear as ~, and",
-        "  every URL keeps its parameter names and loses their values. Tool arguments are",
-        "  never recorded by the guard in the first place. Read this file before sending it.",
+        "  ALWAYS removed, in either mode: credentials and API keys, whatever a server",
+        "  RETURNED (your files, tickets, mail, holdings), the VALUES of your environment",
+        "  variables, the query values in any web address, and your user and machine name.",
+        "  Tool arguments are never recorded by the guard in the first place.",
+        "",
+    ]
+    # The mode decides what else is in the file, so it is stated HERE rather than only in a
+    # flag's help. A privacy notice that describes a different mode than the one that ran is
+    # the same defect this command exists to find: a claim the computation does not support.
+    if is_strict():
+        lines += [
+            "  REMOVED because you asked for --strict: hostnames and server addresses,",
+            "  package names, and the arguments each server is launched with.",
+            "",
+        ]
+    else:
+        lines += [
+            "  KEPT, because they are usually the finding itself: the addresses your servers",
+            "  contact, their package names, and the arguments they are launched with. If your",
+            "  employer would object to those leaving the machine, run `mcpgawk report --strict`",
+            "  instead and they are removed too.",
+            "",
+        ]
+    lines += [
+        "  Read this file before you send it — it is a plain zip and every part is text.",
         "",
     ]
     return "\n".join(lines)
@@ -499,6 +522,9 @@ def run(output: str | None = None, note: str | None = None, strict: bool = False
     from .report_redact import set_strict
 
     set_strict(strict)
+    from .report_redact import reset_pseudonyms
+
+    reset_pseudonyms()
     bundle = collect(note)
     dest = Path(output) if output else Path.cwd() / f"mcpgawk-report-{_utc()}.zip"
     try:
