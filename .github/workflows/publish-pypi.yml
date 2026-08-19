@@ -61,6 +61,15 @@ jobs:
             echo "Already published — skipping."
             echo "SKIP=1" >> "$GITHUB_ENV"
           fi
+          # A version OLDER than what is live is never a release — it is a bump that did not
+          # happen. public_sync rewrites this file's version FROM CANONICAL, so bumping the
+          # public copy is silently reverted by the next sync; twine --skip-existing then
+          # skips every file and the job reports success having shipped nothing.
+          OLDER=$(python -c "from packaging.version import Version; print('yes' if Version('$LOCAL') < Version('$LIVE') else 'no')" 2>/dev/null || echo no)
+          if [ "$OLDER" = "yes" ]; then
+            echo "::error::pyproject says $LOCAL but PyPI already serves $LIVE. Bump the version in the CANONICAL repo and re-run public_sync — bumping it here is reverted by the next sync."
+            exit 1
+          fi
 
       - run: python -m pip install --upgrade pip build
         if: env.SKIP != '1'
@@ -107,3 +116,22 @@ jobs:
             sleep 20
           done
           echo "::error::twine upload failed after 3 attempts"; exit 1
+
+      - name: PyPI must actually serve the version we just built
+        if: env.SKIP != '1'
+        run: |
+          # `twine --skip-existing` exits 0 when it uploaded NOTHING, so "upload ok" is not
+          # evidence of a release. This step is the evidence: PyPI itself must name our
+          # version as the current one. Without it a publish can ship nothing and still go
+          # green — which is exactly what happened on 2026-08-19.
+          for attempt in 1 2 3 4 5 6; do
+            LIVE=$(python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('https://pypi.org/pypi/mcpgawk/json'))['info']['version'])" 2>/dev/null || echo none)
+            echo "attempt $attempt: pypi serves $LIVE, we built $LOCAL_VERSION"
+            if [ "$LIVE" = "$LOCAL_VERSION" ]; then
+              echo "confirmed: $LOCAL_VERSION is live on PyPI"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::the job uploaded but PyPI does not serve $LOCAL_VERSION — nothing shipped"
+          exit 1
