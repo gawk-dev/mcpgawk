@@ -103,7 +103,8 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
-           monitor_open: int | None = None, baseline_error: str | None = None) -> str:
+           monitor_open: int | None = None, baseline_error: str | None = None,
+           agents_error: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
@@ -113,7 +114,11 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
     out: list[str] = ["", "  RUNTIME CHECKING"]
 
     if not agents:
-        out.append("      No MCP-using agents found on this machine.")
+        if agents_error:
+            out.append(f"      Agent discovery FAILED ({agents_error}) — whether anything on this")
+            out.append("      machine calls MCP servers is UNKNOWN, not none.")
+        else:
+            out.append("      No MCP-using agents found on this machine.")
     # Width from the longest label present, so a long client id cannot shunt the state column out
     # of alignment — the state is the part being scanned for.
     width = max((len(_label(c)) for c in agents), default=0)
@@ -177,7 +182,7 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
     if enforce_available:
         out.append("      available — mcpgawk enforce install")
     else:
-        out.append("      not installed in this environment (part of gawk Platform)")
+        out.append("      not installed in this environment (part of mcpgawk Platform)")
     # Monitor de-duplicates alerts, so "0 new" is not "nothing wrong". An UNACKNOWLEDGED alert is
     # an open question about a server you trusted, and it belongs on the screen that answers
     # "am I protected?" — this surface did not read monitor at all.
@@ -257,8 +262,14 @@ def collect_and_render() -> str:
         found = discover_servers()
         entries = found[0] if isinstance(found, tuple) else found
         agents = agents_on_this_machine(entries)
-    except Exception:                              # noqa: BLE001
-        agents = {}
+    except Exception as exc:                       # noqa: BLE001
+        # NOT `agents = {}`. Discovery failing and this machine having no agents produced the same
+        # value, and therefore the same sentence — "No MCP-using agents found on this machine." —
+        # on the one screen that answers "am I protected?". The marker travels with the result so
+        # the renderer can tell the two apart, the same fix `load_checked` made for the store.
+        agents, agents_error = {}, f"{type(exc).__name__}: {exc}"
+    else:
+        agents_error = None
 
     try:
         # load_checked, not load: `load` degrades an unreadable store to {"servers": {}}, which is
@@ -342,6 +353,7 @@ def collect_and_render() -> str:
         behavioural_unavailable = None
 
     return render(hook_health=hook_health, guard_path=guard_path, agents=agents,
+                  agents_error=agents_error,
                   baseline_total=baseline_total, pending=pending,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,

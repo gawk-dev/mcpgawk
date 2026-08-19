@@ -106,7 +106,7 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
         return 3, f"mcpgawk verify: could not start the engine ({exc})"
 
 
-#: Flags that belong to gawk Platform's SOURCE AUDITOR, not to the TS engine. They are handled on
+#: Flags that belong to mcpgawk Platform's SOURCE AUDITOR, not to the TS engine. They are handled on
 #: the Python side (the auditor is Python). Before 2026-08-07 the free wrapper passed them
 #: straight through to an engine that had never heard of them: `--audit-source` was silently
 #: ignored, and `--source-dir <path>`'s PATH was read as the positional config argument — a run
@@ -118,7 +118,7 @@ def _wants_source_audit(argv: list[str]) -> bool:
 
 
 _AUDIT_NEEDS_PLATFORM = (
-    "mcpgawk verify --audit-source: source audit is a gawk Platform capability and the Platform "
+    "mcpgawk verify --audit-source: source audit is a mcpgawk Platform capability and the Platform "
     "isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "Behavioural verification itself is free: re-run without --audit-source / --source-dir."

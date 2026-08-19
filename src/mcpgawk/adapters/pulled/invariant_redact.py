@@ -1,14 +1,14 @@
 # Portions adapted from Invariant Labs / Snyk agent-scan (Apache-2.0, © 2025 Invariant Labs AG),
 #   github.com/invariantlabs-ai/mcp-scan (now snyk/agent-scan)
 #   @ 74ad3eaa018521d3aec5ae6599e13462000dbfa6 (src/agent_scan/redact.py, `redact_absolute_paths`).
-#   Modified by the gawk platform: ported verbatim, unchanged algorithm — this function has been
+#   Modified by the mcpgawk Platform: ported verbatim, unchanged algorithm — this function has been
 #   byte-identical across every version of the upstream project checked (from its original
 #   mcp_scan module name through the Agent Scan rebrand). No cloud-egress paths existed in this
 #   function to remove. See THIRD_PARTY_LICENSES.md.
 #
 #   `redact_command_args` below is NOT ported — see its own docstring: the upstream project's
 #   current `redact_args` depends on the `detect-secrets` library (format/entropy/keyword
-#   detectors), which the gawk platform deliberately doesn't add as a dependency (same call as
+#   detectors), which the mcpgawk Platform deliberately doesn't add as a dependency (same call as
 #   skipping the ML-based PII/prompt-injection detectors elsewhere in the extraction inventory —
 #   real operational cost for a product that wants to stay dependency-light). It reimplements the
 #   SAME CONCEPT (redact CLI flag values, since a launch command's argv often carries secrets as

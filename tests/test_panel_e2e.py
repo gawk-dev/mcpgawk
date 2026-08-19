@@ -313,8 +313,21 @@ def test_drift_is_pending_until_approved_via_the_button(panel):
     assert rec["approved"]["texts"]["tool.read_notes"] == CLEAN_DESC
     assert rec["approved"]["items"] != rec["history"][-1]["items"]
     # The drifted state must be visible to the operator on the tokened page.
+    #
+    # This used to be `assert "drift" in body.lower()`, which passed for the WRONG REASON: the
+    # substring was supplied by the Activity tab's empty-state sentence ("Nothing has DRIFTed or
+    # overstepped its approved baseline"), not by anything about this server. Rewording that
+    # sentence on 2026-08-18 turned the test red and exposed that it had never checked its own
+    # stated intent. Assert what an operator would actually have to see:
     _, body = panel.get("/")
-    assert "drift" in body.lower()
+    low = body.lower()
+    assert "fixture" in low, "the drifted server is not named on the page at all"
+    assert "changed" in low, (
+        "the page never uses the 'Changed' tier — the vocabulary TIERS defines for a server that "
+        "moved since you approved it (panel.py:278)")
+    # ...and it must NOT be filed under the tier that means the opposite.
+    assert 'class="seg baseline"' not in body or "at baseline" not in low.split("fixture")[0][-200:], (
+        "the drifted server appears to be rendered as 'At baseline'")
 
     # Keep is the documented no-op: message only, baseline untouched.
     status, _ = panel.post("keep", key="mcp:fixture")

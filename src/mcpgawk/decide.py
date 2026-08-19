@@ -30,9 +30,11 @@ from __future__ import annotations
 import html
 import os
 import secrets
+import sqlite3
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote_plus, urlparse
 
@@ -62,6 +64,53 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
             "hostile": list(report.hostile),
             "seen_at": latest.get("seen") or "",
         })
+    return out
+
+
+def uncovered(store: dict[str, Any], monitor_db: Path | str | None = None) -> dict[str, Any]:
+    """What this page CANNOT speak for.
+
+    `pending_decisions` compares an approved baseline against the latest scan, and skips any server
+    that has no approved baseline — silently. The empty state then said "Every server your agents
+    can reach matches the baseline you approved", which is a claim about servers it never examined.
+    On the founder's own machine that sentence was shown while four servers had seven unaccepted
+    monitor alerts, three of them with no baseline at all and one (`kite`) that had stopped
+    answering entirely — a server that could not be measured is not a server that matches.
+
+    Absence is not coverage. This returns the gaps so the page can name them instead of implying
+    they do not exist. Read-only, tolerant of a missing/locked monitor DB: the FREE page must never
+    require the paid monitor to render, and a DB it cannot read is reported as unknown, never as
+    zero.
+    """
+    # NOT `history.approved()` — that deliberately falls back to a server's OLDEST sighting when
+    # nobody ever approved anything (ADR-0012, so an upgrade cannot silently adopt a live state).
+    # Which means the page can say "the baseline you approved" about a record the human never
+    # approved. The honest test is whether an explicit approval exists.
+    seen_unapproved = [history.display_name(store, k)
+                       for k, entry in store.get("servers", {}).items()
+                       if entry.get("history") and "approved" not in entry]
+    out: dict[str, Any] = {"unapproved": sorted(seen_unapproved),
+                           "alerts": None, "alert_servers": []}
+    # Same resolution the panel uses (GAWK_BEHAVIOUR_PROFILE's parent, else ~/.gawk), NOT a
+    # hardcoded ~/.gawk: the hardcoded form is how state paths escape test redirection.
+    if monitor_db:
+        db = Path(monitor_db)
+    else:
+        override = os.environ.get("GAWK_BEHAVIOUR_PROFILE")
+        db = (Path(override).parent if override else Path.home() / ".gawk") / "monitor.db"
+    if not Path(db).is_file():
+        return out                                  # monitor never ran here — not "zero alerts"
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT server_id, COUNT(*) FROM open_alerts "
+                               "GROUP BY server_id ORDER BY server_id").fetchall()
+        finally:
+            con.close()
+        out["alerts"] = sum(n for _, n in rows)
+        out["alert_servers"] = [s for s, _ in rows]
+    except Exception:                               # noqa: BLE001 — unknown, and it says so
+        pass
     return out
 
 
@@ -108,14 +157,35 @@ def _diff_block(report: drift.DriftReport) -> str:
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
 
 
-def render_page(items: list[dict[str, Any]], token: str, note: str = "") -> str:
+def render_page(items: list[dict[str, Any]], token: str, note: str = "",
+                gaps: dict[str, Any] | None = None) -> str:
     """The whole UI. One file, no assets, no network — it must work on a machine with no internet
     and must never fetch anything, because a security tool that phones out to render itself is
     making a claim it cannot keep."""
     if not items:
+        # SCOPED, not total. This page compares approved baselines against the latest scan; it
+        # does not read the monitor's alerts and it cannot speak for a server that was never
+        # approved. Claiming "every server your agents can reach matches" was a confident zero
+        # over a set it never examined — shown on the founder's machine while seven monitor
+        # alerts sat unaccepted. Say what was checked, then name what was not.
+        g = gaps or {}
+        notes = []
+        if g.get("unapproved"):
+            names = ", ".join(_esc(n) for n in g["unapproved"][:6])
+            more = f" and {len(g['unapproved']) - 6} more" if len(g["unapproved"]) > 6 else ""
+            notes.append(f'<p class="gap">{len(g["unapproved"])} server(s) have never been '
+                         f'approved, so nothing here compares them: {names}{more}. '
+                         f'Run <code>mcpgawk scan</code>, then approve what you trust.</p>')
+        if g.get("alerts"):
+            who = ", ".join(_esc(n) for n in g.get("alert_servers", [])[:6])
+            notes.append(f'<p class="gap">Monitoring is holding <b>{g["alerts"]} unaccepted '
+                         f'alert(s)</b> on {who}. This page does not cover those — a server that '
+                         f'changed or stopped answering is not a server that matches. '
+                         f'See <code>mcpgawk monitor status</code>.</p>')
         body = ('<div class="done"><h1>Nothing is waiting on you.</h1>'
-                '<p>Every server your agents can reach matches the baseline you approved. '
-                'This page opens when that stops being true.</p></div>')
+                '<p>Every server with an approved baseline still matches it. '
+                'This page opens when that stops being true.</p>'
+                + "".join(notes) + '</div>')
     else:
         cards = []
         for it in items:
@@ -159,7 +229,7 @@ h2{{font-size:20px;letter-spacing:-.015em;margin:0}}
 padding:22px 24px;margin-bottom:18px}}
 .card.danger{{border-left-color:var(--bad)}}
 .head{{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}}
-.pill{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+.pill{{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
 padding:2px 8px;border-radius:99px;border:1px solid var(--bad);color:var(--bad)}}
 .sub{{color:var(--muted);font-size:15px;margin:6px 0 16px}}
 .ev{{border-top:1px solid var(--rule);padding:12px 0}}
@@ -177,6 +247,8 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink);cursor:pointe
 font-size:15px}}
 .done{{background:var(--card);border:1px solid var(--rule);padding:28px 26px}}
 .done p{{color:var(--muted);margin:0}}
+.done p.gap{{margin-top:14px;padding-top:14px;border-top:1px solid var(--rule);color:var(--fg)}}
+.done p.gap code{{font-family:var(--mono,ui-monospace,monospace);color:var(--muted)}}
 .foot{{color:var(--muted);font-size:13px;margin-top:26px;font-family:var(--mono)}}
 </style></head><body><div class="wrap">{msg}{body}
 <div class="foot">local only · nothing leaves this machine · close the tab when you are done</div>
@@ -259,7 +331,7 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         shown = (server.token
                  if secrets.compare_digest((q.get("t") or [""])[0], server.token) else "")
         self._send(200, render_page(pending_decisions(store), shown,
-                                    getattr(self.server, "note", "")))
+                                    getattr(self.server, "note", ""), uncovered(store)))
 
     def do_POST(self) -> None:              # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
@@ -313,8 +385,17 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
 
     store = history.load(history.default_path())
     waiting = len(pending_decisions(store))
-    log(f"\n  {waiting} server(s) waiting on a decision." if waiting
-        else "\n  Nothing is waiting on you — opening anyway so you can see the state.")
+    if waiting:
+        log(f"\n  {waiting} server(s) waiting on a decision.")
+    else:
+        # The SAME scoping the page uses. This line is what a user reads before the browser even
+        # opens, so an all-clear here is read exactly as hard as one on the page.
+        gaps = uncovered(store)
+        log("\n  No server with an approved baseline has changed since you approved it.")
+        if gaps.get("alerts"):
+            who = ", ".join(gaps.get("alert_servers", [])[:6])
+            log(f"  ⚠ monitoring is separately holding {gaps['alerts']} unaccepted alert(s) on "
+                f"{who} — not covered here. `mcpgawk monitor status`")
     # The token is printed HERE and nowhere else: a human reading their own terminal sees it, and
     # an agent reading a hook denial or the spool never does.
     log(f"  {url}\n  Ctrl-C when you are done.\n")

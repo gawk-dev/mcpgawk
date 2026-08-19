@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Free, and included here:\n"
             "  verify    run a server in a sandbox and watch what it actually does\n"
             "  decide    review and approve servers that changed since you trusted them\n\n"
-            "gawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
+            "mcpgawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
             + "Run `mcpgawk <capability>` once subscribed. Scanning, behavioural verification\n"
             + "and the runtime guard stay free and open-source.\n\n"
@@ -226,14 +226,45 @@ def build_parser() -> argparse.ArgumentParser:
     # cosmetic: this CLI shipped without it, so a seven-release-stale install stayed invisible for
     # six days while every "verified live" claim was checked against the repo instead of the
     # binary. A tool that cannot state its own version cannot be supported.
-    p.add_argument("--version", action="version", version=f"mcpgawk {_installed_version()}")
+    # ...and it must answer the question a person is ACTUALLY asking. A tester ran this, read
+    # `mcpgawk 0.1.29`, and reported it as a problem — because the number alone cannot tell you
+    # whether it is the current build. Settling that took eight checks across three registries
+    # (2026-08-19). The staleness check already fetches PyPI on ordinary runs; --version now says
+    # what it found. Line one is unchanged, byte for byte, because install.sh and every human habit
+    # depend on it.
+    #
+    # A CUSTOM ACTION, not `action="version"`: the latter needs its string at parser-BUILD time,
+    # which would put a network call in front of `--help` and every subcommand.
+    class _Version(argparse.Action):
+        def __init__(self, option_strings, dest, **kw):
+            super().__init__(option_strings, dest, nargs=0, **kw)
+
+        def __call__(self, parser_, namespace, values, option_string=None):
+            print(f"mcpgawk {_installed_version()}")
+            try:
+                from .staleness import currency_line
+                print(f"  {currency_line()}")
+            except Exception:                      # noqa: BLE001 — never fail the one command
+                pass                               # that people run when something is wrong
+            parser_.exit()
+
+    p.add_argument("--version", action=_Version)
     sub = p.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("install-node",
-                       help="fetch the Node runtime `verify` needs (26 MB download, no admin rights)")
+                       help="fetch the Node runtime `verify` needs (26 MB download, no admin rights)",
+                       description="Download the Node runtime that `verify` uses to run a server "
+                                   "in a sandbox. About 26 MB, into mcpgawk's own directory: no "
+                                   "admin rights, and nothing on the system is changed.")
     n.add_argument("--yes", "-y", action="store_true",
                    help="skip the confirmation — required in a non-interactive session, because "
                         "this downloads and then RUNS third-party code")
-    s = sub.add_parser("scan", help="measure MCP server(s) locally")
+    s = sub.add_parser("scan", help="measure MCP server(s) locally",
+                       description="Measure MCP servers on this machine: every tool they expose, "
+                                   "what each one costs your context window, and what it can "
+                                   "reach. With no argument it reads every agent config it can "
+                                   "find. Give it a config path to scan only that client. Local "
+                                   "servers are launched only after you say yes, because scanning "
+                                   "one means running its code.")
     s.add_argument("config", nargs="?", help="path to an mcp.json config")
     s.add_argument("--stdio", help='one stdio server, e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp"')
     s.add_argument("--http", help="one streamable-HTTP server URL")
@@ -306,7 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--server", metavar="NAME", help="one server (name or alias) instead of all")
 
     a = sub.add_parser("approve",
-                       help="accept a server's current tools as the trusted baseline (clears DRIFT)")
+                       help="accept a server's current tools as the trusted baseline (clears DRIFT)",
+                       description="Accept a server's current tools as the baseline you trust. "
+                                   "Until you do, a tool that appeared after the last baseline is "
+                                   "treated as drift and its calls are blocked. Run it with no "
+                                   "server name to see what is waiting.")
     a.add_argument("server", nargs="?",
                    help="the server name as it appears in your config, or its asserted identity")
     a.add_argument("--all", action="store_true", help="approve every server with pending drift")
@@ -388,11 +423,29 @@ def build_parser() -> argparse.ArgumentParser:
                     "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
                     "Claude Code only, so a single cheerful tick would tell a Cursor user they "
                     "are covered when they are not.")
+    rp = sub.add_parser(
+        "report",
+        help="write ONE file we can diagnose from — send it when something goes wrong",
+        description=(
+            "Collects everything about this machine into a single redacted zip: version and "
+            "how mcpgawk was installed, per-agent hook state, the entire run history, the "
+            "entire call log, every verify run, open drift alerts, and an inventory of both "
+            "state directories. Nothing is uploaded — the command prints a path and stops. "
+            "Server responses are removed by field name, home directories become ~, and every "
+            "URL keeps its parameter names and loses their values. A store that could not be "
+            "read is listed as 'unavailable', which means nobody looked — never 'nothing there'."
+        ),
+    )
+    rp.add_argument("--output", metavar="PATH",
+                    help="write here instead of ./mcpgawk-report-<timestamp>.zip")
+    rp.add_argument("--note", metavar="TEXT",
+                    help="what you were doing when it went wrong — travels in the bundle")
+
     r = sub.add_parser(
         "runs",
         help="what has run on this machine, and how it went",
         description=(
-            "Your local run history — scans, and (with gawk Platform) verify, enforce and monitor "
+            "Your local run history — scans, and (with mcpgawk Platform) verify, enforce and monitor "
             "runs, newest first. Read from ~/.mcpgawk/runs.db; nothing is uploaded anywhere. "
             "A run that never closed shows as RUNNING, and as INCOMPLETE once its process is gone "
             "— it is never reported as success."
@@ -514,12 +567,28 @@ def _skills(args) -> int:
         for s in snaps:
             hosts = ", ".join(s.hosts)
             print(f"\n  {s.name}  ({s.root}; loaded by: {hosts})")
-            scope = f"    {len(s.files)} file(s) scanned"
+            # "scanned" meant "recorded", and a binary file is recorded with a hash and never
+            # content-scanned — so a skill shipping a .bin/.pdf payload reported "12 file(s)
+            # scanned … clean". Say how many were actually READ.
+            read_n = sum(1 for f in s.files if getattr(f, "kind", "") not in ("binary", "oversize"))
+            scope = f"    {read_n} file(s) content-scanned of {len(s.files)} recorded"
             if s.capped:
-                scope += f" of {s.files_seen} seen — CAPPED, the remainder was not examined"
+                scope += f" ({s.files_seen} seen — CAPPED, the remainder was not examined)"
             print(scope)
+            if s.skipped:
+                # The file cap already announced itself and these did not. A payload at depth 11,
+                # behind a symlink, or in an unreadable directory left no trace at all.
+                print(f"    {len(s.skipped)} path(s) NOT examined — absence of a finding does not "
+                      f"cover them:")
+                for rel, why in s.skipped[:8]:
+                    print(f"      {rel} — {why}")
+                if len(s.skipped) > 8:
+                    print(f"      …and {len(s.skipped) - 8} more")
             if not s.findings:
-                print("    clean under the local detectors")
+                unread = (len(s.files) - read_n) + len(s.skipped)
+                print("    clean under the local detectors" if not unread else
+                      f"    no findings in what was read — {unread} file(s)/path(s) were not "
+                      f"content-scanned, so this is not a clean bill")
             for f in s.findings:
                 print(f"    ⚠ [{f.kind}] {f.tool}: {f.evidence}")
         if snaps:
@@ -539,6 +608,11 @@ def _baseline(args) -> int:
     """
     from . import baseline as _baseline_mod
 
+    # Third surface of the same defect: `baseline.export` reads through history.load, so an
+    # unreadable store exported as "Nothing approved yet" — indistinguishable from a fresh machine
+    # on the command whose entire job is showing what you agreed to trust.
+    _, _store_err = _store_or_say_why(getattr(args, "history", None))
+    _warn_if_store_unreadable(_store_err)
     data = _baseline_mod.export(getattr(args, "history", None))
     servers = data["servers"]
 
@@ -556,6 +630,10 @@ def _baseline(args) -> int:
         return 0
 
     if not servers:
+        if _store_err:
+            print("Nothing can be shown — the approval store is unreadable, so what you approved "
+                  "is UNKNOWN. See the warning above.")
+            return 1
         print("Nothing approved yet. Run `mcpgawk scan`, then `mcpgawk approve <server>` to set "
               "the baseline that verify and monitor will compare against.")
         return 0
@@ -572,6 +650,31 @@ def _baseline(args) -> int:
     return 0
 
 
+def _store_or_say_why(path: str | None = None) -> "tuple[dict, str | None]":
+    """Read the trust store, and hand back WHY it came back empty.
+
+    `history.load()` throws away the reason `load_checked()` was built to return, and every CLI
+    surface used it. Proven 2026-08-18 with a truncated history.json — the file holding every
+    approval — where `mcpgawk approve --list` answered "Nothing to approve — every tracked server
+    matches its approved baseline." An unreadable store rendered as a clean bill of health on the
+    command a user runs to ask exactly that question.
+
+    panel.py and status.py were fixed for this; the CLI was not. Degrading rather than raising is
+    still right — a security tool that refuses to start because its own store is damaged does more
+    harm than the drift it was watching — but the reason has to travel with the result.
+    """
+    store, err = history.load_checked(path or history.default_path())
+    return store, err
+
+
+def _warn_if_store_unreadable(err: "str | None") -> None:
+    if err:
+        print(f"mcpgawk: WARNING — the approval store could not be read ({err}).\n"
+              f"         What follows is NOT a clean result; it is no result. Nothing below can "
+              f"be trusted as 'unchanged' until this file is readable again:\n"
+              f"         {history.default_path()}", file=sys.stderr)
+
+
 def _approve(args) -> int:
     """`mcpgawk approve` — move the trusted baseline forward, deliberately."""
     # THE HUMAN GATE. Approval is the moment trust moves, and a blocked call is precisely when an
@@ -582,11 +685,16 @@ def _approve(args) -> int:
         print(f"mcpgawk approve: refusing — {blocked}", file=sys.stderr)
         return 4
     path = history.default_path()
-    store = history.load(path)
+    store, _store_err = _store_or_say_why(path)
+    _warn_if_store_unreadable(_store_err)
     waiting = history.pending(store)
 
     if args.list or (not args.server and not args.all):
         if not waiting:
+            if _store_err:
+                print("Nothing to compare — the approval store is unreadable, so whether anything "
+                      "changed is UNKNOWN. See the warning above.")
+                return 1
             print("Nothing to approve — every tracked server matches its approved baseline.")
             return 0
         print(f"{len(waiting)} server(s) changed since you approved them:\n")
@@ -652,7 +760,7 @@ def _wrong(args) -> int:
     return 0
 
 
-# The paid capabilities, reachable as `mcpgawk <capability>` when gawk Platform is installed.
+# The paid capabilities, reachable as `mcpgawk <capability>` when mcpgawk Platform is installed.
 #
 # ONE BINARY, on purpose (2026-07-26). Two reasons, both load-bearing:
 #   1. `gawk` cannot be an executable name. It is GNU AWK — it owns /usr/bin/gawk across the
@@ -697,7 +805,7 @@ ACCOUNT_COMMANDS = {
 #: reply must confirm they are in the right place and name the ONE missing step — never read as
 #: "you typed something wrong".
 _ACCOUNT_NEEDS_PLATFORM = (
-    "mcpgawk {cmd}: the gawk Platform isn't installed in this environment yet.\n"
+    "mcpgawk {cmd}: the mcpgawk Platform isn't installed in this environment yet.\n"
     "Your licence unlocks it, and your purchase email has the one-line install command.\n"
     "Lost it? https://mcp.gawk.dev/activate.html — or reply to the receipt and we'll resend.\n"
     "The free scanner (`mcpgawk scan`) keeps working either way."
@@ -705,7 +813,7 @@ _ACCOUNT_NEEDS_PLATFORM = (
 
 
 def _run_account_command(command: str, rest: list[str]) -> int:
-    """Delegate an account command to gawk Platform, or explain honestly that it isn't here.
+    """Delegate an account command to mcpgawk Platform, or explain honestly that it isn't here.
 
     Same optional-local-import shape as the capabilities: the free scanner is published to PyPI on
     its own and must never depend on, or ship, the paid engine.
@@ -723,12 +831,12 @@ def _run_account_command(command: str, rest: list[str]) -> int:
 #: carried into this dispatch and `push` was not — so the dashboard referenced a command that no
 #: install, free or paid, could actually run. Same optional-import delegation as everything paid.
 PLATFORM_COMMANDS = {
-    "push": "send a scan receipt to your hosted fleet view (gawk Platform)",
+    "push": "send a scan receipt to your hosted fleet view (mcpgawk Platform)",
 }
 
 _PLATFORM_COMMAND_UNAVAILABLE = (
     "mcpgawk {cmd}: {desc}.\n"
-    "This is a gawk Platform command and the Platform isn't installed in this environment.\n"
+    "This is a mcpgawk Platform command and the Platform isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
 )
@@ -761,7 +869,7 @@ PLATFORM_CAPABILITIES = {
 
 _PLATFORM_UNAVAILABLE = (
     "mcpgawk {cap}: {desc}.\n"
-    "This is a gawk Platform capability and it isn't installed in this environment.\n"
+    "This is a mcpgawk Platform capability and it isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "  Already subscribed? Your purchase email has the install instructions.\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
@@ -769,7 +877,7 @@ _PLATFORM_UNAVAILABLE = (
 
 
 def _run_platform_capability(capability: str, rest: list[str]) -> int:
-    """Delegate to gawk Platform if it is installed, else say so honestly and exit 3.
+    """Delegate to mcpgawk Platform if it is installed, else say so honestly and exit 3.
 
     The import is deliberately OPTIONAL and local: the free scanner is published to PyPI on its
     own and must never depend on, or ship, the paid engine. A paid install supersedes the free
@@ -797,6 +905,10 @@ def _protect() -> int:
     """
     from . import history, protect
 
+    #: Local stdio servers found on this machine. Bound HERE, before any branch, so the coverage
+    #: report at the end cannot silently read an unbound name and fall back to "nothing skipped".
+    local_servers: list[str] = []
+
     print("mcpgawk — checking what your agents can call, and turning protection on.\n")
 
     choice = protect.load_consent()
@@ -823,11 +935,12 @@ def _protect() -> int:
             from .discover import discover_servers
             found = discover_servers()
             entries = found[0] if isinstance(found, tuple) else found
-            local = sum(1 for e in (entries or {}).values()
-                        if isinstance(e, dict) and e.get("command"))
+            local_servers = [n for n, e in (entries or {}).items()
+                             if isinstance(e, dict) and e.get("command")]
+            local = len(local_servers)
             agents = _consent_agents(entries)
         except Exception:                          # noqa: BLE001 - discovery is best-effort here
-            local, agents = 0, []
+            local, agents, local_servers = 0, [], []
         if local:
             choice = protect.ask_consent(local, agents)
             if choice is None:
@@ -888,8 +1001,18 @@ def _protect() -> int:
               "  Run `mcpgawk verify` to do it deliberately. This is not a clean result; it is "
               "no result.\n", file=sys.stderr)
 
-    store = history.load(history.default_path())
-    print(protect.protection_report(store, guard_line, unchecked=[]))
+    store, _store_err = _store_or_say_why()
+    _warn_if_store_unreadable(_store_err)
+    # `unchecked=[]` was hardcoded here — the ONLY production caller — while
+    # protection_report's docstring promises "The 'not checked' block is never omitted and never
+    # summarised into a number". It was omitted on every real run, because nothing ever passed a
+    # value; only tests did. On a REMOTE_ONLY pass every local stdio server is skipped by design
+    # (we refuse to launch their code without consent) and "Protected: N server(s)" printed with
+    # no mention of the ones nobody looked at.
+    _unchecked = ([(n, "not launched — this run checked remote servers only")
+                   for n in sorted(local_servers)]
+                  if choice == protect.REMOTE_ONLY else [])
+    print(protect.protection_report(store, guard_line, unchecked=_unchecked))
     # ONBOARDING STAGE 5 ([FOUNDER] 2026-08-15: onboarding ends at protect + PANEL, and the
     # first run offers the bridge): until now the flow finished and the control surface was
     # never mentioned — a user completed the scan and had no idea a panel existed. TTY only,
@@ -1186,6 +1309,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         print(collect_and_render())
         return 0
 
+    if args.cmd == "report":
+        from .report import run as _report
+        return _report(output=args.output, note=args.note)
+
     if args.cmd == "runs":
         return _runs(args)
 
@@ -1330,7 +1457,17 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # A re-identification must fail too. It produces no DriftReport — there is nothing to diff
     # against — so without this a server that renames itself passes CI silently, which is exactly
     # the evasion C2 exists to close. "Nothing to compare" is not "nothing wrong".
+    # LIVE FINDINGS COUNT. This was `caveats or drift or reidentified` — probe failures and
+    # movement — so `mcpgawk scan --json` exited 0 on a fleet carrying injection findings, and any
+    # CI gate built on that exit code passed. That it is a gap rather than a policy is settled by
+    # the post-auth redraw below, which DOES count REVIEW towards its own exit. A finding the user
+    # has explicitly muted is excluded: muting is a decision they made, not one we made for them.
+    def _live_findings(lab: dict) -> bool:
+        return any(not s.get("muted")
+                   for s in (lab["x-mcpgawk"].get("bounded_signals") or []))
+
     failed = (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
+              or any(_live_findings(lab) for lab in labels)
               or bool(drift_reports) or bool(reidentified))
 
     if args.json:
@@ -1444,12 +1581,27 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("\n" + render_cli(lab, verbose=False))   # a failure is never summarised away
         else:
             n = lab["x-mcpgawk"]["tool_count"]
-            muted_n = sum(1 for s in (lab["x-mcpgawk"].get("bounded_signals") or [])
-                          if s.get("muted"))
-            muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
-                if muted_n else ""
-            print(f"\n  ✓ {name}: no change since your baseline "
-                  f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
+            signals = lab["x-mcpgawk"].get("bounded_signals") or []
+            live = [s for s in signals if not s.get("muted")]
+            muted_n = sum(1 for s in signals if s.get("muted"))
+            if live:
+                # UNCHANGED IS NOT CLEAN. This branch printed a lone green tick for any tracked
+                # server with no drift and no probe error — and `caveats` covers probe/scan
+                # failures only, never findings. So a server whose description was ALREADY
+                # poisoned when you approved it, and has sat unchanged since, rendered as
+                # "✓ no change since your baseline" with the findings printed nowhere: render_cli
+                # is skipped on this path and render_summary is skipped too (it is gated on
+                # any_error). The old line even named findings you had MUTED while omitting the
+                # live ones, which is the asymmetry that gives the game away.
+                any_error = True
+                print(f"\n  ⚠ {name}: no change since your baseline, but it was never clean — "
+                      f"{len(live)} live finding{'s' if len(live) != 1 else ''} still stand:")
+                print("\n" + render_cli(lab, verbose=False))
+            else:
+                muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
+                    if muted_n else ""
+                print(f"\n  ✓ {name}: no change since your baseline "
+                      f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
     # Local (stdio) servers — launched this run or merely configured. Both inherit the same
     # ambient credentials the moment anything starts them, so both count towards that warning.
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
@@ -1461,7 +1613,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # Scanning is not protection. A report with no next step is how the author finished a scan on
     # his own machine and stayed unprotected — the hook existed, worked, and was never installed
     # because nothing ever mentioned it. Only shown when it is actually actionable.
-    if not _guard_is_installed():
+    _installed = _guard_is_installed()
+    if _installed is None:
+        print("  Whether your agents are checking these servers could not be determined — the "
+              "guard probe failed. Run `mcpgawk guard status`.\n")
+    elif not _installed:
         print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
     _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
@@ -1493,13 +1649,22 @@ def _mark_muted_findings(labels: list[dict]) -> None:
                 s["muted"] = True
 
 
-def _guard_is_installed() -> bool:
-    """Best-effort: never let a status probe break a completed scan."""
+def _guard_is_installed() -> "bool | None":
+    """Is the runtime guard installed? True / False / None when the probe itself failed.
+
+    Was `return True` on exception, "to stay quiet rather than nag wrongly" — which meant a broken
+    probe silenced "Your agents are not checking these servers yet." on exactly the machines most
+    likely to need it. Silence there is indistinguishable from coverage, and this is the last line
+    of a scan: the one a user reads to decide whether they are done.
+
+    Still never raises — an advisory probe must not fail a completed scan — but "I could not tell"
+    is now its own answer, and the caller says so instead of picking the reassuring one.
+    """
     try:
         from .guard import status
         return "NOT installed" not in status()
     except Exception:                              # noqa: BLE001 - advisory only
-        return True                                # stay quiet rather than nag wrongly
+        return None
 
 
 def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> str:

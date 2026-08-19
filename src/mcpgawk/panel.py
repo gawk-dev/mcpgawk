@@ -227,8 +227,30 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
         if client in (d.get("adapters") or {}):
             on = (d.get("hooks") or {}).get(client)
             if on:
-                rows.append((client, label, "on", n,
-                             "every MCP call checked against your baseline"))
+                # "every MCP call checked against your baseline" was rendered from `on` alone —
+                # which only says the hook RUNS. On the founder's machine (2026-08-18) that line
+                # sat beside a green chip while `mcpgawk status`, from the same spool, reported
+                # 1513 calls seen, 57 checked and 1456 NOT checked: the guard declined for want of
+                # a baseline projection and let them through. A 26x overstatement of protection, on
+                # the screen a beta tester screenshots. `_activity_headline` had already been fixed
+                # for exactly this and its docstring says so; the Agents tab kept the old claim.
+                #
+                # The counts are MACHINE-WIDE — the spool records no per-client breakdown — so the
+                # wording says "on this machine" rather than implying it measured this agent.
+                act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+                seen = act.get("calls") or 0
+                checked, deferred = act.get("checked"), act.get("deferred") or 0
+                if checked is None:
+                    det = "hook installed — this log does not record how many calls were checked"
+                elif not seen:
+                    det = "hook installed — no MCP calls seen yet, so nothing has been checked"
+                elif deferred:
+                    det = (f"hook installed — on this machine {checked} of {seen} call(s) were "
+                           f"checked; {deferred} were NOT (no or stale baseline). Run a scan.")
+                else:
+                    det = (f"every MCP call checked against your baseline "
+                           f"({checked} on this machine)")
+                rows.append((client, label, "on", n, det))
             else:
                 rows.append((client, label, "off", n,
                              "hook point exists but is not installed"))
@@ -1025,7 +1047,7 @@ def _setup_flow_html(setup_text: str) -> str:
         f'<ol style="margin:10px 0 0 18px;padding:0">'
         f'<li>Copy your public key:'
         f'<div style="margin:6px 0;padding:8px;border:1px solid rgba(0,0,0,.12);'
-        f'border-radius:6px;font-family:ui-monospace,monospace;font-size:10.5px;'
+        f'border-radius:6px;font-family:ui-monospace,monospace;font-size:11.5px;'
         f'word-break:break-all;background:rgba(255,255,255,.5)">{_esc(key_text).replace(chr(10), "<br>")}</div>'
         f'<button type="button" class="gbtn" data-copy="{_esc(key_text)}">Copy key</button></li>'
         f'{steps_html}'
@@ -1182,6 +1204,39 @@ def _radio_tabs(tab: str) -> str:
     return "\n".join(
         f'<input type="radio" name="nav" id="{t}"{" checked" if t == current else ""} '
         f'aria-label="{label} tab">' for t, label in _TAB_LABELS)
+
+def monitor_gap_note(d: dict[str, Any]) -> str:
+    """What the DRIFT surfaces cannot speak for, as one sentence, or "" when there is nothing.
+
+    The Decisions queue and the blocked-calls table are both built from what THIS machine's scan
+    history and guard log contain. Neither reads the monitor. On 2026-08-18 both rendered an
+    all-clear while the monitor held SEVEN unaccepted alerts across four servers — one of which
+    (`kite`) had stopped answering entirely, three of which the scanner has never even seen.
+
+    The two stores cannot be joined: scan history keys look like `mcp:Kite MCP Server`, the
+    monitor's like `kite`, and the overlap on this machine is EXACTLY ZERO. So this does not try to
+    merge them — it names the gap and points at the surface that owns it. A count that cannot be
+    reconciled is still worth more than a silent zero.
+
+    Returns "" when the monitor was never installed or its DB is absent: "no monitor" is not
+    "no alerts", and inventing a reassuring zero here is the bug this function exists to prevent.
+    """
+    # DEFENSIVE BY DESIGN. This function exists to stop a surface overstating safety; if it can
+    # itself raise, it takes the page down and the user sees LESS than before. `d["monitor"]` is
+    # whatever collect() managed to produce, including an error shape, so nothing here may assume
+    # a type. Caught by test_panel_e2e when the first version assumed a dict (2026-08-18).
+    mon = d.get("monitor") if isinstance(d, dict) else None
+    if not isinstance(mon, dict) or not mon.get("db_present"):
+        return ""
+    rows = [r for r in (mon.get("servers") or []) if isinstance(r, dict)]
+    hot = [r for r in rows if (r.get("open_alerts") or 0) > 0]
+    if not hot:
+        return ""
+    total = sum(r.get("open_alerts") or 0 for r in hot)
+    who = ", ".join(_esc(str(r.get("server_id"))) for r in hot[:6])
+    return (f' Monitoring is separately holding <b>{total} unaccepted alert(s)</b> on {who} — '
+            f'not covered here. See <b>Monitor</b>.')
+
 
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
            q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "", stale_token: bool = False) -> str:
@@ -1778,7 +1833,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     arows = "".join(
         f'<tr><td class="nm">{_esc(label)}</td><td><span class="chip '
         f'{"ok" if st == "on" else ("warn" if st == "off" else "dim")}">'
-        f'{"protected" if st == "on" else ("not enabled" if st == "off" else "no hook point")}'
+        # "protected" claimed an outcome; "hook installed" states the fact this row actually
+        # knows. Whether calls are being CHECKED is in the detail column, from the spool.
+        f'{"hook installed" if st == "on" else ("not enabled" if st == "off" else "no hook point")}'
         f'</span></td><td>{n}</td><td class="dim">{_esc(det)}</td>'
         f'<td>{_protect_cell(ckey, st)}</td></tr>'
         for ckey, label, st, n, det in rows) or \
@@ -1896,8 +1953,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     span_first = all_acts[-1].get("when") if all_acts else None
     span_last = all_acts[0].get("when") if all_acts else None
     acts_notable = "".join(_act_row(a, expand_why=True) for a in notable) or \
-        '<tr><td colspan="6" class="dim">No calls have been blocked. Nothing has drifted or ' \
-        'overstepped its approved baseline.</td></tr>'
+        ('<tr><td colspan="6" class="dim">No call in this log was blocked, and nothing it '
+         'covers overstepped its approved baseline.' + monitor_gap_note(d) + '</td></tr>')
     acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
     if _foreign_acts:
@@ -1972,7 +2029,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         f'<td>{_dec_chip(k)}</td>'
         f'<td>{_dec_action(k)}</td></tr>'
         for k in pending) or \
-        '<tr><td colspan="4" class="dim">Nothing is waiting on you.</td></tr>'
+        ('<tr><td colspan="4" class="dim">No server with an approved baseline has changed '
+         'since you approved it.' + monitor_gap_note(d) + '</td></tr>')
 
     # While an action runs, the page REFRESHES ITSELF. Telling the user to reload is not a progress
     # indicator: 0.1.20 completed its scan in ~100s and went on showing "Running scan…" forever
@@ -2093,11 +2151,11 @@ display:grid;grid-template-columns:196px minmax(0,1fr);gap:0 26px;align-items:st
 .brandmark{{width:22px;height:22px;display:block}}
 .ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12px;
 border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
-.ngrp{{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+.ngrp{{font-family:var(--mono);font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--fai);font-weight:500;margin:16px 10px 4px}}
 .ngrp:first-child{{margin-top:2px}}
 .brand{{font-weight:700;letter-spacing:-.02em;font-size:15px}}
-.bsub{{font-family:var(--mono);font-size:10.5px;color:var(--fai)}}
+.bsub{{font-family:var(--mono);font-size:11.5px;color:var(--fai)}}
 input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}#n0:focus-visible ~ .sheet label.pill[for=n0]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n1:focus-visible ~ .sheet label.pill[for=n1]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n2:focus-visible ~ .sheet label.pill[for=n2]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n3:focus-visible ~ .sheet label.pill[for=n3]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n4:focus-visible ~ .sheet label.pill[for=n4]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n5:focus-visible ~ .sheet label.pill[for=n5]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n6:focus-visible ~ .sheet label.pill[for=n6]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n7:focus-visible ~ .sheet label.pill[for=n7]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}#n8:focus-visible ~ .sheet label.pill[for=n8]{{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}}
 .rail{{grid-column:1;display:flex;flex-direction:column;gap:2px;background:none;border:none;
 padding:0;margin:0;position:sticky;top:18px}}
@@ -2175,7 +2233,7 @@ transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160m
 .count b{{color:var(--ink);font-weight:600}}
 .thead{{display:grid;grid-template-columns:var(--srow);gap:12px;align-items:center;
 padding:9px 16px;background:var(--rail);border-top:1px solid var(--line);
-border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:.09em;
+border-bottom:1px solid var(--line);font-size:11.5px;letter-spacing:.09em;
 text-transform:uppercase;color:var(--fai);font-weight:500}}
 .row{{display:grid;grid-template-columns:var(--srow);gap:12px;align-items:center;
 padding:11px 16px;border-bottom:1px solid var(--line)}}
@@ -2194,15 +2252,15 @@ a.who{{color:inherit;text-decoration:none}}
 /* the drawer is 380px; a four-column tool table only fits with a fixed layout and wrapping
    names — without this, long tool names push the verdict columns past the card edge */
 .side .mini{{table-layout:fixed}}
-.side .mini th,.side .mini td{{font-size:10.5px;padding:5px 4px 5px 0}}
+.side .mini th,.side .mini td{{font-size:11.5px;padding:5px 4px 5px 0}}
 .side .mini th:first-child,.side .mini td:first-child{{overflow-wrap:anywhere}}
-.side .mini .chip{{font-size:10.5px;padding:2px 7px}}
-.side .mini .dim{{font-size:10.5px}}
+.side .mini .chip{{font-size:11.5px;padding:2px 7px}}
+.side .mini .dim{{font-size:11.5px}}
 .mark{{width:26px;height:26px;border-radius:7px;background:var(--acc-soft);color:var(--acc);
-display:grid;place-items:center;font-size:10.5px;font-weight:700;flex:none}}
+display:grid;place-items:center;font-size:11.5px;font-weight:700;flex:none}}
 .who .nm{{font-family:var(--sans);font-weight:600;font-size:13.5px;display:block;
 line-height:1.3}}
-.who .id{{font-family:var(--mono);font-size:10.5px;color:var(--fai);display:block}}
+.who .id{{font-family:var(--mono);font-size:11.5px;color:var(--fai);display:block}}
 .n{{text-align:right;font-variant-numeric:tabular-nums;font-size:13.5px}}
 .n b{{font-weight:650}}
 .n s{{text-decoration:none;color:var(--fai);font-size:12px}}
@@ -2219,9 +2277,9 @@ background:var(--unv-bg)}}
 background:var(--card)}}
 .tlhead{{font-size:12px;color:var(--mut);margin-bottom:8px}}
 .tlt{{width:100%;table-layout:fixed}}
-.tlt th{{font-size:10.5px}}
+.tlt th{{font-size:11.5px}}
 .tlt td{{vertical-align:top;padding:6px 8px;font-size:12px;overflow-wrap:anywhere}}
-.tlfoot{{margin-top:8px;font-size:10.5px;overflow-wrap:anywhere}}
+.tlfoot{{margin-top:8px;font-size:11.5px;overflow-wrap:anywhere}}
 .tlnote{{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;
 color:var(--warn);background:var(--warn-bg)}}
 .mono{{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)}}
@@ -2277,7 +2335,7 @@ mask-image:linear-gradient(90deg,#000 calc(100% - 36px),transparent)}}
 .slrow:last-child{{border-bottom:none}}
 .slwhen{{color:var(--fai);white-space:nowrap}}
 .slok{{color:var(--ok)}}.slwarn{{color:var(--warn)}}.slbad{{color:var(--bad)}}
-th{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
+th{{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 text-align:left;font-weight:500;padding:9px 16px;background:var(--rail);
 border-top:1px solid var(--line);border-bottom:1px solid var(--line)}}
 td{{padding:10px 16px;border-bottom:1px solid var(--line);vertical-align:middle}}
@@ -2289,9 +2347,9 @@ td{{line-height:1.45}}
 padding:14px 16px}}
 .ddgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px 20px;
 font-size:12px;margin-bottom:12px}}
-.ddgrid .k{{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+.ddgrid .k{{display:block;font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;
 color:var(--fai)}}
-.ddh{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
+.ddh{{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 font-weight:500;margin:14px 0 8px}}
 .mini{{font-size:12px}}
 .mini th{{background:none;border-top:none;padding:5px 0}}
@@ -2314,10 +2372,10 @@ var(--warn);border-radius:10px;padding:11px 16px;font-size:13.5px;margin-bottom:
 /* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
 .sessdrill{{margin-top:4px}}
 .sessdrill .mini{{margin-top:6px;font-size:12px}}
-.sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:10.5px}}
+.sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:11.5px}}
 .whyfull{{white-space:pre-wrap;font-size:12px;color:var(--mut);margin-top:6px;max-width:60ch;
 line-height:1.5}}
-h2{{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
+h2{{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
 font-weight:500;margin:18px 16px 8px}}
 .gwrap{{padding:0 16px 13px}}
 .gl{{display:inline-block;font-size:12px;padding:4px 11px;border:1px solid var(--line);
@@ -2342,7 +2400,7 @@ color:var(--ink)}}
 .fr li{{counter-increment:s;display:grid;grid-template-columns:26px 1fr;gap:12px;padding:14px 0;
 border-top:1px solid var(--line)}}
 .fr li::before{{content:counter(s);width:22px;height:22px;border-radius:7px;
-background:var(--acc-soft);color:var(--acc);font-size:10.5px;font-weight:700;display:grid;
+background:var(--acc-soft);color:var(--acc);font-size:11.5px;font-weight:700;display:grid;
 place-items:center}}
 .fr b{{display:block;font-size:13.5px}}
 /* the numbered pseudo-element is grid item 1; the description must stay in column 2 or it
@@ -3378,9 +3436,9 @@ def run_monitor_start(include_local: bool = False) -> dict[str, Any]:
     try:
         import importlib.util
         if importlib.util.find_spec("gawk_platform") is None:
-            return {"ok": False, "message": "continuous monitoring ships with gawk Platform"}
+            return {"ok": False, "message": "continuous monitoring ships with mcpgawk Platform"}
     except Exception:                             # noqa: BLE001
-        return {"ok": False, "message": "continuous monitoring ships with gawk Platform"}
+        return {"ok": False, "message": "continuous monitoring ships with mcpgawk Platform"}
     if monitor_status().get("running") is True:
         return {"ok": False, "message": "monitoring is already running on this machine"}
     # NO --config: that is what makes the daemon monitor every server this machine already has
@@ -3600,7 +3658,7 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
              'raises an alert when its surface moves — the rug-pull case, where a server you '
              'already trusted changes after you approved it.</div>')
     if not mon.get("installed"):
-        return frame + ('<div class="note">Continuous monitoring ships with gawk Platform — not '
+        return frame + ('<div class="note">Continuous monitoring ships with mcpgawk Platform — not '
                         'installed in this environment.</div>')
     if mon.get("running") is True:
         state = (f'<div class="note ok">Monitoring RUNNING since '
@@ -3740,7 +3798,7 @@ def run_issue_key(name: str | None, role: str | None = None) -> dict[str, Any]:
     try:
         from gawk_platform.enforce.identity import issue_key
     except ImportError:
-        return {"ok": False, "message": "agent keys ship with gawk Platform (the gateway)"}
+        return {"ok": False, "message": "agent keys ship with mcpgawk Platform (the gateway)"}
     # "+reader" means: this bundle does not exist in the registry yet — write it from the tools
     # we have actually seen, then issue against it. Without this the derived roles would be a
     # picker that produces nothing, which is worse than no picker.
@@ -3770,8 +3828,8 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
 
     Positioning is deliberate (founder, 2026-08-01): the gateway is the product's frame — ONE
     endpoint in front of the fleet, per-principal keys, policy, refusals, audit — and scan/verify
-    is how it knows. So the panel shows this surface with or without gawk Platform installed:
-    real audit rows when they exist, an honest "ships with gawk Platform" otherwise — the same
+    is how it knows. So the panel shows this surface with or without mcpgawk Platform installed:
+    real audit rows when they exist, an honest "ships with mcpgawk Platform" otherwise — the same
     pattern `status` uses for deep monitoring. `home` is injectable for tests, like discover's.
 
     `live` is the gateway running RIGHT NOW, read from the enforce run row (kind='enforce',
@@ -3817,8 +3875,19 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
             out["events"] = [dict(zip(cols, r)) for r in con.execute(
                 "SELECT taken_at, tool_name, phase, decision, reason, severity, principal, client"
                 " FROM events ORDER BY id DESC LIMIT 12")]
+            # A BACKEND FAILURE IS NOT A POLICY BLOCK. `backend_error`/`timeout` rows carry
+            # decision='block' so an allowed call always resolves to something (gateway.py's E4
+            # rule), but counting them here told the operator the gateway had refused calls it had
+            # actually ALLOWED and then watched die. The set is duplicated from
+            # gawk_platform.enforce.gateway.FAILURE_PHASES because the panel ships in the FREE
+            # package and cannot import the paid engine; `test_blocked_count_is_policy_only` pins
+            # the two copies together so they cannot drift.
             out["blocks"] = con.execute(
-                "SELECT COUNT(*) FROM events WHERE decision='block'").fetchone()[0]
+                "SELECT COUNT(*) FROM events WHERE decision='block'"
+                " AND phase NOT IN ('backend_error','timeout')").fetchone()[0]
+            out["backend_failures"] = con.execute(
+                "SELECT COUNT(*) FROM events WHERE decision='block'"
+                " AND phase IN ('backend_error','timeout')").fetchone()[0]
             out["sessions"] = con.execute(
                 "SELECT COUNT(DISTINCT session_id) FROM events").fetchone()[0]
             out["principals"] = [r[0] or "(no identity asserted)" for r in con.execute(
@@ -3830,7 +3899,9 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
                  "last": r[3]}
                 for r in con.execute(
                     "SELECT principal, COUNT(*),"
-                    " SUM(CASE WHEN decision='block' THEN 1 ELSE 0 END), MAX(taken_at)"
+                    " SUM(CASE WHEN decision='block'"
+                    "          AND phase NOT IN ('backend_error','timeout')"
+                    "     THEN 1 ELSE 0 END), MAX(taken_at)"
                     " FROM events WHERE tool_name IS NOT NULL"
                     " GROUP BY principal ORDER BY COUNT(*) DESC")]
         finally:
@@ -3993,13 +4064,19 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
         where = ("No gateway activity recorded on this machine yet. Start one: "
                  "<code>mcpgawk enforce serve --gateway-config deploy/gateway.example.yaml</code>"
                  if gw.get("installed") else
-                 "The gateway ships with gawk Platform — not installed in this environment.")
+                 "The gateway ships with mcpgawk Platform — not installed in this environment.")
         return (frame + live_html
                 + f'<div class="note">{where} Deployable from one YAML: see '
                   f'<code>deploy/gateway.example.yaml</code> and the Docker image.</div>')
+    # Backend failures are shown ONLY when there are some, and never folded into block(s): a call
+    # the gateway allowed and the backend then dropped is not protection, and the operator has to
+    # be able to tell the two apart at a glance.
+    _failed = gw.get("backend_failures", 0)
     head = (f'<div class="filters"><span class="count" style="margin-left:0">'
-            f'{gw.get("blocks", 0)} block(s) · {gw.get("sessions", 0)} session(s) · '
-            f'principals: {_esc(", ".join(gw.get("principals") or []) or "—")}</span></div>')
+            f'{gw.get("blocks", 0)} block(s) · '
+            + (f'{_failed} backend failure(s) · ' if _failed else '')
+            + f'{gw.get("sessions", 0)} session(s) · '
+              f'principals: {_esc(", ".join(gw.get("principals") or []) or "—")}</span></div>')
     if not live and not gw.get("runs_error"):
         _gtok = _D_FOR_ROLES.get("_token", "") if isinstance(_D_FOR_ROLES, dict) else ""
         _gw_dir = behaviour_profile_path().parent / "gateway"

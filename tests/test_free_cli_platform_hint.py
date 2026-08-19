@@ -37,7 +37,7 @@ def test_paid_capabilities_are_advertised_in_free_help():
     help_text = free_cli.build_parser().format_help()
     for capability in free_cli.PLATFORM_CAPABILITIES:
         assert capability in help_text
-    assert "gawk Platform" in help_text
+    assert "mcpgawk Platform" in help_text
     assert "pricing" in help_text
 
 
@@ -52,7 +52,7 @@ def test_paid_capability_on_a_free_install_exits_3_with_one_actionable_line(
 
     assert rc == 3, "the same 'not available/not licensed' code every paid entry point returns"
     err = capsys.readouterr().err
-    assert "gawk Platform" in err
+    assert "mcpgawk Platform" in err
     assert "pricing.html" in err
     assert "free" in err.lower(), "must reassure that the free scanner is unaffected"
     assert "Traceback" not in err
@@ -89,7 +89,7 @@ def test_verify_audit_flags_on_a_free_install_exit_3_not_silently_ignored(
 
     assert rc == 3, "same 'not available' code as every other paid entry point"
     err = capsys.readouterr().err
-    assert "gawk Platform" in err
+    assert "mcpgawk Platform" in err
     assert "pricing" in err
     assert "free" in err.lower(), "must say behavioural verify itself still works"
     assert "Traceback" not in err
@@ -102,7 +102,7 @@ def test_push_on_a_free_install_exits_3_with_one_actionable_line(no_platform, ca
 
     assert rc == 3
     err = capsys.readouterr().err
-    assert "gawk Platform" in err
+    assert "mcpgawk Platform" in err
     assert "Traceback" not in err
 
 

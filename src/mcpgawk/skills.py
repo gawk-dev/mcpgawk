@@ -126,6 +126,13 @@ class SkillSnapshot:
     files: list[SkillFile] = field(default_factory=list)
     files_seen: int = 0
     capped: bool = False
+    #: Paths the walk DID NOT examine, each with why: an unreadable directory, a symlink (out of
+    #: scope by design), a subtree past the depth limit, an unstattable file. The file cap already
+    #: announced itself ("CAPPED, the remainder was not examined") and these did not, so a skill
+    #: whose payload sat at depth 11 or behind a symlink reported "N file(s) scanned … clean under
+    #: the local detectors" with the payload never opened. Absence of a finding is only meaningful
+    #: over what was actually read.
+    skipped: list[tuple[str, str]] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
 
 
@@ -159,21 +166,38 @@ def _find_skill_md(directory: Path) -> Path | None:
     return None
 
 
-def _walk_bounded(root: Path):
-    """Deterministic bounded walk — depth/count enforcement happens in parse_skill."""
+def _walk_bounded(root: Path, skipped: "list[tuple[str, str]] | None" = None):
+    """Deterministic bounded walk — depth/count enforcement happens in parse_skill.
+
+    Every `continue` here is a piece of the tree nobody looked at, and each one used to be silent.
+    `skipped` collects them so "clean under the local detectors" can be qualified by what the walk
+    could not reach; the bounds themselves are unchanged, because they are what stops a scan
+    following a symlink to `/` .
+    """
+    def _note(path: Path, why: str) -> None:
+        if skipped is not None:
+            try:
+                skipped.append((str(path.relative_to(root)), why))
+            except ValueError:
+                skipped.append((str(path), why))
+
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         d, depth = stack.pop()
         try:
             children = sorted(d.iterdir(), reverse=True)
-        except OSError:
+        except OSError as exc:
+            _note(d, f"directory could not be read ({type(exc).__name__})")
             continue
         for child in children:
             if child.is_symlink():
-                continue  # a symlink can point anywhere on disk — out of scope by design
+                _note(child, "symlink — not followed, it can point anywhere on disk")
+                continue
             if child.is_dir():
                 if depth + 1 <= _MAX_WALK_DEPTH:
                     stack.append((child, depth + 1))
+                else:
+                    _note(child, f"deeper than the {_MAX_WALK_DEPTH}-level walk limit")
             elif child.is_file():
                 yield child
 
@@ -202,7 +226,7 @@ def parse_skill(directory: Path, hosts: list[str]) -> SkillSnapshot:
         snap.name = fields.get("name") or directory.name
         snap.description = fields.get("description", "")
 
-    for f in _walk_bounded(directory):
+    for f in _walk_bounded(directory, snap.skipped):
         snap.files_seen += 1
         if len(snap.files) >= _MAX_FILES_PER_SKILL:
             snap.capped = True
@@ -211,7 +235,8 @@ def parse_skill(directory: Path, hosts: list[str]) -> SkillSnapshot:
         origin = f"{directory.name}/{rel}"
         try:
             size = f.stat().st_size
-        except OSError:
+        except OSError as exc:
+            snap.skipped.append((rel, f"file could not be stat'd ({type(exc).__name__})"))
             continue
         if f.suffix.lower() not in _TEXT_SUFFIXES:
             snap.files.append(SkillFile(rel, "binary", _sha256(f)))
