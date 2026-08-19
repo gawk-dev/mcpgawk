@@ -423,6 +423,26 @@ def build_parser() -> argparse.ArgumentParser:
                     "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
                     "Claude Code only, so a single cheerful tick would tell a Cursor user they "
                     "are covered when they are not.")
+    cu = sub.add_parser(
+        "checkup",
+        help="run the WHOLE product on this machine and capture what happened — start here",
+        description=(
+            "Exercises every surface in turn — version, status, scan, verify, the run history "
+            "and every panel tab — then writes one file with what each step did. A step that "
+            "fails is kept, not hidden: that is the point. Steps that would launch your local "
+            "servers ask once and can be declined without stopping the rest. Nothing is "
+            "uploaded. Stop it at any time with Ctrl-C and the bundle is still written."
+        ),
+    )
+    cu.add_argument("--output", metavar="PATH",
+                    help="write here instead of ./mcpgawk-checkup-<timestamp>.zip")
+    cu.add_argument("--note", metavar="TEXT",
+                    help="what you were trying to do — travels in the bundle")
+    cu.add_argument("--yes", "-y", action="store_true",
+                    help="do not ask before launching local servers (for a non-interactive run)")
+    cu.add_argument("--strict", action="store_true",
+                    help="remove hostnames, package names and command arguments as well")
+
     rp = sub.add_parser(
         "report",
         help="write ONE file we can diagnose from — send it when something goes wrong",
@@ -1312,6 +1332,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
         from .status import collect_and_render
         print(collect_and_render())
         return 0
+
+    if args.cmd == "checkup":
+        from .checkup import run as _checkup
+        return _checkup(output=args.output, note=args.note, assume_yes=args.yes,
+                        strict=args.strict)
 
     if args.cmd == "report":
         from .report import run as _report

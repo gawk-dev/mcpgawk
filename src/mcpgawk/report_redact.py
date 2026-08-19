@@ -296,7 +296,10 @@ def _token(tok: str) -> str:
         # are where a client id or a token hides, are collapsed.
         if tok.startswith(("{", "[")) or ('":' in tok):
             return f"<json: {len(tok)} chars>"
-        return tok
+        # scrub_paths even here: comprehensive mode keeps the ARGUMENT, never the person.
+        # A scratchpad path encodes the username as `-Users-name-`, which survived verbatim
+        # until a real bundle was grepped for it.
+        return scrub_paths(tok)
     if tok.startswith("-"):
         name, sep, _ = tok.partition("=")
         return f"{name}=<redacted>" if sep else name  # flag NAMES are the diagnosis
