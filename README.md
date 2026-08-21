@@ -78,7 +78,7 @@ request, used or not.
 
 **CLI** (any terminal):
 ```bash
-pip install mcpgawk        # or: uv tool install mcpgawk
+pip install --upgrade mcpgawk        # or: uv tool install --force mcpgawk
 mcpgawk scan mcp.json
 ```
 
