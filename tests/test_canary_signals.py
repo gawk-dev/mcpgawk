@@ -64,6 +64,18 @@ def _fire_covert_recipient():
     return detect(snap)
 
 
+def _fire_secret_hardcoded():
+    """A live provider credential baked into a tool description — leaked to every client that
+    connects. The scanner flags it (masked); the evidence never carries the raw key."""
+    # Split the literal so GitHub push-protection doesn't flag the fabricated Stripe shape (the
+    # contiguous sk_live_… string never appears in source; the detector sees the joined value).
+    fake_key = "sk_live_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7"
+    snap = ServerSnapshot(name="s", transport="stdio", protocol_version="1",
+                          tools=[{"name": "charge",
+                                  "description": f"Bill a card. key={fake_key}"}])
+    return detect(snap)
+
+
 def _fire_url_exfil():
     """The channel detector 4 left open: a URL, not a mailbox.
 
@@ -164,6 +176,7 @@ FIXTURES = {
     "injection:secret-exfil": _fire_secret_exfil,
     "injection:covert-recipient": _fire_covert_recipient,
     "injection:url-exfil": _fire_url_exfil,
+    "secret:hardcoded": _fire_secret_hardcoded,
     "obfuscation:hidden-unicode": _fire_hidden_unicode,
     "dispatch:dynamic-tool-catalog": _fire_dynamic_dispatch,
     "shadowing:name-collision": _fire_shadowing,

@@ -59,6 +59,23 @@ def approved_pin(key: str, path: str | None = None) -> str | None:
     return (rec or {}).get("pin")
 
 
+def approved_pin_checked(key: str, path: str | None = None) -> tuple[str | None, str | None]:
+    """`(pin, error)` — the approved pin, plus the reason the store came back empty.
+
+    `approved_pin` reads through `history.load`, which degrades an unreadable store to
+    `{"servers": {}}` and DISCARDS the reason — so "the operator approved nothing" and "the file
+    holding every approval could not be read" both answered `None`. For most readers that is a
+    display problem; for monitor's trust-on-first-use gate it re-enabled the exact adoption the
+    gate exists to refuse, because `None` is the answer that says "adopt first sight".
+
+    A missing file is NOT an error: a fresh machine has genuinely approved nothing, and
+    `load_checked` already makes that distinction — this only stops discarding it.
+    """
+    store, err = history.load_checked_hardened(path or history.default_path())
+    rec = history.approved(store, key)
+    return (rec or {}).get("pin"), err
+
+
 def approved_tools(key: str, path: str | None = None) -> dict[str, str]:
     """`{tool name: hash}` from the approved record. Empty dict when nothing is approved."""
     rec = approved_record(key, path) or {}

@@ -64,7 +64,8 @@ def machine(tmp_path, monkeypatch):
         {"type": "auth-needed", "server": "kite",
          "url": f"https://auth.kite.trade/callback?code={OAUTH_CODE}&state=xyz"},
         {"type": "raw-observation", "server": "notes", "tool": "read",
-         "infraDetail": f"failed with token={SECRET} at /Users/susha/.npm/x.js"},
+         "infraDetail": f"failed with token={SECRET} reaching registry.internal.acme.corp:8443 "
+                        f"at /Users/susha/.npm/x.js"},
     ]) + "\n", encoding="utf-8")
     return home
 
@@ -207,6 +208,11 @@ def test_strict_mode_names_no_host_of_theirs_anywhere(machine, tmp_path):
                and "localhost" not in h]
     assert not leaked, f"the bundle names hosts the tester's employer runs: {leaked}"
     assert "api.kite.trade" not in text, "the egress host survived strict mode"
+    # A host in a FREE-TEXT field (infraDetail) — no `host` key, no scheme — used to walk straight
+    # through clean_text's strict pass, which masked only scheme:// URLs. The grep a security team
+    # actually runs is a plain substring, so assert it plainly.
+    assert "registry.internal.acme.corp" not in text, (
+        "a host in a free-text field survived strict mode")
 
 
 def test_the_privacy_notice_describes_the_mode_that_actually_ran(machine, tmp_path):

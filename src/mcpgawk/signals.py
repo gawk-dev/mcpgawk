@@ -19,6 +19,7 @@ from typing import Any
 
 from .probe import ServerSnapshot
 from .redact import _SECRETS as _ALL_SECRET_SHAPES
+from .secret_corpus import find_secret as _find_secret
 from .redact import redact
 
 # THE catalog of every bounded-signal `kind` this module can emit, mapped to the detector that
@@ -37,6 +38,7 @@ SIGNAL_KINDS: dict[str, str] = {
     "injection:secret-exfil": "detect",
     "injection:covert-recipient": "detect",
     "injection:url-exfil": "detect",
+    "secret:hardcoded": "detect",
     "obfuscation:hidden-unicode": "detect",
     "dispatch:dynamic-tool-catalog": "detect_dynamic_dispatch",
     "shadowing:name-collision": "detect_shadowing",
@@ -272,6 +274,14 @@ def _scan_text(text: str, tool: str, prose_markdown: bool = False) -> list[Findi
             continue  # ordinary Markdown section comment, hiding nothing — see above
         span = m.group(0).strip()
         out.append(Finding(tool=tool, kind=kind, evidence=span[:120]))
+    # Hardcoded provider credential baked into the description — a leak to every client that
+    # connects. The curated corpus (secret_corpus) is precision-tuned; the evidence is MASKED, so
+    # a scan report can never itself leak the key it just found. See secret_corpus for why this is
+    # a separate, tighter corpus than the redactor's.
+    secret = _find_secret(text or "") or _find_secret(clean)
+    if secret:
+        label, masked = secret
+        out.append(Finding(tool=tool, kind="secret:hardcoded", evidence=f"{label}: {masked}"))
     return out
 
 

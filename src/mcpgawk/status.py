@@ -104,14 +104,24 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
            monitor_open: int | None = None, baseline_error: str | None = None,
-           agents_error: str | None = None) -> str:
+           agents_error: str | None = None, unprotected: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
     observed nothing. The two justify very different levels of confidence and must not render the
     same way.
+
+    `unprotected` is "grace" or "ended" when a beta trial has lapsed: the enforce gateway is still
+    running but PASSING CALLS THROUGH without enforcing, so the one screen that answers "am I
+    protected?" must say NO, loudly, rather than showing the hooks as if they still guarded.
     """
     out: list[str] = ["", "  RUNTIME CHECKING"]
+    if unprotected:
+        out.append("      ⚠ UNPROTECTED — your trial has "
+                   + ("ended" if unprotected == "ended" else "ended (the grant is still valid)")
+                   + ". The enforce gateway is PASSING EVERY CALL THROUGH and enforcing NOTHING.")
+        out.append("      Your agents still work; they are not protected. Subscribe at "
+                   "https://mcp.gawk.dev/pricing, or `mcpgawk enforce uninstall` to remove it.")
 
     if not agents:
         if agents_error:
@@ -178,7 +188,7 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
             out.append(f"          {name}")
         out.append("      Review: mcpgawk scan     Accept: mcpgawk approve <name>")
 
-    out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, tamper-evident log)"]
+    out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, hash-chained log)"]
     if enforce_available:
         out.append("      available — mcpgawk enforce install")
     else:
@@ -305,6 +315,19 @@ def collect_and_render() -> str:
     except Exception:                              # noqa: BLE001
         enforce_available = False
 
+    # A lapsed trial: the gateway still runs but no longer enforces. "am I protected?" must answer
+    # NO on this screen, not show the hooks as if they still guarded. Visibility only — never break
+    # status if the paid engine cannot be consulted.
+    unprotected: str | None = None
+    if enforce_available:
+        try:
+            from gawk_platform.cli import ENDED, GRACE, license_state
+            _lstate, _ = license_state()
+            if _lstate in (GRACE, ENDED):
+                unprotected = _lstate
+        except Exception:                          # noqa: BLE001
+            unprotected = None
+
     # OPEN alerts, not new ones. Monitor de-duplicates, so a permanently dead or drifted server
     # raises its alert once and reports "0 new" for ever after; `mcpgawk status` did not read
     # monitor at all, so an unacknowledged alert was invisible on the one screen that claims to
@@ -359,4 +382,4 @@ def collect_and_render() -> str:
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
                   behavioural_unavailable=behavioural_unavailable,
-                  monitor_open=monitor_open)
+                  monitor_open=monitor_open, unprotected=unprotected)

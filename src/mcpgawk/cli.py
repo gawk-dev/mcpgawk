@@ -637,6 +637,14 @@ def _baseline(args) -> int:
     # on the command whose entire job is showing what you agreed to trust.
     _, _store_err = _store_or_say_why(getattr(args, "history", None))
     _warn_if_store_unreadable(_store_err)
+    # --json returned the empty export with exit 0 BEFORE this check ran, so an unreadable store
+    # emitted `{"servers": {}}` and exit 0 — a CI gate parsing that reads "nothing approved" as a
+    # FACT when nobody could read the file. "It ran but could not finish" is INCOMPLETE = exit 4
+    # (the documented vocabulary: never 0), for the machine surface as much as the human one.
+    if _store_err and args.json:
+        print(json.dumps({"error": "the approval store is unreadable; what you approved is UNKNOWN",
+                          "servers": {}}, indent=2, sort_keys=True))
+        return 4
     data = _baseline_mod.export(getattr(args, "history", None))
     servers = data["servers"]
 
@@ -657,7 +665,7 @@ def _baseline(args) -> int:
         if _store_err:
             print("Nothing can be shown — the approval store is unreadable, so what you approved "
                   "is UNKNOWN. See the warning above.")
-            return 1
+            return 4       # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
         print("Nothing approved yet. Run `mcpgawk scan`, then `mcpgawk approve <server>` to set "
               "the baseline that verify and monitor will compare against.")
         return 0
@@ -718,7 +726,7 @@ def _approve(args) -> int:
             if _store_err:
                 print("Nothing to compare — the approval store is unreadable, so whether anything "
                       "changed is UNKNOWN. See the warning above.")
-                return 1
+                return 4   # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
             print("Nothing to approve — every tracked server matches its approved baseline.")
             return 0
         print(f"{len(waiting)} server(s) changed since you approved them:\n")
@@ -929,11 +937,24 @@ def _protect() -> int:
     """
     from . import history, protect
 
-    #: Local stdio servers found on this machine. Bound HERE, before any branch, so the coverage
-    #: report at the end cannot silently read an unbound name and fall back to "nothing skipped".
-    local_servers: list[str] = []
-
     print("mcpgawk — checking what your agents can call, and turning protection on.\n")
+
+    # Discover local servers ONCE, before any branch. The consent question needs the count, and the
+    # end-of-run coverage report needs the NAMES on every REMOTE_ONLY path — including a SAVED
+    # consent, which skips the question entirely. Binding local_servers only inside `if choice is
+    # None` left the coverage report reading an empty list on a saved consent (or the saved-launch
+    # downgrade below), reporting "nothing skipped" while local servers went unchecked — the exact
+    # omission ea82ea1 fixed, reintroduced for the saved-consent case.
+    try:
+        from .discover import discover_servers
+        found = discover_servers()
+        entries = found[0] if isinstance(found, tuple) else found
+        local_servers = [n for n, e in (entries or {}).items()
+                         if isinstance(e, dict) and e.get("command")]
+        agents = _consent_agents(entries)
+    except Exception:                              # noqa: BLE001 - discovery is best-effort here
+        local_servers, agents = [], []
+    local = len(local_servers)
 
     choice = protect.load_consent()
 
@@ -954,17 +975,6 @@ def _protect() -> int:
 
     scan_args = ["scan", "--track"]
     if choice is None:
-        # Count local servers first so the question can be specific about what it is asking for.
-        try:
-            from .discover import discover_servers
-            found = discover_servers()
-            entries = found[0] if isinstance(found, tuple) else found
-            local_servers = [n for n, e in (entries or {}).items()
-                             if isinstance(e, dict) and e.get("command")]
-            local = len(local_servers)
-            agents = _consent_agents(entries)
-        except Exception:                          # noqa: BLE001 - discovery is best-effort here
-            local, agents, local_servers = 0, [], []
         if local:
             choice = protect.ask_consent(local, agents)
             if choice is None:
@@ -1280,6 +1290,27 @@ def _staleness_advisory() -> None:
         pass
 
 
+def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
+    """The scan's exit-code decision — one answer for --json, --fleet-json and the terminal view.
+
+    A CI gate reads this exit code, so the decision was under test only by a source grep for a
+    substring of this file, which passes even when the logic is deleted. Extracted so a test can
+    DRIVE it with real labels.
+
+    Exit non-zero on any of: a live (un-muted) bounded_signal on any server — the injection-finding
+    case that used to exit 0 and pass every gate built on it; a probe caveat; drift; or a
+    re-identified server (which produces no DriftReport — "nothing to compare" is not "nothing
+    wrong", the exact evasion a renamed server uses). A finding the user explicitly MUTED is
+    excluded: that is their decision, not ours."""
+    def _live(lab: dict) -> bool:
+        return any(not s.get("muted")
+                   for s in (lab["x-mcpgawk"].get("bounded_signals") or []))
+
+    return (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
+            or any(_live(lab) for lab in labels)
+            or bool(drift_reports) or bool(reidentified))
+
+
 def _dispatch(argv: list[str] | None = None) -> int:
     # Intercept the paid capabilities BEFORE argparse: their arguments are the pillar's own, and
     # the free parser must not try to validate them.
@@ -1481,23 +1512,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # at all — the same blindness the exit code had.
             lab["x-mcpgawk"]["reidentified_from"] = reidentified[lab["name"]]
 
-    # ONE exit code for both output modes. `--json` used to `return 0` unconditionally — so a failed
-    # probe or a detected rug-pull reported success to CI, the same class of lie as a false CLEAN.
-    # A re-identification must fail too. It produces no DriftReport — there is nothing to diff
-    # against — so without this a server that renames itself passes CI silently, which is exactly
-    # the evasion C2 exists to close. "Nothing to compare" is not "nothing wrong".
-    # LIVE FINDINGS COUNT. This was `caveats or drift or reidentified` — probe failures and
-    # movement — so `mcpgawk scan --json` exited 0 on a fleet carrying injection findings, and any
-    # CI gate built on that exit code passed. That it is a gap rather than a policy is settled by
-    # the post-auth redraw below, which DOES count REVIEW towards its own exit. A finding the user
-    # has explicitly muted is excluded: muting is a decision they made, not one we made for them.
-    def _live_findings(lab: dict) -> bool:
-        return any(not s.get("muted")
-                   for s in (lab["x-mcpgawk"].get("bounded_signals") or []))
-
-    failed = (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
-              or any(_live_findings(lab) for lab in labels)
-              or bool(drift_reports) or bool(reidentified))
+    # ONE exit code for both output modes (see _scan_failed). `--json` used to `return 0`
+    # unconditionally — so a failed probe or a detected rug-pull reported success to CI, the same
+    # class of lie as a false CLEAN.
+    failed = _scan_failed(labels, drift_reports, reidentified)
 
     if args.json:
         print(json.dumps(labels, indent=2))
@@ -1731,9 +1749,14 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
     pending = [r for r in rows if r.needs_auth]
     if not pending:
         return {}
-    if not sys.stdin.isatty():
-        print(f"  {len(pending)} server(s) need credentials. Re-run in a terminal, or: "
-              f"mcpgawk scan --http <url> --login\n", file=sys.stderr)
+    # --yes means non-interactive: proceed without asking. OAuth sign-in cannot be automated, so
+    # "assume yes" here can only mean "do not block on the prompt". This check was missing, gated
+    # solely on isatty — so `scan --yes` (what `checkup` runs, with stdout/stderr captured and
+    # stdin inherited from the tester's terminal) reached input() and DEADLOCKED behind captured
+    # output until the 900s timeout, which the walk then recorded as a false "slow scan".
+    if getattr(args, "yes", False) or not sys.stdin.isatty():
+        print(f"  {len(pending)} server(s) need credentials. Re-run in a terminal without --yes, "
+              f"or: mcpgawk scan --http <url> --login\n", file=sys.stderr)
         return {}
 
     print("  These need credentials:")

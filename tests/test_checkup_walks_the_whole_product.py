@@ -69,17 +69,51 @@ def test_a_step_that_fails_does_not_end_the_walk(tmp_path, monkeypatch):
     assert all(s["exit_code"] == 7 for s in walk["steps"] if s["command"])
 
 
-def test_a_findings_exit_code_is_not_reported_as_a_failure(tmp_path, monkeypatch):
-    """`scan` exits 1 when it FINDS something — that is the tool working, not breaking.
+def test_a_nonzero_exit_is_a_failure_not_a_false_ok(tmp_path, monkeypatch):
+    """A step exiting nonzero is a finding to surface, recorded as FAILED — never a false OK.
 
-    Recording it as a failure would send us hunting a bug in the one case the product did
-    its job, and would bury the finding under a false alarm.
+    The mapping used to record exit 1 as OK for EVERY step, on the theory that `scan` exits 1 on
+    findings. But `scan --yes` (no --fail-on-findings, which checkup does not pass) exits 0 even
+    WITH findings — they live in its output — and a nonzero `verify` means servers FAILED.
+    Recording that as OK made the walk read all-green off a run whose flagship step failed.
     """
     monkeypatch.setattr(checkup, "_binary", _fake_binary("import sys; sys.exit(1)"))
-    dest = tmp_path / "findings.zip"
-    assert checkup.run(output=str(dest), assume_yes=True) == 0
+    dest = tmp_path / "nonzero.zip"
+    assert checkup.run(output=str(dest), assume_yes=True) == 0   # the walk still completes
     walk = _walkthrough(dest)
-    assert {s["outcome"] for s in walk["steps"] if s["command"]} == {checkup.OK}
+    cmd_steps = [s for s in walk["steps"] if s["command"]]
+    assert cmd_steps and all(s["outcome"] == checkup.FAILED for s in cmd_steps), (
+        "a nonzero exit must be FAILED, not a false OK")
+
+
+def test_a_non_utf8_byte_does_not_abort_the_walk(tmp_path, monkeypatch):
+    """A scanned server emitting one non-UTF-8 byte used to raise UnicodeDecodeError (a ValueError,
+    past the OSError handler) and abort the whole walk with NO bundle — on the machine whose bundle
+    is worth the most. Decoding must never end the walk."""
+    monkeypatch.setattr(checkup, "_binary",
+                        _fake_binary(r"import sys; sys.stdout.buffer.write(b'host \xff there')"))
+    dest = tmp_path / "badbyte.zip"
+    assert checkup.run(output=str(dest), assume_yes=True) == 0, "the walk did not complete"
+    assert dest.exists(), "no bundle was written after a non-UTF-8 byte"
+    walk = _walkthrough(dest)
+    assert any(s["name"] == "panel" for s in walk["steps"]), "the walk reached the end"
+
+
+def test_ctrl_c_during_the_panel_still_writes_the_bundle(tmp_path, monkeypatch):
+    """The Ctrl-C guarantee covered only the step loop; a ^C during the panel or while gathering
+    the rest died with a traceback and no file, right after the program promised one."""
+    monkeypatch.setattr(checkup, "_binary", _fake_binary("print('ok')"))
+
+    def _boom(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(checkup, "_panel_tabs", _boom)
+
+    dest = tmp_path / "interrupted.zip"
+    assert checkup.run(output=str(dest), assume_yes=True) == 0
+    assert dest.exists(), "a ^C during the panel lost the whole bundle"
+    walk = _walkthrough(dest)                     # the zip is valid and complete
+    assert walk["stopped_early"] is True
+    assert any(s["name"] == "scan" for s in walk["steps"]), "the earlier steps were still captured"
 
 
 def test_the_panel_is_captured_once_with_every_tab_in_it(tmp_path, monkeypatch):

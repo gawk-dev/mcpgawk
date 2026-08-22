@@ -64,13 +64,38 @@ def _binary() -> list[str]:
     return [found] if found else [sys.executable, "-m", "mcpgawk"]
 
 
-def _run(step: Step, args: list[str], timeout: float, outputs: dict[str, str]) -> Step:
+def _step_body(command: list[str], stdout: str, stderr: str, strict: bool) -> str:
+    """The text written to `steps/<name>.txt`, per mode.
+
+    Comprehensive keeps the output — that IS the diagnosis. But `scan`/`verify` stdout names
+    each server by host, the packages it launches and the arguments it carries, and this is
+    free text, not a structured record `redact_record` can walk field by field. `clean_text`'s
+    strict pass masks only `scheme://` URLs, so a bare `host:port`, a `@scope/pkg@1.2.3` and a
+    `--host internal.corp` survive it — the exact identifiers `--strict` promises to remove.
+    There is no safe bare-host scrubber for arbitrary text (the attempt is this repo's recorded
+    over-matching failure), so in strict the body is WITHHELD whole rather than shipped
+    host-bearing under a promise we cannot keep. The command SHAPE (mcpgawk's own subcommand,
+    already home-path scrubbed) and the exit code in walkthrough.json still say what ran."""
+    header = f"$ {' '.join(command)}\n\n"
+    if strict:
+        return (f"{header}<withheld for --strict: this step's output names hosts, package "
+                f"names and launch arguments — {len(stdout) + len(stderr)} chars>\n")
+    return clean_text(f"{header}{stdout}\n{stderr}")
+
+
+def _run(step: Step, args: list[str], timeout: float, outputs: dict[str, str],
+         strict: bool = False) -> Step:
     # Scrubbed at the point it is STORED, not only where it is printed: the raw list went
     # into walkthrough.json via asdict() and carried an absolute home path with it.
     step.command = [scrub_paths(part) for part in _binary() + args]
     started = time.monotonic()
     try:
-        proc = subprocess.run(_binary() + args, capture_output=True, text=True, timeout=timeout)
+        # errors="replace": a scanned server that emits a single non-UTF-8 byte used to raise
+        # UnicodeDecodeError (a ValueError, so it slipped past the OSError handler below) and
+        # abort the ENTIRE walk with no bundle — on precisely the machine whose bundle is worth
+        # the most. Decoding must never end the walk; a stray byte becomes U+FFFD in the log.
+        proc = subprocess.run(_binary() + args, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         step.outcome, step.seconds = TIMED_OUT, time.monotonic() - started
         step.detail = f"still running after {int(timeout)}s — recorded, not killed silently"
@@ -78,23 +103,36 @@ def _run(step: Step, args: list[str], timeout: float, outputs: dict[str, str]) -
         return step
     except KeyboardInterrupt:
         raise
-    except OSError as exc:
+    except Exception as exc:                                      # noqa: BLE001
+        # Nothing a single step can do may end the walk (the stated guarantee). Was OSError only,
+        # which let any other subprocess exception abort everything; recorded, never swallowed.
         step.outcome, step.seconds = CRASHED, time.monotonic() - started
         step.detail = clean_text(f"{type(exc).__name__}: {exc}")
         return step
     step.seconds = time.monotonic() - started
     step.exit_code = proc.returncode
-    # Exit codes are not all failures here: `scan` exits 1 when it FINDS something, which is
-    # the tool working. The walk records the code and lets a human read it, rather than
-    # inventing a verdict the command never gave.
-    step.outcome = OK if proc.returncode in (0, 1) else FAILED
-    body = f"$ {' '.join(step.command)}\n\n{proc.stdout}\n{proc.stderr}"
-    outputs[f"steps/{step.name}.txt"] = clean_text(body)
+    # Exit 0 is the step running cleanly; ANY nonzero is a finding to surface, not a false OK.
+    # This used to be `in (0, 1)` for every step, on the theory that `scan` exits 1 on findings —
+    # but `scan --yes` (no --fail-on-findings, which checkup does not pass) exits 0 even WITH
+    # findings; they live in its output. A nonzero `verify` means servers FAILED, and recording
+    # that as OK produced a walk that read all-green off a run whose flagship step failed.
+    step.outcome = OK if proc.returncode == 0 else FAILED
+    outputs[f"steps/{step.name}.txt"] = _step_body(step.command, proc.stdout, proc.stderr, strict)
     step.detail = f"exit {proc.returncode}"
     return step
 
 
-def _panel_tabs(outputs: dict[str, str]) -> Step:
+_PANEL_WITHHELD = (
+    "<!doctype html><meta charset=utf-8><title>panel withheld in --strict</title>"
+    "<p>The panel is withheld in <code>--strict</code> mode: it names each server's host, the "
+    "packages it launches and the arguments they carry (egress lists and argv), which "
+    "<code>--strict</code> removes. It is a rendered document, not a structured record that can "
+    "be host-redacted field by field, so it is withheld rather than shipped under that promise. "
+    "Run <code>mcpgawk checkup</code> without <code>--strict</code> to include the full panel.</p>"
+)
+
+
+def _panel_tabs(outputs: dict[str, str], strict: bool = False) -> Step:
     """Render the panel against this machine's real data.
 
     No browser and no screenshot: the panel is server-rendered, so the HTML in the bundle is
@@ -104,6 +142,12 @@ def _panel_tabs(outputs: dict[str, str]) -> Step:
     is `checked` — so every tab's content is already in a single document. The first version
     of this wrote nine byte-identical 214 KB copies; caught by listing the zip rather than
     trusting the step's own success message.
+
+    In --strict the rendered page is WITHHELD: the panel names hosts, packages and launch
+    arguments by construction, and unlike a structured record it cannot be host-redacted field
+    by field. `scrub_paths` (the old treatment) only removed home paths, so a strict bundle
+    shipped every internal host under a mode line that promised none. Comprehensive mode — the
+    default, what testers are told to run — still carries the full panel.
     """
     step = Step("panel", "render the panel against your real data")
     started = time.monotonic()
@@ -111,10 +155,15 @@ def _panel_tabs(outputs: dict[str, str]) -> Step:
         from .panel import _TAB_LABELS, collect, render
 
         page = render(collect())
-        outputs["panel/panel.html"] = scrub_paths(page)
+        kb = len(page) // 1024
+        if strict:
+            outputs["panel/panel.html"] = _PANEL_WITHHELD
+            step.detail = f"withheld in --strict ({kb} KB not shipped)"
+        else:
+            outputs["panel/panel.html"] = scrub_paths(page)
+            step.detail = (f"{kb} KB, one document containing all "
+                           f"{len(_TAB_LABELS)} tabs (the nav is CSS-only)")
         step.outcome = OK
-        step.detail = (f"{len(page) // 1024} KB, one document containing all "
-                       f"{len(_TAB_LABELS)} tabs (the nav is CSS-only)")
     except Exception as exc:                                      # noqa: BLE001
         step.outcome = CRASHED
         step.detail = clean_text(f"{type(exc).__name__}: {exc}")
@@ -174,7 +223,7 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
             continue
         print(f"  .. {name:<14} {what}")
         try:
-            steps.append(_run(step, args, timeout, outputs))
+            steps.append(_run(step, args, timeout, outputs, strict))
         except KeyboardInterrupt:
             step.outcome = INTERRUPTED
             step.detail = "you stopped it here — the bundle is still written"
@@ -185,10 +234,19 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
         print(f"  {'ok' if steps[-1].outcome == OK else '!!'} {name:<14} "
               f"{steps[-1].outcome} ({steps[-1].seconds:.0f}s) {steps[-1].detail}")
 
+    # The Ctrl-C guarantee ("the bundle is still written") used to cover ONLY the step loop above.
+    # A ^C during the panel render or while gathering the rest of the bundle — the slow phases on a
+    # big machine, and where an impatient tester is most likely to press it — escaped to the CLI
+    # with a traceback and NO file, immediately after the program promised one. Each remaining
+    # phase now converts a ^C into "stop early, write what we have" rather than losing everything.
     if not interrupted:
         print("  .. panel          render every tab against your real data")
-        steps.append(_panel_tabs(outputs))
-        print(f"  {'ok' if steps[-1].outcome == OK else '!!'} {'panel':<14} {steps[-1].detail}")
+        try:
+            steps.append(_panel_tabs(outputs, strict))
+            print(f"  {'ok' if steps[-1].outcome == OK else '!!'} {'panel':<14} {steps[-1].detail}")
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n  ^C during the panel — writing what we have so far.\n")
 
     walkthrough = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -198,7 +256,12 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
     }
     outputs["walkthrough.json"] = json.dumps(walkthrough, indent=2)
 
-    bundle = report.collect(note)
+    try:
+        bundle = report.collect(note)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n  ^C while gathering the rest — writing the checkup steps only.\n")
+        bundle = report.Bundle()
     for name, body in outputs.items():
         bundle.add(report.Section(f"walk:{name}", report.INCLUDED, "from this checkup run"),
                    name, body)

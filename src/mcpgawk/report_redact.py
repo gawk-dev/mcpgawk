@@ -168,6 +168,16 @@ def reset_pseudonyms() -> None:
     _PSEUDONYMS.clear()
 
 
+def _is_loopback(host: str) -> bool:
+    """OUR plumbing, kept verbatim. EXACT match, not startswith — `127.0.0.1.nip.io` and
+    `localhost.evil.corp` start with a loopback literal but are the customer's estate. A trailing
+    `:port` is stripped so `127.0.0.1:8300` still counts as loopback."""
+    if host in _LOOPBACK:
+        return True
+    h, sep, port = host.rpartition(":")
+    return bool(sep) and port.isdigit() and h in _LOOPBACK
+
+
 def pseudonym(host: str) -> str:
     """A stable stand-in per bundle, so the ANALYSIS survives strict mode.
 
@@ -175,7 +185,7 @@ def pseudonym(host: str) -> str:
     label keeps what we actually reason about — how many distinct destinations there were,
     which repeated, whether one server contacted many — while naming none of them.
     """
-    if any(host.startswith(loop) for loop in _LOOPBACK):
+    if _is_loopback(host):
         return host
     return _PSEUDONYMS.setdefault(host, f"<host-{len(_PSEUDONYMS) + 1}>")
 
@@ -183,9 +193,30 @@ def pseudonym(host: str) -> str:
 def _mask_host(match: re.Match) -> str:
     scheme, rest = match.group(1), match.group(2)
     host = rest.split("/")[0]
-    if any(host.startswith(loop) for loop in _LOOPBACK):
+    if _is_loopback(host):
         return match.group(0)
     return f"<{scheme}-url>"
+
+
+#: A network address in FREE TEXT, with no scheme to catch it by — `detail`, `reason`, `error`
+#: strings carry `api.acme.internal:443` and `db.corp.acme` verbatim, and the scheme-URL pass walks
+#: straight past them. STRICT ONLY: matching "a hostname" in prose over-masks a filename or a
+#: version, but that is the DOCUMENTED cost of strict ("a bundle that is less useful … that can
+#: actually be sent") — the opposite calculus to a finding EMITTER, where a false positive is a
+#: false finding. A final label of digits (a version like `1.2.3`) is NOT matched.
+_BARE_HOST = re.compile(
+    r"\b("
+    # Dotted host FIRST so `127.0.0.1.nip.io` masks whole rather than leaving the loopback-looking
+    # prefix behind; a pure IPv4 has a numeric final label so it falls through to the IPv4 branch.
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?::\d{1,5})?"   # dotted host (+port)
+    r"|\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?"                                      # IPv4 (+ :port)
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:\d{2,5}"                          # single-label host:port
+    r")\b"
+)
+
+
+def _mask_bare_host(match: re.Match) -> str:
+    return pseudonym(match.group(0))       # loopback kept, everything else -> stable <host-N>
 
 
 def clean_text(value: str) -> str:
@@ -198,7 +229,8 @@ def clean_text(value: str) -> str:
     """
     text = scrub_paths(value)
     if _STRICT:
-        text = _ANY_URL.sub(_mask_host, text)
+        text = _ANY_URL.sub(_mask_host, text)      # scheme URLs
+        text = _BARE_HOST.sub(_mask_bare_host, text)   # then bare host / host:port / IP
     return redact(redact_urls_in_text(text)) or ""
 
 
@@ -296,6 +328,19 @@ def _token(tok: str) -> str:
         # are where a client id or a token hides, are collapsed.
         if tok.startswith(("{", "[")) or ('":' in tok):
             return f"<json: {len(tok)} chars>"
+        # A credential passed as an argument value — `--api-key sk-...`, `TOKEN=…`, a bare key
+        # shape — leaks in EITHER mode, and summary.txt promises credentials and API keys are
+        # ALWAYS removed. Comprehensive used to return the token verbatim, so a runlog target
+        # carrying `--api-key sk-ant-…` shipped the live key. Detect with the curated,
+        # finding-grade credential detector (tight, low false-positive) — NOT the free-text
+        # `redact` pass, which over-matches package specs and would blank the very argument
+        # comprehensive mode exists to show. Keep the flag NAME when the credential rides an `=`:
+        # the name is the diagnosis, the value is the leak.
+        from .signals import _credential_line
+        if _credential_line(tok):
+            if tok.startswith("-") and "=" in tok:
+                return f"{tok.split('=', 1)[0]}=<redacted>"
+            return "<redacted-credential>"
         # scrub_paths even here: comprehensive mode keeps the ARGUMENT, never the person.
         # A scratchpad path encodes the username as `-Users-name-`, which survived verbatim
         # until a real bundle was grepped for it.

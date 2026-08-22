@@ -123,11 +123,15 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
                   if (s.get("kind") or "").startswith("injection:")]
     if injections:
         bits.append(f"⚠ {len(injections)} injection finding{'s' if len(injections) != 1 else ''}")
+    secrets = [s for s in (x.get("bounded_signals") or [])
+               if (s.get("kind") or "").startswith("secret:")]
+    if secrets:
+        bits.append(f"⚠ {len(secrets)} hardcoded secret{'s' if len(secrets) != 1 else ''}")
 
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
-    if injections or flags.get("high_reach") or flags.get("heavy"):
+    if injections or secrets or flags.get("high_reach") or flags.get("heavy"):
         return "REVIEW", detail
     return "CLEAN", detail
 

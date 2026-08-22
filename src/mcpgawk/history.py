@@ -165,12 +165,26 @@ def require_human_approval() -> None:
 
 
 def load(path: str | None = None) -> dict[str, Any]:
+    return load_checked_hardened(path)[0]
+
+
+def load_checked_hardened(path: str | None = None) -> tuple[dict[str, Any], str | None]:
+    """`load_checked` plus the tighten-on-read that `load()` performs — in ONE place.
+
+    Tighten on READ as well as write. A file created by an older version stays world-readable
+    until something rewrites it, and a user who only ever reads (a `runs` or `baseline` call)
+    would keep the exposure indefinitely. Cheap, and it converges every install on first touch.
+
+    Split out for callers that need BOTH the harden and the read error: `spine.approved_pin`
+    treated "the store raised" as its unreadable signal, but this layer never raises — the error
+    travels in the tuple — so the trust-on-first-use refusal was dead code on the one failure it
+    was written for. A caller reading through `load()` gets the `[0]` that discards the error;
+    a caller pairing `state.harden` with `load_checked` by hand is the second copy of a rule
+    that then drifts. This is the single door for "harden, read, and keep the reason".
+    """
     path = path or default_path()
-    # Tighten on READ as well as write. A file created by an older version stays world-readable
-    # until something rewrites it, and a user who only ever reads (a `runs` or `baseline` call)
-    # would keep the exposure indefinitely. Cheap, and it converges every install on first touch.
     state.harden(path)
-    return load_checked(path)[0]
+    return load_checked(path)
 
 
 def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:

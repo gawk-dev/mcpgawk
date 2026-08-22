@@ -3680,6 +3680,15 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
     if not rows:
         return frame + state + err + ('<div class="note">The monitoring store exists but holds no '
                                       'servers yet.</div>')
+    # ONE staleness definition, shared with the CLI badge. The panel used its OWN 24h threshold
+    # while the CLI (status.describe_state) uses STALE_AFTER_S = 1h, so a check 2h old read a green
+    # "checked" here and "STALE 2h ago" in `mcpgawk monitor status` — the two surfaces disagreeing
+    # by 24x about whether the fleet is being watched, on the surface the founder actually reviews.
+    # And the panel swallowed an unparseable timestamp as fresh; `_age_seconds` returns None for
+    # that (UNKNOWN), which must never render as a pass. Reached only when monitoring is installed,
+    # so the monitor package is importable here (monitor_status already imported it above).
+    from gawk_platform.monitor.status import STALE_AFTER_S, _age_seconds
+
     parts = []
     stale = 0
     for r in rows:
@@ -3688,16 +3697,8 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
         # 2026-08-15: 8 local servers, last checked 1 Aug, under "11 watched" and RUNNING).
         # Local servers are excluded from polling BY DEFAULT — polling one spawns it with the
         # credentials in its config — and the tab must say which rows are history, not coverage.
-        is_stale = False
-        last = str(r.get("last_check") or "")
-        if last:
-            try:
-                from datetime import datetime, timedelta, timezone
-                is_stale = (datetime.now(timezone.utc)
-                            - datetime.fromisoformat(last.replace("Z", "+00:00"))
-                            ) > timedelta(hours=24)
-            except ValueError:
-                pass
+        age = _age_seconds(r.get("last_check"))
+        is_stale = age is None or age >= STALE_AFTER_S     # None = never-run OR unparseable: UNKNOWN
         # never checked != checked and failed. An unknown must never render as a pass.
         if is_stale and ok is not None:
             chip = '<span class="chip unv">stale — not being re-checked</span>'
@@ -3851,8 +3852,19 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
         "installed": importlib.util.find_spec("gawk_platform") is not None,
         "audit_present": db.is_file(),
         "events": [], "blocks": 0, "sessions": 0, "principals": [], "by_principal": [],
-        "live": None,
+        "live": None, "unprotected": None,
     }
+    # A lapsed trial: the gateway keeps running but no longer enforces. The Gateway pane must say so
+    # in the state, not a footnote — silence reads as protection. Visibility only; never break the
+    # page if the paid engine cannot be consulted.
+    if out["installed"]:
+        try:
+            from gawk_platform.cli import ENDED, GRACE, license_state
+            _lstate, _ = license_state()
+            if _lstate in (GRACE, ENDED):
+                out["unprotected"] = _lstate
+        except Exception:                          # noqa: BLE001
+            pass
     runs_db = str(Path(home) / ".mcpgawk" / "runs.db") if home else None
     try:
         for r in runlog.list_runs(kind="enforce", limit=25, path=runs_db):
@@ -4041,8 +4053,16 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
     raw trail."""
     frame = ('<div class="note">One endpoint in front of every server: agents call the gateway, '
              'the gateway enforces your approved baseline, observed behaviour and policy per '
-             'principal — and every allow, block and refusal lands in a tamper-evident audit '
+             'principal — and every allow, block and refusal lands in a hash-chained audit '
              'trail. Scan and verify are how it knows.</div>')
+    if gw.get("unprotected"):
+        ended = gw["unprotected"] == "ended"
+        frame = ('<div class="note bad"><b>UNPROTECTED</b> — your trial has '
+                 + ("ended" if ended else "ended (the grant is still valid)")
+                 + '. The gateway is passing every call through and enforcing NOTHING. Your agents '
+                 'still work; they are not protected. '
+                 '<a href="https://mcp.gawk.dev/pricing">Subscribe</a> to restore protection, or '
+                 'run <code>mcpgawk enforce uninstall</code> to remove it.</div>') + frame
     live = gw.get("live")
     live_html = ""
     if live:

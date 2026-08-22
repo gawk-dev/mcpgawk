@@ -134,21 +134,23 @@ def _collect(bundle: Bundle, name: str, fn: Callable[[], tuple[Section, str | No
 # --------------------------------------------------------------------------- collectors
 
 def _env_value(value: str) -> str:
-    """Ship the NAME always; ship the VALUE only when it is a path.
+    """Ship the NAME and the KIND, never the VALUE.
 
     Our own env vars are the obvious place a credential sits: beta testers export
     `GAWK_BETA_KEY` because that is how a grant is delivered, and a paid user may export
-    `GAWK_LICENSE_KEY`. Neither is a shape `redact()` recognises — a signed grant is just
-    text — so a detector would pass them straight through into a file the tester may paste
-    into a public issue.
+    `GAWK_LICENSE_KEY`. Neither is a shape `redact()` recognises — a signed grant is just text.
 
-    So the rule is structural, like the URL one: knowing an override is SET is the whole
-    diagnosis; its value only matters when it redirects a store, and those are paths. A
-    short toggle (`"1"`) still reads as set from its length.
+    This used to ship the value whenever it contained `/`, `~` or `\\`, meaning to keep
+    store-redirect PATHS, which are diagnostic. But a URL carrying a query token and a base64
+    secret BOTH contain `/`, so `GAWK_INGEST_URL=https://…?token=…` and any `/`-bearing key
+    leaked verbatim — while the PRIVACY block lists env values under "ALWAYS removed, in either
+    mode". The var NAME already says what was overridden, and a non-home path can itself carry an
+    org or user name `scrub_paths` does not catch, so the value's content is not ours to ship.
+    Length is kept so "set to something" stays legible; a URL is named as a kind (it leaks
+    nothing) so a redirect override is still distinguishable from a key.
     """
-    scrubbed = scrub_paths(value)
-    if "/" in scrubbed or "~" in scrubbed or "\\" in scrubbed:
-        return scrubbed
+    if "://" in scrub_paths(value):
+        return f"<url set: {len(value)} chars>"
     return f"<set: {len(value)} chars>"
 
 
@@ -246,21 +248,21 @@ def _runs() -> tuple[Section, str, str]:
     return section, "runs.json", json.dumps(payload, indent=2)
 
 
-def _calls() -> tuple[Section, str, str]:
-    from .spool import spool_path, summarise
+def _calls() -> tuple[Section, str | None, str | None]:
+    from .spool import spool_path
 
     path = Path(spool_path())
-    counts: dict[str, Any]
-    try:
-        counts = summarise()
-    except Exception as exc:                                     # noqa: BLE001
-        counts = {"_summarise_failed": f"{type(exc).__name__}"}
     if not path.exists():
         section = Section("calls", UNAVAILABLE,
                           "no call spool on this machine — the guard hook has never recorded "
                           "a call (not installed, or installed and never used)",
                           source=scrub_paths(str(path)))
-        return section, "calls-summary.json", json.dumps(redact_record(counts), indent=2, default=str)
+        # No file. This branch used to return "calls-summary.json" — the SAME name _calls_summary
+        # writes — so on a machine with no spool it OVERWROTE that richer body (dropping the
+        # recorder_health "counts may be INCOMPLETE" warning) while the manifest still cited the
+        # discarded bytes. The counters already live in calls-summary.json; this section only says
+        # there is no spool.
+        return section, None, None
     body, records, undecodable = redact_jsonl(path)
     state = INCLUDED if records else EMPTY
     section = Section("calls", state,
@@ -504,11 +506,26 @@ def write_bundle(bundle: Bundle, dest: Path, note: str | None = None) -> Path:
         "sections": [asdict(s) for s in bundle.sections],
     }
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("summary.txt", summary)
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
-        for name, body in bundle.files.items():
-            archive.writestr(name, body)
+    # Write to a temp path and rename into place ATOMICALLY. Streaming straight into `dest` left a
+    # truncated, unopenable zip at the exact path the tool then tells the tester to email if the
+    # write was interrupted (^C, SIGTERM, laptop sleep, disk full). os.replace is atomic on the
+    # same filesystem, so a reader sees either the previous file or the complete new one, never a
+    # half-written archive.
+    tmp = dest.with_name(dest.name + f".{os.getpid()}.part")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("summary.txt", summary)
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+            for name, body in bundle.files.items():
+                archive.writestr(name, body)
+        os.replace(tmp, dest)
+    except BaseException:
+        # Includes KeyboardInterrupt: never leave the partial temp behind, and never a corrupt dest.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     try:
         from .state import harden
 
