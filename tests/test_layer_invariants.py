@@ -78,7 +78,13 @@ def test_every_registered_signal_kind_is_about_language_not_capability():
     # (financial execution, system-service modification — Invariant's W009/W013) are exactly why
     # this family is signal-grade-only: those need semantics, and skills.py declares them
     # not-checked rather than faking them here.
-    allowed_families = {"injection", "dispatch", "shadowing", "servercard", "obfuscation", "skill"}
+    # "secret" added 2026-08-22, deliberately: a hardcoded provider credential baked into a tool
+    # DESCRIPTION, schema or prompt is model-facing text — the server ships it to every client that
+    # connects, and it appears in the same language surface the injection detectors read. It keys on
+    # the literal shape of a credential in that text, never on what a tool CAN DO, so it belongs in
+    # this layer (the skill:secret-hardcoded comment above already names "a secret pasted into the
+    # prose" as language). The value is masked, never emitted.
+    allowed_families = {"injection", "dispatch", "shadowing", "servercard", "obfuscation", "skill", "secret"}
     families = {k.split(":", 1)[0] for k in signals_mod.SIGNAL_KINDS}
     unexpected = families - allowed_families
     assert not unexpected, (

@@ -354,6 +354,14 @@ def test_a_stale_monitor_row_is_history_not_coverage():
     must say so, and the headline must not count it as watched."""
     from datetime import datetime, timedelta, timezone
 
+    import pytest
+
+    # This exercises the monitor pane with monitoring INSTALLED, which panel._monitor_pane only
+    # reaches when the paid engine is present (it returns early otherwise) — and there it imports
+    # gawk_platform.monitor.status. Skip in the free/public copy, which has no paid engine; the
+    # canonical/paid run covers it.
+    pytest.importorskip("gawk_platform.monitor.status")
+
     from mcpgawk.panel import _monitor_pane
 
     now = datetime.now(timezone.utc)
