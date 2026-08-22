@@ -1,6 +1,6 @@
 [package]
 name = "zed_mcpgawk"
-version = "0.1.29"
+version = "0.1.32"
 edition = "2021"
 publish = false
 license = "Apache-2.0"   # matches the repository LICENSE; UNLICENSED blocks distribution

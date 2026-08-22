@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "zed_mcpgawk"
-version = "0.1.29"
+version = "0.1.32"
 dependencies = [
  "zed_extension_api",
 ]
