@@ -1,0 +1,4 @@
+<idea-plugin>
+    <!-- Loaded only when the Terminal plugin is present. The sign-in action opens a real terminal
+         so the user watches the browser hand-off happen rather than discovering it afterwards. -->
+</idea-plugin>

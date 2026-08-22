@@ -1,0 +1,28 @@
+<idea-plugin>
+    <id>dev.gawk.mcpgawk</id>
+    <name>mcpgawk: see every MCP server your agents can reach</name>
+    <vendor email="hello@nativerse-ventures.com" url="https://mcp.gawk.dev">Nativerse Ventures</vendor>
+
+    <description><![CDATA[
+      Your agents call MCP servers you have never inspected. This plugin shows every server
+      configured across your AI tools, grouped by the tool it lives in, what each one can reach,
+      and which ones need attention.<br/><br/>
+      Blocking a call and catching post-approval drift are the <code>mcpgawk</code> CLI and its
+      panel, not this tool window.<br/><br/>
+      <b>Local-first.</b> The plugin runs the <code>mcpgawk</code> CLI on your machine and renders
+      what it returns. Nothing about your servers or credentials is uploaded anywhere.<br/><br/>
+      Requires the engine: <code>pipx install mcpgawk</code>.
+    ]]></description>
+
+    <!-- Platform only: this plugin works in every JetBrains IDE, so it must not depend on any
+         product-specific module. The terminal dependency is OPTIONAL for exactly that reason —
+         without it the plugin still loads and scans; only the in-IDE sign-in shortcut is absent. -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="mcpgawk-terminal.xml">org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="mcpgawk" anchor="right" secondary="false"
+                    factoryClass="dev.gawk.mcpgawk.FleetToolWindowFactory"/>
+        <applicationService serviceImplementation="dev.gawk.mcpgawk.McpgawkSettings"/>
+    </extensions>
+</idea-plugin>
