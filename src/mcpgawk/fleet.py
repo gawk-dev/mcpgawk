@@ -157,9 +157,21 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
     # was the whole point: a dangling entry is most likely to be found in a default scan, and
     # reporting it only when the user opts into launching would hide it exactly where it matters.
     if _missing_program(entry.get("command") or ""):
+        # THE CONFIG FINDINGS BELONG HERE TOO — they were dropped until 2026-09-02, and this row
+        # is the one that says "anything at that path would run" while declining to say WHAT it
+        # would do. `--allow-build`, TLS verification off, a plaintext credential: all read from
+        # the entry text, none of which depends on the program existing. A reinstall, or anything
+        # else landing at that path, runs under exactly this configuration.
+        #
+        # Found by the release gate, not by us: the four `test_configcheck` tests passed on macOS
+        # only because `pnpm` happened to be installed there, and failed on Linux CI where it is
+        # not — the same fixture became UNREACHABLE and its findings vanished.
+        detail = f"`{cmd}` no longer exists — still configured, so anything at that path would run"
+        summary = configcheck.summarize(configcheck.check(name, entry))
+        if summary:
+            detail += f" · {summary}"
         return FleetRow(
-            name=name, state="UNREACHABLE",
-            detail=f"`{cmd}` no longer exists — still configured, so anything at that path would run",
+            name=name, state="UNREACHABLE", detail=detail,
             clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
     # Config-only findings answer WITHOUT launching — and the declined server is exactly where
     # they matter most: the tester whose first run declined every local server saw "Findings 0"

@@ -17,12 +17,31 @@ because nothing was scanned, not because nothing was wrong. This file pins the w
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
 from mcpgawk import cli, fleet, panel
 from mcpgawk.configcheck import CONFIG_KINDS, RISKY_KINDS, SHORT, check, summarize
 from mcpgawk.label import _SIGNAL_LEAD, _SIGNAL_LEAD_BY_KIND
+
+
+def _claude_desktop_config(home):
+    """Where THIS platform's Claude Desktop config lives, taken from the product's own table.
+
+    Hardcoding the macOS path (`Library/Application Support/Claude`) made three of these tests
+    assert nothing on Linux: discovery reads `.config/Claude` there, found no servers, and the
+    panel they inspect rendered empty. Green on the author's Mac, red in the public repo's Linux
+    CI — the run that gates `twine upload`. Asking `discover._locations` keeps the test on the
+    same single source of truth as the code, so a path change cannot silently un-test this.
+    """
+    from mcpgawk import discover as _discover
+    rel = next(p for client, p, _shape in _discover._locations(sys.platform)
+               if client == "claude-desktop")
+    path = home / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 # One secret-shaped value per place a credential can hide. Split so no literal is push-protection
 # bait; NEVER printed by the product — test 3 asserts exactly that.
@@ -235,9 +254,7 @@ def test_low_only_config_findings_inform_without_alarming(fake_home):
     """Founder call 2026-08-23: unpinned is the ecosystem's README default, so a fresh install
     must not boot to a red Findings badge or a 'open Findings and decide' next-best-action.
     The count stays visible; the alarm colour and the Next: slot are reserved for medium+."""
-    cfgdir = fake_home / "Library" / "Application Support" / "Claude"
-    cfgdir.mkdir(parents=True)
-    (cfgdir / "claude_desktop_config.json").write_text(json.dumps(
+    _claude_desktop_config(fake_home).write_text(json.dumps(
         {"mcpServers": {"files": {"command": "npx", "args": ["-y", "example-files"],
                                   "env": {}}}}))
 
@@ -250,9 +267,7 @@ def test_low_only_config_findings_inform_without_alarming(fake_home):
 
 
 def test_medium_config_findings_do_alarm(fake_home):
-    cfgdir = fake_home / "Library" / "Application Support" / "Claude"
-    cfgdir.mkdir(parents=True)
-    (cfgdir / "claude_desktop_config.json").write_text(json.dumps(TWO_BAD_SERVERS))
+    _claude_desktop_config(fake_home).write_text(json.dumps(TWO_BAD_SERVERS))
 
     page = panel.render(panel.collect(), token="T")
 
@@ -261,9 +276,7 @@ def test_medium_config_findings_do_alarm(fake_home):
 
 
 def test_panel_page_shows_config_findings_with_nothing_ever_scanned(fake_home):
-    cfgdir = fake_home / "Library" / "Application Support" / "Claude"
-    cfgdir.mkdir(parents=True)
-    (cfgdir / "claude_desktop_config.json").write_text(json.dumps(TWO_BAD_SERVERS))
+    _claude_desktop_config(fake_home).write_text(json.dumps(TWO_BAD_SERVERS))
 
     page = panel.render(panel.collect(), token="T")
 
@@ -273,3 +286,31 @@ def test_panel_page_shows_config_findings_with_nothing_ever_scanned(fake_home):
     assert "holds a literal credential" in page
     assert "needing a decision" in page, "the Findings count still reads as if nothing is wrong"
     assert GHP not in page, "the panel printed a credential value from the config"
+
+
+def test_a_config_finding_survives_the_program_being_uninstalled(tmp_path, capsys):
+    """A dangling entry must still say WHAT it would do, not merely that it would do something.
+
+    The row already reads "still configured, so anything at that path would run" — and until
+    2026-09-02 it then withheld `--allow-build`, TLS-off and the plaintext credential, because
+    `fleet.skipped_row` returned before the configcheck summary. Nothing in those findings depends
+    on the program existing: they are read from the entry text, and a reinstall (or anything else
+    landing at that path) runs under exactly this configuration.
+
+    PLATFORM-PROOF BY CONSTRUCTION, and that is the point. The four tests above only exercised this
+    on a machine WITHOUT `pnpm`: on the author's Mac they passed, in the public repo's Linux CI —
+    the run that gates `twine upload` — the same fixture became UNREACHABLE and its findings
+    vanished. This one names a command that exists nowhere, so it takes the unreachable path on
+    every platform and cannot go quiet the way those did.
+    """
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"files": {
+        "command": "mcpgawk-no-such-program-anywhere",
+        "args": ["dlx", "example-files", "--allow-build"], "env": {}}}}))
+
+    cli.main(["scan", str(cfg)])
+    out = capsys.readouterr().out
+
+    assert "UNREACHABLE" in out, "the fixture must take the missing-program path on every platform"
+    assert "install scripts allowed" in out, (
+        "the row says anything at that path would run, then refuses to say what it would do")
