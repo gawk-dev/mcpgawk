@@ -288,29 +288,34 @@ def test_panel_page_shows_config_findings_with_nothing_ever_scanned(fake_home):
     assert GHP not in page, "the panel printed a credential value from the config"
 
 
-def test_a_config_finding_survives_the_program_being_uninstalled(tmp_path, capsys):
-    """A dangling entry must still say WHAT it would do, not merely that it would do something.
+def test_a_config_finding_survives_the_program_being_uninstalled():
+    """A dangling entry must say WHAT it would run, not merely that it would run something.
 
     The row already reads "still configured, so anything at that path would run" — and until
     2026-09-02 it then withheld `--allow-build`, TLS-off and the plaintext credential, because
     `fleet.skipped_row` returned before the configcheck summary. Nothing in those findings depends
-    on the program existing: they are read from the entry text, and a reinstall (or anything else
-    landing at that path) runs under exactly this configuration.
+    on the program existing: they are read from the entry text, and a reinstall — or anything else
+    landing at that path — runs under exactly this configuration.
 
-    PLATFORM-PROOF BY CONSTRUCTION, and that is the point. The four tests above only exercised this
-    on a machine WITHOUT `pnpm`: on the author's Mac they passed, in the public repo's Linux CI —
-    the run that gates `twine upload` — the same fixture became UNREACHABLE and its findings
-    vanished. This one names a command that exists nowhere, so it takes the unreachable path on
-    every platform and cannot go quiet the way those did.
+    PINNED AT THE ROW, NOT THROUGH A SCAN, and deliberately. The four tests above reach this path
+    only on a machine WITHOUT `pnpm`: green on the author's Mac, red in the public repo's Linux CI,
+    which is the run that gates `twine upload`. An end-to-end version has a second environment
+    dependency — with no other servers discoverable the listing renders no rows at all (a separate
+    gap, see HANDOFF) — so it would go quiet again for a different reason. This calls the function
+    that was wrong, with a command that exists nowhere, and is therefore the same test everywhere.
     """
-    cfg = tmp_path / "mcp.json"
-    cfg.write_text(json.dumps({"mcpServers": {"files": {
-        "command": "mcpgawk-no-such-program-anywhere",
-        "args": ["dlx", "example-files", "--allow-build"], "env": {}}}}))
-
-    cli.main(["scan", str(cfg)])
-    out = capsys.readouterr().out
-
-    assert "UNREACHABLE" in out, "the fixture must take the missing-program path on every platform"
-    assert "install scripts allowed" in out, (
+    row = fleet.skipped_row("files", {"command": "mcpgawk-no-such-program-anywhere",
+                                      "args": ["dlx", "example-files", "--allow-build"],
+                                      "env": {}})
+    assert row.state == "UNREACHABLE"
+    assert "no longer exists" in row.detail
+    assert "install scripts allowed" in row.detail, (
         "the row says anything at that path would run, then refuses to say what it would do")
+
+
+def test_a_reachable_declined_server_still_reports_its_config():
+    """The branch next door, so the two cannot drift: consent withheld is not ignorance."""
+    row = fleet.skipped_row("files", {"command": "python3",
+                                      "args": ["-m", "example", "--allow-build"], "env": {}})
+    assert row.state == "SKIPPED"
+    assert "install scripts allowed" in row.detail
