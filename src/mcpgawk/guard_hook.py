@@ -283,9 +283,10 @@ def _record_from_projection(server: str,
         # could approve record B while the guard enforced record A, with nothing saying so.
         # Ordering does not decide safety here — a declared-tier DENY is only reachable when a
         # baseline was found at all, so widening the lookup can add denials but never permissions.
-        # KNOWN GAP: the alias scan below takes the FIRST match and this codebase already documents
-        # that aliases collide (every `--stdio` scan is labelled `cli-stdio`). An ambiguous alias
-        # should DEFER rather than pick one; it currently picks. See HANDOFF.
+        # The alias scan below DEFERS on an ambiguous name rather than picking the first match —
+        # it was a known gap, and it is closed a few lines down. Placeholder labels
+        # (`cli-stdio` and friends) no longer reach an alias list at all: `history` refuses them at
+        # the write and sheds them at both doors, so they cannot single-match a survivor either.
         record = servers.get(f"mcp:{server}")
     if record is None:
         matches = [c for c in servers.values()
@@ -293,9 +294,9 @@ def _record_from_projection(server: str,
         if len(matches) > 1:
             # AMBIGUOUS: this name is an alias of several approved servers, and picking the first
             # meant the ENFORCING reader silently judged a call against whichever record happened to
-            # sort first. This repo already documents that aliases collide — every `--stdio` scan is
-            # labelled `cli-stdio` — so the collision is routine, not exotic. Defer LOUDLY: never
-            # enforce a baseline we cannot show belongs to the server being called.
+            # sort first. The routine source of collisions (the reused ad-hoc placeholder) is shed
+            # now, so reaching here means two config entries really do share a name. Defer LOUDLY:
+            # never enforce a baseline we cannot show belongs to the server being called.
             return None, (
                 f"{server!r} is an alias of {len(matches)} different approved servers — deferring "
                 f"(not enforcing) rather than guessing which baseline applies. Re-scan so each is "

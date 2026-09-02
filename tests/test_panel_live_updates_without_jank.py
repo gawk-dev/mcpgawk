@@ -88,7 +88,7 @@ def test_panel_js_and_events_are_served():
     with _get(f"{base}/panel.js") as r:
         body = r.read().decode()
         assert r.headers.get("Content-Type", "").startswith("application/javascript")
-        assert "EventSource" in body and "location.reload" in body
+        assert "EventSource" in body and "location.replace" in body  # completion settles via done=1
     with _get(f"{base}/events") as r:
         first = r.readline().decode()
         assert first.startswith("data: "), first

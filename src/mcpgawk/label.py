@@ -27,6 +27,10 @@ LABEL_SCHEMA = "mcpgawk/label@0.1"
 #: the agent about another's tool. A finding named inaccurately sends the reader to check the wrong
 #: thing.
 _SIGNAL_LEAD_BY_KIND = {
+    "config:unpinned-package": "floating package version on",
+    "config:tls-off": "TLS verification disabled on",
+    "config:install-scripts": "install scripts allowed on",
+    "config:plaintext-credential": "plaintext credential in the config of",
     "shadowing:cross-server-reference": "cross-server tool reference from",
     "skill:download-url": "suspicious download URL in",
     "skill:piped-exec": "fetch-and-execute pattern in",
@@ -47,6 +51,9 @@ _SIGNAL_LEAD = {
     "obfuscation": "text hidden with invisible characters in",
     # Agent-skill findings (SKILL.md trees) — surfaced by `mcpgawk skills`, not the server scan.
     "skill": "risky skill content in",
+    # Config-only findings (configcheck.py) — facts read from the entry dict, zero execution.
+    # They ride the bounded_signals list as a carrier; per-kind leads above name each one.
+    "config": "risky launch configuration on",
 }
 
 

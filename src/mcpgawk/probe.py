@@ -32,6 +32,9 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from .credentials import fingerprint as credential_fingerprint
+
+#: Where `cli.with_stored_login` parks the sign-in mark on the entry it hands to a probe.
+LOGIN_ID_KEY = "_login_id"
 from .servercard import fetch_card
 from .transport import Candidate as _Candidate
 
@@ -72,6 +75,13 @@ class ServerSnapshot:
     # construction everywhere, and a snapshot built without one (a CLI --stdio scan, a test) keeps
     # exactly the old identity.
     credential_fingerprint: str | None = None
+    #: WHICH SIGN-IN this measurement was taken through, when it went through a stored OAuth login.
+    #: Not an account name — no MCP token on this machine is a JWT or carries an `id_token`, so
+    #: there is no issuer or subject to read (measured 2026-09-02). It is our own mark for one
+    #: completed browser flow, stable across every refresh of that flow's tokens, so a LATER
+    #: sign-in is distinguishable from a refresh. Never part of the store key: re-keying on a
+    #: re-login would make it a first sighting, which is silence.
+    login_id: str | None = None
 
     @property
     def transport_corrected(self) -> bool:
@@ -494,7 +504,27 @@ async def probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     identity does not depend on whether the probe succeeded.
     """
     snap = await _probe(entry, name)
-    return replace(snap, credential_fingerprint=credential_fingerprint(entry))
+    return replace(snap, credential_fingerprint=credential_fingerprint(entry),
+                   login_id=entry.get(LOGIN_ID_KEY))
+
+
+async def probe_held(session: ClientSession, entry: dict[str, Any],
+                     name: str) -> ServerSnapshot:
+    """Measure through a session SOMEONE ELSE opened and is holding — see `remote_login`.
+
+    Servers that authenticate IN BAND (kite: a `login` tool returning a URL bound to the one
+    session that asked) can only be observed signed-in from inside that same session. Every other
+    path here opens its own, which is why the signed-in state has never been measured.
+
+    It goes through `_snapshot` and stamps the credential fingerprint exactly as `probe` does, so
+    a held-session measurement lands on the SAME store key as an ordinary scan of the same entry.
+    A second, hand-rolled listing would key or pin differently and manufacture drift between two
+    views of one server.
+    """
+    transport = "stdio" if entry.get("command") else entry.get("transport", "http")
+    snap = await _snapshot(session, name, transport)
+    return replace(snap, credential_fingerprint=credential_fingerprint(entry),
+                   login_id=entry.get(LOGIN_ID_KEY))
 
 
 async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:

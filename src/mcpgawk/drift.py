@@ -89,6 +89,27 @@ def _item_texts(snap: ServerSnapshot) -> dict[str, str]:
 #: be retrofitted onto records already written.
 RECORD_SCHEMA = 1
 
+#: WHICH RULE MINTED A PIN. The pin is the EXACT rug-pull anchor, compared by plain equality — so a
+#: pin minted under a different basis compares unequal forever, on a server that never changed.
+#:
+#: MEASURED on the founder's store 2026-09-02: `stdio:local` held approved pin `4f53cda18c2baa0c`
+#: against last-seen `e3b0c44298fc1c14`, both over an EMPTY surface (0 tools either side, nothing
+#: itemised as added, removed or changed). `4f53cda18c2baa0c` is `sha256(b"[]")` — the old basis
+#: serialised the tool list as JSON; `e3b0c44298fc1c14` is `sha256(b"")`, today's basis joining an
+#: empty list of tool bases. The server never changed. The rule did, in `b8174a3` (2026-07-23,
+#: "pins over schema+annotations, not name+description").
+#:
+#: WHY NOT REUSE THE `legacy` FLAG for this: `items` arrived in `5959449` (2026-07-20), three days
+#: EARLIER, so a record can carry an items map (non-legacy) and still hold an old-basis pin —
+#: `stdio:local`, written 2026-07-21, is exactly that record. Discriminating on `legacy` would have
+#: left this case untouched while looking fixed.
+PIN_BASIS = 2
+
+#: Records written before `b8174a3` landed carry basis 1. Ours is the timestamp we wrote, not
+#: anything a server says, so this is a fact about our own release history rather than a guess —
+#: and it retires itself: every record written from now on states its basis outright.
+_PIN_BASIS_2_FROM = "2026-07-23"
+
 
 def _item_signals(snap: ServerSnapshot) -> dict[str, list[str]]:
     """Which injection detectors each description trips, judged on the LIVE text.
@@ -194,6 +215,8 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
         "tools": _tool_hashes(snap),      # legacy shape, kept for older readers (see _tool_hashes)
         "items": _item_hashes(snap),      # the real fingerprint: tools + prompts + resources
         "schema_version": RECORD_SCHEMA,  # what wrote this, so a future reader can refuse it
+        "pin_basis": PIN_BASIS,           # which RULE minted `pin` — see PIN_BASIS
+        "login_id": snap.login_id,        # WHICH sign-in this was measured through (may be None)
         "texts": _item_texts(snap),       # redacted prose, so a diff can be SHOWN (ADR-0012)
         # Verdicts from the LIVE text, before redaction removes the evidence (see _item_signals).
         # Additive like the C1 maps below: an older record simply has no key, and compare() falls
@@ -233,6 +256,18 @@ class DriftReport:
     #: record schema). Not a diff and never silence: `any` is True so it reaches the report, the
     #: JSON and the exit code exactly as drift does — the one thing it must not do is look clean.
     unreadable: str | None = None
+    #: Set when the baseline's pin was minted under a DIFFERENT rule (see `PIN_BASIS`), so the two
+    #: pins cannot be compared. Everything else — every item hash, transport, protocol — still is,
+    #: and this is why `any` does not fire on it alone: claiming drift here is the false alarm being
+    #: removed. It must still be SAID, because "no change since your baseline" would otherwise cover
+    #: a comparison that skipped the exact anchor. The scan render carries it onto the clean line.
+    pin_not_compared: str | None = None
+    #: `(before, after)` when this scan went through a DIFFERENT completed sign-in than the one the
+    #: approved baseline was measured through. Not an account name — see `ServerSnapshot.login_id`
+    #: — but it is the moment reuse stops being safe: the guard would otherwise enforce the surface
+    #: one sign-in approved against a session opened by another. `None` whenever either side has no
+    #: mark, because "unknown" must never render as "changed".
+    login_changed: tuple[str, str] | None = None
     #: `{kind}.{name}` -> detector kinds tripped by the LIVE description, one map per record.
     #: `None` (not `{}`) when a record predates `_item_signals` — "unknown", which must not be read
     #: as "clean", so severity falls back to scanning the redacted insertion.
@@ -316,6 +351,8 @@ class DriftReport:
     def any(self) -> bool:
         if self.unreadable:
             return True          # must be REPORTED, not quietly treated as "nothing changed"
+        if self.login_changed:
+            return True          # the baseline may belong to another account — never silent
         return (self.pin_changed or bool(self.added or self.removed or self.changed
                                          or self.schema_changed or self.annotation_changed)
                 or self.transport_changed is not None
@@ -351,6 +388,23 @@ class DriftReport:
         pre = f"{kind}."
         return {field: [k[len(pre):] for k in getattr(self, field) if k.startswith(pre)]
                 for field in ("added", "removed", "changed")}
+
+
+def _pin_basis_of(rec: dict[str, Any]) -> int | None:
+    """Which rule minted this record's pin. None = cannot tell, which is NOT the same as current.
+
+    An explicit `pin_basis` wins. Without one the record predates the field, and its own
+    `measured_at` says which side of the basis change it was written on. A timestamp we cannot
+    read at all returns None: the pin is then of unknown provenance and must not be compared, since
+    a false "the pin moved" is exactly the alarm this exists to stop.
+    """
+    stated = rec.get("pin_basis")
+    if isinstance(stated, int):
+        return stated
+    at = rec.get("measured_at")
+    if not isinstance(at, str) or len(at) < 10:
+        return None
+    return PIN_BASIS if at[:10] >= _PIN_BASIS_2_FROM else 1
 
 
 def _fingerprints(rec: dict[str, Any]) -> tuple[dict[str, str], bool]:
@@ -431,8 +485,29 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     pv_p, cv_p = prev.get("protocol_version"), curr.get("protocol_version")
     protocol_changed = (pv_p, cv_p) if pv_p and cv_p and pv_p != cv_p else None
 
+    # THE PIN IS ONLY AN ANCHOR AGAINST THE SAME RULE. Two pins minted under different bases
+    # compare unequal forever (see `PIN_BASIS`), which is a permanent alarm about a change that
+    # never happened — `0cfca9b`'s class. Every OTHER comparison in this function still runs, so a
+    # real change to a tool, prompt, resource, schema, annotation, transport or protocol is still
+    # caught on its own evidence; the anchor comes back the moment the server is re-approved.
+    prev_basis = _pin_basis_of(prev)
+    pin_comparable = prev_basis == PIN_BASIS
+    pin_not_compared = None if pin_comparable else (
+        f"the approved baseline's pin was minted by an earlier mcpgawk "
+        f"(pin rule {prev_basis if prev_basis is not None else 'unknown'}; this build uses "
+        f"{PIN_BASIS}), so the two cannot be compared and the pin was NOT checked this run. "
+        f"Everything else was. Re-approve this server to restore the exact anchor.")
+
+    # A REFRESH IS NOT A CHANGE OF ACCOUNT; A NEW SIGN-IN MIGHT BE. `login_id` is minted once per
+    # completed browser flow and survives every refresh of that flow's tokens, so this fires on the
+    # second sign-in and never on the tenth refresh — the distinction the token hash could not make.
+    pl, cl = prev.get("login_id"), curr.get("login_id")
+    login_changed = (pl, cl) if pl and cl and pl != cl else None
+
     return _with_severity(DriftReport(
-        pin_changed=prev.get("pin") != curr.get("pin"),
+        login_changed=login_changed,
+        pin_changed=pin_comparable and prev.get("pin") != curr.get("pin"),
+        pin_not_compared=pin_not_compared,
         added=added, removed=removed, changed=changed,
         token_delta=delta,
         prev_at=prev.get("measured_at"),
@@ -642,6 +717,15 @@ def render(name: str, r: DriftReport) -> str:
                      f"        ! MCP protocol changed: {before} → {after}")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
+    if r.login_changed:
+        lines.append("        ! SIGNED IN AS SOMEONE ELSE, possibly: this scan went through a "
+                     "different sign-in than the one your baseline was approved under. mcpgawk "
+                     "cannot read WHICH account (no MCP token here carries an issuer or subject), "
+                     "only that the sign-in is not the same one. If you switched accounts, this "
+                     "baseline describes the other account's surface — re-approve to adopt this "
+                     "one.")
+    if r.pin_not_compared:
+        lines.append(f"        · {r.pin_not_compared}")
     if r.baseline_extended:
         lines.append("        (prompts/resources were not fingerprinted before now — their "
                      "baseline starts with this scan)")

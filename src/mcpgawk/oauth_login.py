@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import threading
+import uuid
 import webbrowser
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
@@ -72,6 +74,15 @@ class FileTokenStorage:
     def __init__(self, server_url: str) -> None:
         key = hashlib.sha256(server_url.encode()).hexdigest()[:16]
         self._path = _STORE_DIR / f"{key}.json"
+        self._new_login = False
+
+    def arm_new_login(self) -> None:
+        """A human just completed the browser flow on THIS storage — stamp the next token write.
+
+        Armed from the authorization-code callback, which a refresh never reaches. That is the
+        whole discriminator: a refresh rewrites the tokens, a sign-in rewrites WHO.
+        """
+        self._new_login = True
 
     def _read(self) -> dict:
         try:
@@ -117,8 +128,27 @@ class FileTokenStorage:
         return OAuthToken.model_validate(d) if d else None
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
+        """Store the tokens, and stamp WHICH SIGN-IN they belong to.
+
+        `login_id` is minted by our own act (a completed browser flow), not read off a credential:
+        no MCP token on this machine is a JWT and none carries an `id_token`, so there is no issuer
+        or subject to derive an account from — measured on the founder's store 2026-09-02, three
+        stored logins, access tokens of 9/86/426 chars, not one JWT-shaped. What CAN be known is
+        that the sign-in behind these tokens is a DIFFERENT sign-in from the one behind an approved
+        baseline, which is exactly when reusing that baseline stops being safe.
+
+        PRESERVED ACROSS REFRESHES BY CONSTRUCTION: this merges into the existing document and only
+        re-mints when `arm_new_login` says a browser flow just completed. A value that moved on
+        every refresh would be the notion bug again — new identity, first sighting, silence.
+        """
         d = self._read()
         d["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        if self._new_login or not d.get("login_id"):
+            # Back-filling an existing store is safe: `drift.compare` claims nothing when either
+            # side lacks the field, so a store that gains its first id does not report a change.
+            d["login_id"] = uuid.uuid4().hex[:12]
+            d["logged_in_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._new_login = False
         self._write(d)
 
     async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
@@ -237,16 +267,22 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
         except Exception:  # noqa: BLE001 — headless/no-browser: the printed URL is the fallback
             pass
 
+    storage = FileTokenStorage(server_url)
+
     async def _callback() -> AuthorizationCodeResult:
         await asyncio.to_thread(done.wait, 300)
         if not captured["code"]:
             raise TimeoutError("no authorization code received within 5 minutes")
+        # A code came back, so a PERSON just approved this in a browser. Only this path arms the
+        # new-sign-in stamp; the SDK's refresh reaches `set_tokens` without ever coming through
+        # here, which is what keeps a refresh from looking like a change of account.
+        storage.arm_new_login()
         return AuthorizationCodeResult(code=captured["code"], state=captured["state"])
 
     provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
-        storage=FileTokenStorage(server_url),
+        storage=storage,
         redirect_handler=_redirect,
         callback_handler=_callback,
     )

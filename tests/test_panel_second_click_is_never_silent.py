@@ -25,7 +25,10 @@ def test_a_second_click_is_acknowledged_and_cleared(monkeypatch):
     panel._run_action_bg("verify", "srv")          # the click that used to vanish
 
     banner = panel._action_banner(dict(panel._ACTION))
-    assert "verify · srv" in banner and "not started" in banner, \
+    # Copy re-pinned to slice 1 (2026-08-24): a refused action reads as QUEUED with the running
+    # action named, not the old "not started". The invariant — the second click is never silent —
+    # is unchanged and still asserted.
+    assert "verify · srv" in banner and "queued" in banner.lower(), \
         "a second click while an action runs left no visible trace"
     assert "Running" in banner, "the running state itself must still be shown"
 

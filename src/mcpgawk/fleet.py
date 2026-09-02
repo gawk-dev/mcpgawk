@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from . import configcheck
 from .ambient import detect_ambient, summarize
 from .redact import redact_url
 from .probe import _missing_program
@@ -127,11 +128,19 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
                if (s.get("kind") or "").startswith("secret:")]
     if secrets:
         bits.append(f"⚠ {len(secrets)} hardcoded secret{'s' if len(secrets) != 1 else ''}")
+    config = [s for s in (x.get("bounded_signals") or [])
+              if (s.get("kind") or "").startswith("config:")]
+    risky_config = [s for s in config if (s.get("kind") or "") in configcheck.RISKY_KINDS]
+    if config:
+        # Counted with a warning only when a kind is REVIEW-worthy on its own; an unpinned
+        # version is the ecosystem default and must inform, not shout (see configcheck.RISKY_KINDS).
+        mark = "⚠ " if risky_config else ""
+        bits.append(f"{mark}{len(config)} config finding{'s' if len(config) != 1 else ''}")
 
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
-    if injections or secrets or flags.get("high_reach") or flags.get("heavy"):
+    if injections or secrets or risky_config or flags.get("high_reach") or flags.get("heavy"):
         return "REVIEW", detail
     return "CLEAN", detail
 
@@ -152,7 +161,15 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
             name=name, state="UNREACHABLE",
             detail=f"`{cmd}` no longer exists — still configured, so anything at that path would run",
             clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
-    return FleetRow(name=name, state="SKIPPED", detail=f"local `{cmd}` — not launched (needs --yes)",
+    # Config-only findings answer WITHOUT launching — and the declined server is exactly where
+    # they matter most: the tester whose first run declined every local server saw "Findings 0"
+    # because nothing was scanned, not because nothing was wrong. Zero execution, so consent to
+    # launch was never needed for this part of the answer.
+    detail = f"local `{cmd}` — not launched (needs --yes)"
+    summary = configcheck.summarize(configcheck.check(name, entry))
+    if summary:
+        detail += f" · {summary}"
+    return FleetRow(name=name, state="SKIPPED", detail=detail,
                     clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
 
 

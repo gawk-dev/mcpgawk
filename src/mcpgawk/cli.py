@@ -17,9 +17,9 @@ import shlex
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
-from . import drift, fleet, history, runlog
+from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_report
@@ -69,6 +69,47 @@ class _NoMatchingServers(Exception):
     violating its 3-tuple return contract."""
 
 
+def _configured_as(url: str, args) -> str | None:
+    """The config name for an ad-hoc `--http/--sse` URL, when scanning it AS that server is safe.
+
+    WHY ROUTE RATHER THAN RELABEL (2026-08-27). `mcpgawk scan --http <url>` against a URL the machine
+    already has configured used to produce a SECOND record for one server — that is how
+    `mcp:Notion MCP` (aliases `['cli-http']`, no config name) came to exist beside the real one, and
+    it took a hand repair of the founder's trust store to undo.
+
+    The tempting fix — stamp the config NAME onto the ad-hoc record as an alias — recreates the bug
+    for every credentialled server. An ad-hoc probe carries no credential discriminator, so it keys
+    bare `mcp:<asserted>` while the config record sits at `mcp:<asserted>#<fingerprint>`; one alias
+    on two records makes `resolve` return None, and `approve <name>` stops landing anywhere. That is
+    byte-for-byte the state that was repaired by hand, minted fresh by its own fix.
+
+    So the scan is ROUTED down the config path instead: same entry dict, same `with_stored_login`,
+    same inputs to `key_for`. The key is identical by construction and there is no relabelling logic
+    to get wrong.
+
+    Returns None — falling through to the ad-hoc path, the safe direction — when:
+      * the caller passed `--header`: they are deliberately probing with DIFFERENT credentials, and
+        silently swapping in the configured ones would answer a question nobody asked;
+      * the caller passed `--login`: they explicitly want the browser flow against this URL;
+      * `--only` was given too, so the caller has already said what they mean;
+      * the URL matches no entry, or MORE THAN ONE. Ambiguity is refused rather than guessed, the
+        same rule `resolve` and `_shed_credential_keys` follow — picking one would attach this scan
+        to whichever entry happened to sort first.
+
+    Matching is plain equality. Deliberately no normalisation: a near-miss falling through costs one
+    extra record, while a wrong match writes a sighting into another server's history.
+    """
+    if getattr(args, "header", None) or getattr(args, "login", False) or getattr(args, "only", None):
+        return None
+    try:
+        from .discover import discover_servers
+        cfg = _load_config(args.config) if getattr(args, "config", None) else discover_servers()
+    except Exception:                              # noqa: BLE001 — routing is an optimisation
+        return None
+    matches = [n for n, e in cfg.items() if isinstance(e, dict) and e.get("url") == url]
+    return matches[0] if len(matches) == 1 else None
+
+
 async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[str, dict]]]:
     """Returns snapshots, the raw entry (command/args/headers) each came from, and the targets we
     deliberately did NOT scan (consent withheld). The entries feed the opt-in supply-chain/
@@ -82,6 +123,13 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         # branch it saw first and then rejecting the other one's headers dict.
         entry: dict[str, Any] = {"command": parts[0], "args": parts[1:]}
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}, []
+    if (args.http or args.sse) and (routed := _configured_as(args.http or args.sse, args)):
+        # Scanning a configured server BY URL is still scanning that server. Say so, then let the
+        # config path below do it — see _configured_as for why relabelling would split the record.
+        print(f"mcpgawk: {args.http or args.sse} is configured here as `{routed}` — scanning it as "
+              f"that server, so the result lands on its existing record.", file=sys.stderr)
+        args.only = routed
+        args.http = args.sse = None
     if args.http or args.sse:
         url = args.http or args.sse
         transport = "http" if args.http else "sse"
@@ -176,8 +224,71 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     # would let the summary imply coverage we don't have.
     ok_names = {n for n, _ in approved}
     skipped = [(n, e) for n, e in targets if n not in ok_names]
-    snaps = await asyncio.gather(*(probe(e, n) for n, e in approved))
-    return list(snaps), {n: e for n, e in approved}, skipped
+    # USE THE LOGIN THE USER ALREADY COMPLETED. `as_authenticated_remote` existed, was tested, and
+    # was called by NOTHING — so signing in stored a token that no scan ever picked up, and the
+    # next run still reported "needs credentials". Measured on notion 2026-08-27: sign-in
+    # succeeded, the token worked when passed by hand with --header, and the scan refused anyway.
+    # Attaching it here is not new consent: the browser sign-in WAS the consent, and a scan only
+    # lists what the server exposes.
+    approved = [(n, with_stored_login(e)) for n, e in approved]
+    held_snaps: dict[str, ServerSnapshot] = {}
+    if getattr(args, "sign_in", False):
+        held_snaps = _measure_through_signin(approved)
+    snaps = await asyncio.gather(*(probe(e, n) for n, e in approved if n not in held_snaps))
+    out = list(snaps) + [held_snaps[n] for n, _ in approved if n in held_snaps]
+    return out, {n: e for n, e in approved}, skipped
+
+
+def _measure_through_signin(approved: list[tuple[str, dict]]) -> dict[str, ServerSnapshot]:
+    """Hold ONE session open across a human sign-in, then measure the server through it.
+
+    WHY THIS PATH EXISTS. kite binds a login to the single MCP session that asked for it (measured
+    twice, 2026-08-27: a brand new session is "Please log in first" hours after a successful
+    browser login). Every other measuring path opens its own session, so the SIGNED-IN state of an
+    in-band-auth server has never been observed by this product — the sign-in button held a
+    session, handed out a link, and let the session sleep and close having measured nothing.
+
+    REFUSALS, deliberate, each because guessing would produce a reassuring answer that is not
+    true:
+      * more than one server selected — the flow needs a human at a browser, one server at a
+        time; which one they signed into is not something to infer;
+      * no terminal to ask on — with nobody to wait for, this would measure an UNAUTHENTICATED
+        session and record it as signed-in, which is this product's failure mode exactly;
+      * the server offers no in-band login tool, or the sign-in did not go through — the ordinary
+        probe still runs, so the scan reports what it always would, and says why.
+    """
+    from . import remote_login
+    if len(approved) != 1:
+        print("mcpgawk scan --sign-in: name ONE server (--only <name>) — a sign-in needs a person "
+              "at a browser, and which server they signed into is not something to infer.",
+              file=sys.stderr)
+        return {}
+    if not sys.stdin.isatty():
+        print("mcpgawk scan --sign-in: needs a terminal to wait on. Without one it would measure "
+              "a session nobody signed into and record it as signed-in.", file=sys.stderr)
+        return {}
+    name, entry = approved[0]
+    held = remote_login.held_session(entry.get("url"), command=entry.get("command"),
+                                     args=entry.get("args"), env=entry.get("env"))
+    if held is None:
+        print(f"mcpgawk scan --sign-in: {name} does not sign in through a login tool of its own — "
+              f"scanning it the ordinary way.", file=sys.stderr)
+        return {}
+    try:
+        print(f"\n{name} says:\n{held.notice}\n", file=sys.stderr)
+        print(f"Open this and sign in — it is bound to the session being held for you:\n\n"
+              f"  {held.auth_url}\n", file=sys.stderr)
+        input("Press Enter once the browser says you are signed in... ")
+        authorised, words = held.authorisation()
+        if not authorised:
+            print(f"mcpgawk scan --sign-in: {name} does not consider this session signed in "
+                  f"({words.strip()[:200]}) — scanning it the ordinary way instead.",
+                  file=sys.stderr)
+            return {}
+        print(f"  signed in — {words.strip()[:200]}", file=sys.stderr)
+        return {name: held.measure(entry, name)}
+    finally:
+        held.close()
 
 
 def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = None) -> dict:
@@ -186,8 +297,12 @@ def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = N
     refreshed row would start disagreeing with the row it replaced."""
     sigs = None
     if not args.no_signals:
+        # Config-only findings ride the same carrier as bounded signals so every renderer keyed on
+        # the kind prefix carries them — but they come from the ENTRY, not the snapshot, so a
+        # server also gets them when probing found nothing to say (see configcheck.py).
         sigs = (as_dicts(detect(sn)) + as_dicts((shadow or {}).get(sn.name, []))
-                + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn)))
+                + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn))
+                + as_dicts(configcheck.check(sn.name, entry)))
     label = build_label(sn, m, bounded_signals=(sigs or None))
     # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a credential the
     # user already supplied (no egress, but still consent-gated).
@@ -284,6 +399,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--oauth-redirect-uri",
                    help="override the pinned redirect URI (must match the provider's "
                         "registration EXACTLY)")
+    s.add_argument("--sign-in", dest="sign_in", action="store_true",
+                   help="for a server that signs in through its OWN login tool (kite): hold one "
+                        "session open, wait while you sign in, then measure THROUGH that session")
     s.add_argument("--only", help="comma-separated server names to scan from the config")
     s.add_argument("--yes", "-y", action="store_true",
                    help="launch discovered/configured local (stdio) servers WITHOUT the consent "
@@ -1200,6 +1318,104 @@ def _front_door_verify(choice: str) -> None:
               "\n  name-only; protection is unaffected.")
 
 
+class _Sighting(NamedTuple):
+    """What recording one measured server produced. Returned so a caller can RENDER what it wrote —
+    a sighting that lands silently is indistinguishable from one that never landed."""
+    key: str
+    previous: dict | None
+    report: Any
+    reidentified_from: str | None
+
+
+def _record_sighting(sn, m, *, now: str, collided=frozenset()) -> "_Sighting | None":
+    """THE single writer for a measured server. Every path that MEASURES must come through here.
+
+    WHY IT IS A FUNCTION AND NOT A LOOP BODY (found 2026-08-27, on the founder's own machine). The
+    scan had two places that produce a Measurement: the main pass, and the re-probe after a batched
+    sign-in. Only the first recorded. So a server behind OAuth — measured for 22 seconds, 28 tools,
+    19 leak paths, rendered as REVIEW — wrote NOTHING, and the next run reported "no drift" because
+    no comparison had happened. The measurement existed; nobody's job was to persist it.
+
+    Note what did NOT catch it: every invariant in this repo guards a WRITE — `approve`, `record`,
+    and the assignment that moves an approved baseline. A path that never calls the writer is
+    invisible to a write-side gate; you cannot enumerate a missing call by scanning for the call.
+    (Do not spell that assignment literally anywhere in this file: the writer-gate invariant matches
+    raw lines, so quoting its marker in prose reports this function as a baseline writer. It caught
+    exactly that on 2026-08-27 — a false positive, and the safe direction for it to fail in.)
+    Hence its mirror,
+    `tests/test_every_measurement_is_recorded.py`, and hence one recorder rather than two loops.
+
+    Returns None when the probe errored — recording an errored probe would write an empty tool list
+    as the truth.
+    """
+    if not history.should_record(sn):
+        return None
+    # Read-the-baseline and write-the-current under ONE lock (history.record). Split across a
+    # load()/save() pair, two concurrent scans each diff against a baseline the other has already
+    # replaced, and one server's drift history is silently lost.
+    current = drift.build_record(sn, m, measured_at=now)
+    asserted = history.key_for(sn)
+    key = history.legacy_key_for(sn) if asserted in collided else asserted
+    store = history.load()
+    # `migrate_from` carries every key this server could already be recorded under — the legacy
+    # `transport:name` variants (B3), the un-discriminated `mcp:<asserted>` from before the login
+    # joined the identity, and `credential_shed_keys` for the reverse move made on 2026-08-27, when
+    # a machine-attached OAuth token stopped counting as identity. The fix for silent baseline
+    # resets must not itself cause one, in any direction.
+    migrate_keys = tuple(history.legacy_identity_keys(sn)) + history.credential_shed_keys(
+        store, key, sn.name)
+    # C2 — a server that changes the name it ASSERTS gets a new key, and a new key is a first
+    # sighting, which is silence. Check before recording, or the entry we would be comparing
+    # against is the one we just created.
+    was = history.identity_change(store, key, sn.name)
+    if was in migrate_keys:
+        # OUR key scheme changed, the server did not. `record` adopts that exact record below, so
+        # the baseline DOES carry over — announcing "identifies itself as a DIFFERENT server … its
+        # baseline does not carry over" would be a false alarm that fires once for every
+        # credentialled server on upgrade, and it would be untrue.
+        was = None
+    previous = history.record(key, current, migrate_from=migrate_keys, alias=sn.name)
+    return _Sighting(key=key, previous=previous,
+                     report=drift.compare(previous, current), reidentified_from=was)
+
+
+def with_stored_login(entry: dict) -> dict:
+    """The same entry, carrying the bearer token this machine already holds for it.
+
+    Module-level and named so it can be tested against the shape a config actually produces. It
+    was previously a closure that did not exist at all: `as_authenticated_remote` was written and
+    unit-tested and called by NOTHING, so a completed sign-in stored a token no scan ever read.
+
+    A local server is returned untouched — there is nothing to attach and nothing to leak.
+    """
+    try:
+        from . import credentials as _credentials
+        from . import remote_login as _rl
+        if entry.get("command") and not _rl.wrapped_remote_url(entry):
+            return entry
+        cfg = _rl.as_authenticated_remote(entry)
+        if not cfg:
+            return entry
+        merged = dict(entry)
+        merged.update(cfg)
+        merged["headers"] = {**(entry.get("headers") or {}), **cfg["headers"]}
+        # The attached token must NOT become part of this server's identity. The store key carries
+        # `credentials.fingerprint`, which hashes `headers` — so without this line an OAuth refresh
+        # re-keys the server, and a re-keyed server is a first sighting, which is silence. Measured
+        # on notion 2026-08-27: dc5a20f0a98b -> 479090bf5998 across one refresh. Pin what the CONFIG
+        # declares; a token this machine fetched for itself says nothing about which account the
+        # config points at.
+        merged[_credentials.IDENTITY_AS_DECLARED] = _credentials.material(entry)
+        # WHICH sign-in this token came from. Deliberately NOT part of the identity the key is
+        # built from — see ServerSnapshot.login_id — but recorded, so a scan taken through a
+        # DIFFERENT sign-in than the approved baseline says so instead of silently reusing it.
+        from .probe import LOGIN_ID_KEY as _lid
+        merged[_lid] = _rl.stored_login_id(cfg["url"])
+        return merged
+    except Exception:                              # noqa: BLE001 — a scan must survive this
+        return entry
+
+
 def _scan_target(raw: list[str]) -> str | None:
     """What this scan was pointed at, for the run log's `target` column. A fleet scan (no explicit
     transport flag) legitimately has no single target and records None rather than inventing one."""
@@ -1303,8 +1519,12 @@ def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
     wrong", the exact evasion a renamed server uses). A finding the user explicitly MUTED is
     excluded: that is their decision, not ours."""
     def _live(lab: dict) -> bool:
+        # config:* findings are deliberately excluded from the exit decision: unpinned is the
+        # ecosystem's README default, so failing CI on it would train people onto --no-signals —
+        # which silences the injection findings this exit exists for (configcheck.py's contract).
         return any(not s.get("muted")
-                   for s in (lab["x-mcpgawk"].get("bounded_signals") or []))
+                   for s in (lab["x-mcpgawk"].get("bounded_signals") or [])
+                   if not (s.get("kind") or "").startswith("config:"))
 
     return (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
             or any(_live(lab) for lab in labels)
@@ -1427,7 +1647,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 _url = str((entries.get(_sn.name) or {}).get("url") or "")
                 if _url:
                     _needs[_sn.name] = _url
-        _rl.record_auth_needed(_needs)
+        # Bound the clearing to what this run actually probed. A one-URL scan must not speak for
+        # servers it never looked at.
+        _rl.record_auth_needed(_needs, scanned={_sn.name for _sn in snaps})
     except Exception:                               # noqa: BLE001 — bookkeeping never costs a scan
         pass
 
@@ -1440,10 +1662,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     # --track: record locally and diff against the last sighting (rug-pull detection).
     drift_reports: dict[str, drift.DriftReport] = {}
+    pin_notes: dict[str, str] = {}          # servers whose pin this build cannot compare
     new_baselines: list[str] = []
     reidentified: dict[str, str] = {}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if args.track:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Keying on the server's asserted identity (so a rename can't orphan a baseline) means two
         # config entries for the SAME server collapse onto one key. Left alone they overwrite each
         # other's history every scan and drift flaps forever — and a false alarm that fires every
@@ -1455,42 +1678,21 @@ def _dispatch(argv: list[str] | None = None) -> int:
             seen[history.key_for(sn)] = seen.get(history.key_for(sn), 0) + 1
         collided = {k for k, n in seen.items() if n > 1}
         for sn, m in zip(snaps, measurements):
-            if not history.should_record(sn):
+            seen_now = _record_sighting(sn, m, now=now, collided=collided)
+            if seen_now is None:
                 continue          # an errored probe would record an empty tool list as the truth
-            # Read-the-baseline and write-the-current under ONE lock (history.record). Split across
-            # a load()/save() pair, two concurrent scans each diff against a baseline the other has
-            # already replaced, and one server's drift history is silently lost.
-            #
-            # `migrate_from` carries every key this server could already be recorded under — the
-            # legacy `transport:name` variants (B3) and, once the login is part of the identity, the
-            # un-discriminated `mcp:<asserted>` — so switching to the server-asserted identity,
-            # switching transport on a nameless server, and gaining a credential discriminator all
-            # adopt an existing baseline instead of orphaning it. The fix for silent baseline resets
-            # must not itself cause one, in any direction.
-            current = drift.build_record(sn, m, measured_at=now)
-            migrate_keys = history.legacy_identity_keys(sn)
-            asserted = history.key_for(sn)
-            key = history.legacy_key_for(sn) if asserted in collided else asserted
-            # C2 — a server that changes the name it ASSERTS gets a new key, and a new key is a
-            # first sighting, which is silence. Check before recording, or the entry we would be
-            # comparing against is the one we just created.
-            was = history.identity_change(history.load(), key, sn.name)
-            if was in migrate_keys:
-                # OUR key scheme changed, the server did not. `record` adopts that exact record
-                # below, so the baseline DOES carry over — announcing "identifies itself as a
-                # DIFFERENT server … its baseline does not carry over" would be a false alarm that
-                # fires once for every credentialled server on upgrade, and it would be untrue.
-                was = None
-            if was:
-                reidentified[sn.name] = was
-            previous = history.record(key, current,
-                                      migrate_from=migrate_keys,
-                                      alias=sn.name)
-            if previous is None:
+            if seen_now.reidentified_from:
+                reidentified[sn.name] = seen_now.reidentified_from
+            if seen_now.previous is None:
                 new_baselines.append(sn.name)
-            rep = drift.compare(previous, current)
-            if rep and rep.any:
-                drift_reports[sn.name] = rep
+            if seen_now.report and seen_now.report.any:
+                drift_reports[sn.name] = seen_now.report
+            if seen_now.report and seen_now.report.pin_not_compared:
+                # Kept OUTSIDE drift_reports on purpose: a pin that could not be compared is not
+                # drift, and putting it there would restore the false alarm being removed. But it
+                # must not vanish either — `no change since your baseline` would then cover a run
+                # that skipped the exact anchor, which is this product's failure mode.
+                pin_notes[sn.name] = seen_now.report.pin_not_compared
 
     # Drift must reach the MACHINE-READABLE output and the exit code, not only the pretty print.
     # A rug-pull that a CI job can't see is a rug-pull that ships: `--json` consumers and pipeline
@@ -1577,7 +1779,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("    From now on a scan reports what CHANGED — the one thing looking at your "
                   "machine today can never tell you.")
         print()
-        refreshed = _offer_batched_auth(rows, args, entries)
+        late: dict[str, _Sighting] = {}
+        refreshed = _offer_batched_auth(rows, args, entries, sightings=late,
+                                        now=now if args.track else None)
         any_error = any(lab["x-mcpgawk"].get("caveats") for lab in labels)
         if refreshed:
             # Redraw with the signed-in servers now MEASURED, rather than sending the user back to
@@ -1587,11 +1791,32 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("\n  Updated:\n")
             print(fleet.render_fleet(fleet.sort_rows(rows)))
             print()
+            # WHAT WAS WRITTEN, SAID OUT LOUD. The drift headline is printed before the sign-in
+            # step, so anything learned here would otherwise land in the store and never reach the
+            # screen — recorded silently, which reads exactly like not recorded at all. A
+            # re-identification gets the same ⛔ the main pass gives it: C2 must not be blind on
+            # this path just because the measurement arrived late.
+            for name in sorted(late):
+                seen_now = late[name]
+                if seen_now.reidentified_from:
+                    print(f"  ⛔ {name} now identifies itself as a DIFFERENT server "
+                          f"(was {seen_now.reidentified_from}). Its baseline does not carry over — "
+                          f"treat it as unreviewed.")
+                elif seen_now.previous is None:
+                    print(f"  ✓ Baseline recorded for {name} — from now on a scan reports what "
+                          f"CHANGED.")
+                elif seen_now.report and seen_now.report.any:
+                    print(drift.render(name, seen_now.report))
+            if late:
+                print()
             # A server that only became measurable after sign-in can carry findings — those must
-            # count towards the exit code exactly as if the first pass had seen them.
+            # count towards the exit code exactly as if the first pass had seen them. Drift and
+            # re-identification learned here count too, for the same reason.
             any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE",
                                                      "FAILED", "TIMED-OUT")
                                          for r in refreshed.values())
+            any_error = any_error or any(s.reidentified_from or (s.report and s.report.any)
+                                         for s in late.values())
         _behavioural_capability_note()
         return 1 if (any_error or failed) else 0
 
@@ -1647,8 +1872,13 @@ def _dispatch(argv: list[str] | None = None) -> int:
             else:
                 muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
                     if muted_n else ""
-                print(f"\n  ✓ {name}: no change since your baseline "
-                      f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
+                if name in pin_notes:
+                    # NOT a clean tick: the comparison ran without its exact anchor.
+                    print(f"\n  ⚠ {name}: nothing itemised changed "
+                          f"({n} tool{'s' if n != 1 else ''}{muted_note}), but {pin_notes[name]}")
+                else:
+                    print(f"\n  ✓ {name}: no change since your baseline "
+                          f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
     # Local (stdio) servers — launched this run or merely configured. Both inherit the same
     # ambient credentials the moment anything starts them, so both count towards that warning.
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
@@ -1738,7 +1968,8 @@ def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> 
     return f"  {name}: sign-in did not complete — {err[:160]}"
 
 
-def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
+def _offer_batched_auth(rows: list, args, entries: dict, *,
+                        sightings: dict | None = None, now: str | None = None) -> dict:
     """ONE prompt for every server that needs credentials — never one prompt per server, which the
     founder rejected outright as the painpoint this view exists to remove.
 
@@ -1789,7 +2020,19 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
         # the same label path as the original pass — so the refreshed row cannot disagree with the
         # one it replaces, and a server that turns out to be risky says so immediately.
         entry = entries.get(row.name) or {}
-        label = _label_for(snap, measure(snap), entry, args)
+        m = measure(snap)
+        # RECORD IT. This is the only pass that ever measures an auth-gated server, and until
+        # 2026-08-27 it was the one pass that wrote nothing — so such a server could never
+        # accumulate history, and every later scan reported "no drift" because no comparison had
+        # ever been made. Same recorder as the main pass, so the sighting cannot disagree with one.
+        # `--no-track` means "measure but write nothing", and it must mean that HERE too — a flag
+        # honoured by one of two recording paths is not honoured.
+        if getattr(args, "track", False):
+            seen_now = _record_sighting(snap, m, now=now or datetime.now(timezone.utc).isoformat(
+                timespec="seconds"))
+            if sightings is not None and seen_now is not None:
+                sightings[row.name] = seen_now
+        label = _label_for(snap, m, entry, args)
         state, detail = fleet.state_of(label)
         refreshed[row.name] = FleetRow(name=row.name, state=state, detail=detail, url=row.url,
                                        clients=row.clients, names=row.names)

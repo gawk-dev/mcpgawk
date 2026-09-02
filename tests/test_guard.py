@@ -130,24 +130,45 @@ def test_an_uninterpretable_baseline_stands_down_LOUDLY(tmp_path):
 def test_an_ambiguous_alias_defers_loudly_instead_of_picking_one(tmp_path):
     """Two approved servers sharing an alias must not be resolved by iteration order.
 
-    This repo already documents that aliases collide — every `--stdio` scan is labelled
-    `cli-stdio`, and `mcpgawk approve cli-stdio` is called a coin flip. The reporting side can
-    afford to guess; the ENFORCING side cannot, because guessing means judging one server's call
-    against another server's approved tools and recording it as checked.
+    The reporting side can afford to guess; the ENFORCING side cannot, because guessing means
+    judging one server's call against another server's approved tools and recording it as checked.
+
+    WRITTEN WITH `cli-stdio` UNTIL 2026-09-02, when placeholder labels stopped being aliases at all
+    (`history._shed_synthetic_aliases`). Using one here now asserts nothing — both records lose the
+    name before the lookup, so the function returns "unknown server", not the loud defer this test
+    exists for. The surviving case is what it always really meant: two config entries genuinely
+    sharing one name.
     """
     store = _store(tmp_path, {
-        "mcp:alpha": _approved({"read": "h1"}, aliases=["cli-stdio"]),
-        "mcp:beta": _approved({"write": "h2"}, aliases=["cli-stdio"]),
+        "mcp:alpha": _approved({"read": "h1"}, aliases=["billing"]),
+        "mcp:beta": _approved({"write": "h2"}, aliases=["billing"]),
     })
 
     from mcpgawk.guard_hook import approved_for_detail
 
-    approved, note = approved_for_detail("cli-stdio", store)
+    approved, note = approved_for_detail("billing", store)
 
     assert approved is None, "an ambiguous alias must not resolve to one of the candidates"
     assert note and "2 different approved servers" in note, note
     # Deferring is not silence: the reason has to reach the operator.
     assert "deferring" in note.lower()
+
+
+def test_a_placeholder_label_never_reaches_the_enforcing_reader(tmp_path):
+    """The other half of the same change: an ad-hoc label cannot name a server to enforce against.
+
+    It must come back as "nothing approved under that name" — which DEFERS — rather than matching
+    whichever record still carries the placeholder. Deferring here allows the call; enforcing the
+    wrong server's baseline would silently judge it against tools nobody approved for it.
+    """
+    store = _store(tmp_path, {"mcp:alpha": _approved({"read": "h1"}, aliases=["cli-stdio"])})
+
+    from mcpgawk.guard_hook import approved_for_detail
+
+    approved, _note = approved_for_detail("cli-stdio", store)
+    assert approved is None, (
+        "a placeholder single-matched the one record carrying it — the enforcing reader would "
+        "judge an unrelated server's calls against mcp:alpha's approved tools")
 
 
 def test_an_identity_keyed_approval_is_found_without_an_alias(tmp_path):

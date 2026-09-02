@@ -84,6 +84,21 @@ def stored_access_token(url: str) -> str:
     return str(tokens.get("access_token") or "")
 
 
+def stored_login_id(url: str) -> str | None:
+    """Which completed sign-in the stored tokens for `url` belong to, or None.
+
+    None is a real answer with a real meaning — "this store predates the mark, or there is no
+    login" — and `drift.compare` claims nothing when either side is None. Silence beats a guess:
+    inventing an id here would report an account change on every store written before this existed.
+    """
+    try:
+        doc = json.loads(_token_path(url).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    got = doc.get("login_id")
+    return got if isinstance(got, str) and got else None
+
+
 def _auth_needed_path() -> Path:
     """Servers a scan found to be REFUSING us for lack of credentials, so the panel can offer
     sign-in on evidence instead of on a launcher's name. Written by scan, read by any surface.
@@ -99,7 +114,8 @@ def _auth_needed_path() -> Path:
     return Path(override) if override else Path.home() / ".mcpgawk" / "auth-needed.json"
 
 
-def record_auth_needed(found: dict[str, str], path: Path | None = None) -> None:
+def record_auth_needed(found: dict[str, str], path: Path | None = None,
+                       scanned: set[str] | None = None) -> None:
     """Remember `{server name: url}` for every server whose scan came back `auth-required`.
 
     WHY THIS EXISTS. A failed probe is never written to history (`should_record` drops it), so the
@@ -108,14 +124,26 @@ def record_auth_needed(found: dict[str, str], path: Path | None = None) -> None:
     command, which meant a plain remote server that our own engine can authenticate
     (`scan --http <url> --login`) got no button at all.
 
-    Rewritten wholesale each scan, deliberately: a server that no longer refuses us must stop
-    being listed, or the offer outlives the problem.
+    Cleared for what this scan actually LOOKED AT, not for everything. A server that no longer
+    refuses us must stop being listed, or the offer outlives the problem — but `scanned` bounds
+    that to the scope of this run. Without it a single `scan --http <url>` rewrote the file to
+    that one ad-hoc server and every real server's sign-in offer vanished from the panel until
+    somebody happened to run a full scan again. Measured on the founder's fleet 2026-08-27:
+    scanning one URL erased notion's record, and notion went back to reading "configured, never
+    used" while it was in fact waiting for a login.
+
+    `scanned=None` keeps the original wholesale behaviour, which is what a full-fleet scan wants.
     """
     target = path or _auth_needed_path()
+    doc = dict(found)
+    if scanned is not None:
+        keep = {k: v for k, v in auth_needed(path).items()
+                if k not in scanned and k not in found}
+        doc = {**keep, **found}
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(found, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
         tmp.replace(target)
     except OSError:
         pass                                  # a read-only HOME must never break a scan
@@ -129,6 +157,29 @@ def auth_needed(path: Path | None = None) -> dict[str, str]:
     except (OSError, ValueError):
         return {}
     return {str(k): str(v) for k, v in doc.items() if v} if isinstance(doc, dict) else {}
+
+
+def refused_after_login(url: str, path: Path | None = None) -> bool | None:
+    """Did the last scan's refusal happen AFTER the stored login? None when it cannot be told.
+
+    Two true things look identical in the data — a token in the store and the server's name in the
+    scan's refusal record — and they call for opposite screens:
+
+      the login is STALE   (token issued, later scan refused it)  -> a sign-in must be offered
+      the login is FRESH   (scan refused, then the user signed in) -> offering again is a re-run
+                                                                      trap, and the next scan
+                                                                      clears the record anyway
+
+    Only the ORDER separates them. Neither file records an issued-at, so this compares the two
+    files' mtimes, and returns None rather than guessing when either is missing — a caller must
+    then fall back to its previous rule instead of inventing an answer from an absence.
+    """
+    try:
+        refused = (path or _auth_needed_path()).stat().st_mtime
+        issued = _token_path(url).stat().st_mtime
+    except OSError:
+        return None
+    return refused > issued
 
 
 def login_url(entry: dict[str, Any], name: str = "", path: Path | None = None) -> str:
@@ -149,8 +200,19 @@ def login_url(entry: dict[str, Any], name: str = "", path: Path | None = None) -
 
 def has_stored_login(entry: dict[str, Any]) -> bool:
     """Could this browser-auth server be verified right now, using a login already completed?"""
-    url = wrapped_remote_url(entry)
+    url = authenticated_url(entry)
     return bool(url) and bool(stored_access_token(url))
+
+
+def authenticated_url(entry: dict[str, Any]) -> str:
+    """The URL a stored login would belong to: the wrapped one, or the entry's own.
+
+    Both helpers below asked only `wrapped_remote_url`, so a PLAIN remote server — the ordinary
+    shape, `{"type": "http", "url": …}` — could complete a browser sign-in, have its token written
+    to disk, and still be treated as having none. Measured on notion 2026-08-27: signed in
+    successfully, and the very next scan said "needs credentials — not scanned".
+    """
+    return wrapped_remote_url(entry) or str(entry.get("url") or "")
 
 
 def as_authenticated_remote(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -159,7 +221,7 @@ def as_authenticated_remote(entry: dict[str, Any]) -> dict[str, Any] | None:
     The caller is responsible for having obtained explicit consent first — see the module
     docstring. This function deliberately does nothing but build the config.
     """
-    url = wrapped_remote_url(entry)
+    url = authenticated_url(entry)
     if not url:
         return None
     token = stored_access_token(url)
@@ -346,18 +408,86 @@ def inband_setup(command: str, args: list[str], env: dict[str, str],
         return None
 
 
-def inband_login_held(url: str | None = None, *, command: str | None = None,
-                      args: list[str] | None = None, env: dict[str, str] | None = None,
-                      hold_seconds: float = 300.0,
-                      connect_timeout: float = 45.0) -> tuple[str, str] | None:
-    """Like `inband_login`, but KEEPS THE SESSION ALIVE after handing back the URL.
+class HeldSession:
+    """A live MCP session, kept open, that the caller can MEASURE THROUGH.
 
-    The defect this exists for, found by the founder clicking the real link (2026-08-14): kite's
-    `login` tool returns `…/authorize?session_id=<THIS session>` — the URL is bound to the MCP
-    session that asked. The first implementation closed the session the moment it had the URL, so
-    every link was dead on arrival: "session error" the instant a human opened it. The session now
-    stays connected in a background thread for `hold_seconds` (the same five minutes the OAuth
-    flow grants a human), which is what makes the link real.
+    THE DEFECT THIS EXISTS FOR (founder, 2026-08-27, `d011d04`): the sign-in button held a
+    session in a thread that exposed nothing, so a login completed in the browser authorised a
+    session that then slept for five minutes and closed, having measured nothing. kite binds a
+    login to the ONE session that asked for it, so that discarded session was the only place the
+    signed-in server could ever have been observed.
+
+    WHY A HANDLE AND NOT THE SESSION. The session belongs to an event loop running in a daemon
+    thread; an asyncio object touched from another thread is a race, not an API. Every method
+    here marshals its work onto the owning loop, so the session never leaves the thread that
+    created it and the caller still gets to drive it.
+    """
+
+    def __init__(self, *, auth_url: str, notice: str, login_tool: str,
+                 loop: Any, session: Any, stop: Any, thread: Any) -> None:
+        self.auth_url = auth_url
+        self.notice = notice
+        self.login_tool = login_tool
+        self._loop = loop
+        self._session = session
+        self._stop = stop
+        self._thread = thread
+
+    def _run(self, coro: Any, timeout: float) -> Any:
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+
+    def authorisation(self, timeout: float = 60.0) -> tuple[bool, str]:
+        """Re-call the server's OWN login tool; report (authorised, the server's words).
+
+        MECHANISM, NOT WORDING — deliberately. A login tool that hands back an auth URL is
+        saying the session is NOT through; one that answers with no link and no error has
+        nothing left to ask for. Matching kite's "You are already logged in as ..." would be a
+        string only kite says, and this product's failure mode is reassurance that outlives the
+        thing it was measured on. It is also the test `inband_login` already applies when it
+        refuses a login tool that yields no link.
+
+        MEASURED (2026-09-02, founder's account, one held session): before the browser flow the
+        tool returns the authorize URL; after it, `You are already logged in as <name>`,
+        is_error False, no URL. The tool surface was byte-identical either side.
+        """
+        import re as _re
+
+        async def _ask() -> tuple[bool, str]:
+            result = await self._session.call_tool(self.login_tool, {})
+            text = " ".join(getattr(c, "text", "") or "" for c in result.content)
+            errored = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+            has_url = bool(_re.search(r"https?://\S+", text))
+            return (not errored and not has_url), text
+
+        return self._run(_ask(), timeout)
+
+    def measure(self, entry: dict[str, Any], name: str, timeout: float = 180.0) -> Any:
+        """Measure the server through THIS session, via the one function that makes snapshots.
+
+        Not a lookalike listing: the pin a baseline is compared against comes from `_snapshot`'s
+        exact serialisation, so a hand-rolled one could mint a different pin for an identical
+        surface and manufacture drift that is not there.
+        """
+        from .probe import probe_held
+        return self._run(probe_held(self._session, entry, name), timeout)
+
+    def close(self) -> None:
+        """Release the session. Safe to call twice, and safe if the loop is already gone."""
+        try:
+            self._loop.call_soon_threadsafe(self._stop.set)
+        except Exception:                          # noqa: BLE001 — already closed is not an error
+            pass
+
+
+def held_session(url: str | None = None, *, command: str | None = None,
+                 args: list[str] | None = None, env: dict[str, str] | None = None,
+                 hold_seconds: float = 300.0,
+                 connect_timeout: float = 45.0) -> HeldSession | None:
+    """Drive a server's in-band `login` tool and KEEP THE SESSION ALIVE, handing back a handle.
+
+    The session closes when the handle is closed or `hold_seconds` elapses, whichever is first —
+    the same five minutes the OAuth flow grants a human, unchanged.
     """
     import asyncio
     import queue
@@ -367,10 +497,15 @@ def inband_login_held(url: str | None = None, *, command: str | None = None,
     out: queue.Queue = queue.Queue()
 
     def run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         async def go() -> None:
             from mcp.client.session import ClientSession
 
-            async def drive(session) -> bool:
+            stop = asyncio.Event()
+
+            async def drive(session: Any) -> bool:
                 await session.initialize()
                 listed = await session.list_tools()
                 name = next((t.name for t in listed.tools
@@ -384,8 +519,18 @@ def inband_login_held(url: str | None = None, *, command: str | None = None,
                 if not hit:
                     out.put(None)
                     return False
-                out.put((hit.group(0).rstrip(".,)*`"), text[:400]))
+                out.put(HeldSession(auth_url=hit.group(0).rstrip(".,)*`"), notice=text[:400],
+                                    login_tool=name, loop=loop, session=session, stop=stop,
+                                    thread=threading.current_thread()))
                 return True
+
+            async def hold(session: Any) -> None:
+                if not await drive(session):
+                    return
+                try:
+                    await asyncio.wait_for(stop.wait(), hold_seconds)
+                except asyncio.TimeoutError:
+                    pass                           # the hold expired; closing is the right end
 
             if command:
                 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -393,25 +538,52 @@ def inband_login_held(url: str | None = None, *, command: str | None = None,
                                                env=dict(env or {}))
                 async with stdio_client(params) as (read, write):
                     async with ClientSession(read, write) as session:
-                        if await drive(session):
-                            await asyncio.sleep(hold_seconds)   # the link lives while we do
+                        await hold(session)
             elif url:
                 from mcp.client.streamable_http import streamable_http_client
                 async with streamable_http_client(url) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
-                        if await drive(session):
-                            await asyncio.sleep(hold_seconds)
+                        await hold(session)
 
         try:
-            asyncio.run(go())
+            loop.run_until_complete(go())
         except Exception:                          # noqa: BLE001 — the queue carries the verdict
             try:
                 out.put(None)
             except Exception:                      # noqa: BLE001
                 pass
+        finally:
+            try:
+                loop.close()
+            except Exception:                      # noqa: BLE001
+                pass
 
     threading.Thread(target=run, daemon=True, name="mcpgawk-held-login").start()
     try:
-        return out.get(timeout=connect_timeout)
+        got = out.get(timeout=connect_timeout)
     except queue.Empty:
         return None
+    return got if isinstance(got, HeldSession) else None
+
+
+def inband_login_held(url: str | None = None, *, command: str | None = None,
+                      args: list[str] | None = None, env: dict[str, str] | None = None,
+                      hold_seconds: float = 300.0,
+                      connect_timeout: float = 45.0) -> tuple[str, str] | None:
+    """Like `inband_login`, but KEEPS THE SESSION ALIVE after handing back the URL.
+
+    The defect this exists for, found by the founder clicking the real link (2026-08-14): kite's
+    `login` tool returns `.../authorize?session_id=<THIS session>` — the URL is bound to the MCP
+    session that asked. The first implementation closed the session the moment it had the URL, so
+    every link was dead on arrival: "session error" the instant a human opened it. The session now
+    stays connected in a background thread for `hold_seconds` (the same five minutes the OAuth
+    flow grants a human), which is what makes the link real.
+
+    Kept as the tuple-returning shape for callers that only need the link. A caller that wants to
+    MEASURE the signed-in server wants `held_session` and its handle instead.
+    """
+    held = held_session(url, command=command, args=args, env=env,
+                        hold_seconds=hold_seconds, connect_timeout=connect_timeout)
+    if held is None:
+        return None
+    return held.auth_url, held.notice

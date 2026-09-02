@@ -202,7 +202,12 @@ def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
     path = path or default_path()
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f), None
+            store = json.load(f)
+        # A store written before the synthetic-alias gate still carries placeholders. Shed them
+        # HERE so every alias reader gets the cleaned view, not just the ones that also save.
+        if isinstance(store, dict):
+            _shed_synthetic_aliases(store)
+        return store, None
     except FileNotFoundError:
         return {"servers": {}}, None            # a fresh machine: genuinely nothing approved yet
     except json.JSONDecodeError as exc:
@@ -283,6 +288,9 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
     path = path or default_path()
     # THE persistence boundary — every writer lands here (record, approve, baseline). Masking here
     # rather than in each caller is the whole point: a rule that lives in one caller is not a rule.
+    # The same argument carries the alias shed: converge the FILE, so a store repaired in memory by
+    # one read does not go back to disk carrying the placeholders again.
+    _shed_synthetic_aliases(store)
     for entry in (store.get("servers") or {}).values():
         if not isinstance(entry, dict):
             continue
@@ -464,6 +472,51 @@ def locked(path: str | None = None):
                 pass
 
 
+#: Names an ad-hoc scan invents for a target that HAS no config name (`--http`, `--stdio`,
+#: `--sse`). They are labels for one run, never identities, and they must never be recorded as
+#: aliases: the same placeholder is reused for every ad-hoc scan, so it accumulates on unrelated
+#: servers and then names none of them. Measured on the founder's store 2026-08-27 —
+#: `cli-http` was an alias on BOTH `mcp:Kite MCP Server` and `mcp:Notion MCP`, so
+#: `resolve("cli-http")` returned None: an approve by that name could not land anywhere, and the
+#: alias table said two different servers answered to one word.
+#:
+#: Gated HERE, at the write, and not in the callers: every path that records a sighting goes
+#: through this function, and a rule enforced in one caller is a rule the next caller will miss.
+SYNTHETIC_NAMES = frozenset({"cli-http", "cli-stdio", "cli-sse"})
+
+
+def _shed_synthetic_aliases(store: dict[str, Any]) -> int:
+    """Strip placeholder labels from every record's alias list. Returns how many were removed.
+
+    THE WRITE GATE CAME LATER THAN THE DATA. `record` has refused to write a `SYNTHETIC_NAMES`
+    alias since 2026-08-27, but stores written before it keep what they already had — measured on
+    the founder's machine 2026-09-02: `cli-stdio` sat on FOUR records (`driftling`, `mcpgawk`,
+    `notes-pro`, `secure-filesystem-server`). A gate on new writes does nothing about them.
+
+    WHY IT IS NOT INERT, though today it looks it. Four records answering to one word makes
+    `resolve` return None, so nothing lands — which reads as harmless. It is one deletion away from
+    harm: drop three of those servers and the word resolves to the SURVIVOR, and
+    `mcpgawk approve cli-stdio` then moves a baseline the operator never meant to touch, silently.
+    The hazard is not the collision; it is the collision ENDING.
+
+    Both doors, deliberately. On READ so every alias reader — the panel, the fleet rows, the
+    protect report, `baseline.export`, the guard hook's projection — is covered by one change
+    instead of fourteen; on WRITE so the file itself converges the first time anything saves.
+    """
+    shed = 0
+    for entry in (store.get("servers") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        aliases = entry.get("aliases")
+        if not isinstance(aliases, list):
+            continue
+        kept = [a for a in aliases if a not in SYNTHETIC_NAMES]
+        if len(kept) != len(aliases):
+            shed += len(aliases) - len(kept)
+            entry["aliases"] = kept
+    return shed
+
+
 def record(key: str, rec: dict[str, Any], path: str | None = None,
            keep: int = 50, migrate_from: tuple[str, ...] = (),
            alias: str | None = None) -> dict[str, Any] | None:
@@ -502,7 +555,7 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
             # name; a claim with no alias to attribute keeps none, because a name we cannot
             # attribute is exactly the thing that must not resolve.
             entry["aliases"] = [alias] if alias else []
-        if alias:
+        if alias and alias not in SYNTHETIC_NAMES:
             # The key is the server's asserted identity; the user thinks in config names. Remember
             # every name this server has been configured under so `approve <name>` resolves.
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
@@ -587,9 +640,12 @@ def resolve(store: dict[str, Any], wanted: str) -> str | None:
     None when nothing matches AND when the name is AMBIGUOUS — an alias of several records. This
     used to take the first match, which is the write-side twin of the bug the enforcing reader
     already defers on: an operator typing `mcpgawk approve billing` would move the approved baseline
-    of whichever record happened to sort first, and nothing would say so. Aliases are known to
-    collide in this codebase (every `--stdio` scan is labelled `cli-stdio`), so this is routine, not
-    exotic. Callers that need to explain the ambiguity use `resolve_all`.
+    of whichever record happened to sort first, and nothing would say so.
+
+    The routine source of collisions was the placeholder every ad-hoc scan reused (`cli-stdio` and
+    friends). Those are refused outright now — see `resolve_all` and `_shed_synthetic_aliases` —
+    so a genuine collision means two config entries really do share a name, which is rare and worth
+    refusing loudly. Callers that need to explain the ambiguity use `resolve_all`.
     """
     matches = resolve_all(store, wanted)
     return matches[0] if len(matches) == 1 else None
@@ -604,6 +660,13 @@ def resolve_all(store: dict[str, Any], wanted: str) -> list[str]:
         return [wanted]
     if f"mcp:{wanted}" in servers:
         return [f"mcp:{wanted}"]
+    if wanted in SYNTHETIC_NAMES:
+        # A PLACEHOLDER NEVER NAMES A SERVER. `--stdio`/`--http`/`--sse` scans all label their one
+        # target the same way, so the word belongs to no server in particular. Refusing it here is
+        # the invariant that does not depend on the data being clean: an old store still carrying
+        # `cli-stdio` on a single record would otherwise single-match, and `approve cli-stdio`
+        # would move a baseline the operator never named.
+        return []
     return [key for key, entry in servers.items() if wanted in (entry.get("aliases") or [])]
 
 
@@ -646,10 +709,11 @@ def display_name(store: dict[str, Any], key: str) -> str:
         return key
     primary = aliases[0]
 
-    # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias — every
-    # `--stdio` scan is labelled `cli-stdio`, so a fleet can show two rows reading identically.
-    # A user then cannot tell which one changed, and `mcpgawk approve cli-stdio` is a coin flip.
-    # Where the name does not identify one server, say which one.
+    # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias, and a
+    # fleet then shows two rows reading identically: a user cannot tell which one changed, and
+    # `approve <that name>` is a coin flip. The routine source of this — the placeholder every
+    # ad-hoc scan reused — is gone (`_shed_synthetic_aliases`), so what is left is two config
+    # entries genuinely sharing a name. Rarer, and still worth saying out loud.
     sharing = [k for k, v in servers.items()
                if k != key and primary in ((v or {}).get("aliases") or [])]
     if sharing:
@@ -701,7 +765,7 @@ def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...],
     servers = store.get("servers") or {}
     if key in servers:
         return False
-    for old in legacy_keys:
+    for old in list(legacy_keys) + _shed_credential_keys(servers, key, alias):
         if old not in servers:
             continue
         if not _may_adopt(servers[old], old, alias):
@@ -711,6 +775,42 @@ def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...],
         server_entry(store, key).update(servers.pop(old))
         return True
     return False
+
+
+def credential_shed_keys(store: dict[str, Any], key: str, alias: str | None) -> tuple[str, ...]:
+    """`_shed_credential_keys` for callers that must know the answer BEFORE recording.
+
+    `record()` applies the migration itself, but the scan also has to decide whether to ANNOUNCE a
+    re-identification. A key the migration is about to adopt is not a different server, and saying
+    "its baseline does not carry over" about a baseline that does is a false alarm that would fire
+    once for every OAuth server on upgrade. One function, consulted by both."""
+    return tuple(_shed_credential_keys(store.get("servers") or {}, key, alias))
+
+
+def _shed_credential_keys(servers: dict[str, Any], key: str, alias: str | None) -> list[str]:
+    """Discriminated records this now-UNDISCRIMINATED entry could already be recorded under.
+
+    `legacy_identity_keys` covers the direction identity has moved before: bare -> discriminated,
+    when an entry gained a login. This is its mirror, and it opened on 2026-08-27 when the
+    discriminator stopped hashing a token this machine attached for itself (see
+    `credentials.IDENTITY_AS_DECLARED`). Every OAuth server keyed `mcp:<name>#<token-hash>` now
+    keys `mcp:<name>`, and without this every one of those baselines is orphaned on upgrade — the
+    silent reset ADR-0012 exists to prevent, caused once again by the fix for a different one.
+
+    Store-aware because it has to be: the snapshot no longer carries the fingerprint it is shedding,
+    so the old key is not derivable from it — only findable.
+
+    AMBIGUITY IS REFUSED, not resolved by sort order. Several discriminated records naming this
+    alias means one server was genuinely tracked under several accounts; adopting whichever comes
+    first would hand this entry an approval granted to a different account. Returning nothing gives
+    an honest first sighting instead, which asks a human rather than assuming one.
+    """
+    if not key.startswith("mcp:") or "#" in key or not alias:
+        return []
+    prefix = f"{key}#"
+    found = [k for k, rec in servers.items()
+             if k.startswith(prefix) and alias in ((rec or {}).get("aliases") or [])]
+    return found if len(found) == 1 else []
 
 
 def _may_adopt(record: dict[str, Any], old_key: str, alias: str | None) -> bool:

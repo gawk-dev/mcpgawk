@@ -42,6 +42,35 @@ def _esc(v: object) -> str:
     return html.escape(str(v), quote=True)
 
 
+def _config_finding_rows(entries: dict[str, Any]) -> list[dict[str, Any]]:
+    """Config-only findings shaped as panel finding rows. A pure function of the entries dict so
+    it is testable without discovery; guarded by the caller like every other collect() probe.
+    Severity: RISKY_KINDS carry "medium" (they flip a fleet row to REVIEW on their own); the
+    rest "low" — informational, sorted after every verify conviction, never above one."""
+    from .configcheck import RISKY_KINDS, check
+
+    rows: list[dict[str, Any]] = []
+    for name, entry in entries.items():
+        try:
+            found = check(name, entry)
+        except Exception:                          # noqa: BLE001 — one bad entry must not blank the rest
+            continue
+        for f in found:
+            rows.append({
+                "server": name,
+                "verified_at": "",                 # nothing ran — that is the point of this class
+                "tool": "—",
+                "code": f.kind,
+                "class": "config",
+                "severity": "medium" if f.kind in RISKY_KINDS else "low",
+                "repro": "—",
+                "suppressed": False,
+                "evidence": f.evidence[:160],
+                "first_party": False,
+            })
+    return rows
+
+
 def collect() -> dict[str, Any]:
     """Everything the panel shows, gathered from the owning modules.
 
@@ -97,15 +126,24 @@ def collect() -> dict[str, Any]:
         # "Blocked" tier while the banner (which reads full state) still said a server was blocked
         # right now. Reproduced on the founder's fleet 2026-08-14: the Blocked filter returned
         # "0 of 17" beside 10 rendered `deny` chips. The tier now asks the whole session window.
-        data["denied_servers"] = {r.get("server") for r in spool.read(limit=5000)
+        # ONE wide read, shared by everything that needs more than the display tile. It used to be
+        # two separate scans of the same file; `read` returns most-recent-first, so the narrower
+        # windows are slices of the wide one and stay exactly what they were.
+        _wide = spool.read(limit=5000)
+        data["denied_servers"] = {r.get("server") for r in _wide
                                   if r.get("decision") == "deny" and r.get("server")}
         # A wider window than the recent-calls tile: sessions are the unit an operator reviews
         # ("what did my agent do in that run"), and a 40-row window would show fragments of one.
-        data["session_calls"] = spool.read(limit=1000)
+        data["session_calls"] = _wide[:1000]
+        # The agent x server tree counts against the widest window the panel holds: a pair that
+        # went quiet last week is still a pair the operator governs, and a narrow window would
+        # drop it from the fleet entirely rather than show it as idle.
+        data["fleet_calls"] = _wide
     except Exception as exc:                       # noqa: BLE001
         data["activity"], data["recent_calls"] = None, []
         data["denied_servers"] = set()
         data["session_calls"] = []
+        data["fleet_calls"] = []
         data["errors"]["runtime"] = f"{type(exc).__name__}: {exc}"
 
     try:
@@ -190,6 +228,16 @@ def collect() -> dict[str, Any]:
         # Named separately from `observed`: "we could not read the findings" and "we could not read
         # the behaviour profile" send the user to different files.
         data["errors"]["findings"] = f"{type(exc).__name__}: {exc}"
+
+    # Config-only findings (configcheck.py), recomputed from the entries just discovered — never
+    # persisted, so they can't go stale and they exist on the machine that has never run a verify.
+    # This is the beta-tester-1 fix reaching the panel: her Findings tab said 0 because verify had
+    # never run, while her config alone carried four findings. Merged into the same list so the
+    # count and table treat them as first-class; class "config" says where they came from.
+    try:
+        data["findings"].extend(_config_finding_rows(data.get("entries") or {}))
+    except Exception as exc:                       # noqa: BLE001
+        data["errors"]["configcheck"] = f"{type(exc).__name__}: {exc}"
 
     try:
         from .verify import unavailable_reason
@@ -625,6 +673,433 @@ def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
     return rows
 
 
+#: Adapters that are recorded but are NOT an agent identity, and why. Rendering these as if they
+#: were agents would invent attribution the data does not hold — the same overclaim as reporting a
+#: clean bill for a check that could not run.
+_NOT_AN_AGENT = {
+    "obot-filter": ("through the gateway",
+                    "a gateway filter is given no agent identity, so these calls are known to "
+                    "have happened and not known to belong to any one agent"),
+    "?": ("(unrecorded)", "these rows carry no adapter — they predate agent attribution"),
+}
+
+#: Written by the hook before 0.1.14, when the adapter was hardcoded. It is claude-code's traffic,
+#: but the rows do not SAY so, so it keeps its own node with the reason on it rather than being
+#: quietly merged into claude-code and inflating that agent's numbers.
+_LEGACY_ADAPTERS = {"claude-code-hook": "claude-code"}
+
+
+def agent_server_tree(d: dict[str, Any], rows: list[dict] | None = None) -> list[dict]:
+    """The fleet as agent → servers, which is the relationship an operator actually governs.
+
+    The flat server list answers "what is installed". It cannot answer "who can reach this", and
+    that is the question behind every approval: a server is not risky in itself, it is risky
+    because some agent can call it. So the root is the AGENT and the branch is the servers that
+    agent can reach — the pair, not the server, is the addressable thing.
+
+    A pair gets here two ways and the difference is the point:
+      DECLARED  the agent's own config lists the server (discover's `_clients`) — reachable.
+      OBSERVED  a call was actually recorded for that pair (the spool) — used.
+    Declared-and-never-used is unproven surface; observed-but-undeclared is a server reaching an
+    agent by some route its config does not explain, which is worth seeing on its own.
+
+    The counts are only ever as wide as the window handed in, and the caller states that window
+    on the page. `recent_calls` is a 40-row DISPLAY tile — building pair counts on it would put a
+    number on screen that reads as the pair's activity and is really "of the last 40 calls
+    anywhere". That exact confusion already cost this panel a wrong Blocked tier (see collect()),
+    so the default is the wider session window and the basis is never left implicit.
+
+    Pure data, no HTML, so the numbers can be tested without a renderer.
+    """
+    if rows is None:
+        rows = d.get("fleet_calls") or d.get("session_calls") or d.get("recent_calls") or []
+    pairs: dict[tuple[str, str], dict] = {}
+
+    # THE THIRD STATE, AND ACROSS THE WIDER MCP WORLD THE COMMON ONE. A server behind a login has
+    # no calls for a reason that is the opposite of "nobody wants it": nobody can use it yet. Left
+    # undistinguished it renders exactly like a server that is configured and ignored, so the one
+    # server asking for a human action looks like the one that needs none.
+    entries = d.get("entries") or {}
+    signin: set[str] = set()
+    for _n, _e in entries.items():
+        if not isinstance(_e, dict):
+            continue
+        try:
+            if _login_button_applicable(_e, _n):
+                signin.add(str(_n))
+        except Exception:                          # noqa: BLE001 - a fleet view must still render
+            pass
+
+    def _pair(agent: str, server: str) -> dict:
+        return pairs.setdefault((agent, server), {
+            "agent": agent, "server": server, "calls": 0, "denied": 0,
+            "last": None, "declared": False, "observed": False,
+            "needs_signin": server in signin})
+
+    for name, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        for client in entry.get("_clients") or []:
+            _pair(str(client), str(name))["declared"] = True
+
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("server"):
+            continue
+        agent = r.get("adapter") or "?"
+        p = _pair(str(agent), str(r["server"]))
+        p["observed"] = True
+        p["calls"] += 1
+        if r.get("decision") == "deny":
+            p["denied"] += 1
+        ts = r.get("ts")
+        if isinstance(ts, str):
+            p["last"] = max(p["last"], ts) if p["last"] else ts
+
+    by_agent: dict[str, dict] = {}
+    for (agent, _server), p in pairs.items():
+        node = by_agent.setdefault(agent, {
+            "agent": agent, "label": agent, "servers": [], "calls": 0, "denied": 0,
+            "awaiting_signin": 0, "last": None, "attributed": True, "note": None,
+            "legacy_of": None})
+        node["servers"].append(p)
+        node["calls"] += p["calls"]
+        node["denied"] += p["denied"]
+        node["awaiting_signin"] += 1 if p["needs_signin"] else 0
+        if p["last"]:
+            node["last"] = max(node["last"], p["last"]) if node["last"] else p["last"]
+
+    for agent, node in by_agent.items():
+        if agent in _NOT_AN_AGENT:
+            node["label"], node["note"] = _NOT_AN_AGENT[agent]
+            node["attributed"] = False
+        elif agent in _LEGACY_ADAPTERS:
+            node["legacy_of"] = _LEGACY_ADAPTERS[agent]
+            node["note"] = (f"recorded under a legacy adapter name; this is {node['legacy_of']} "
+                            f"traffic from before 0.1.14, kept separate because the rows do not "
+                            f"say so themselves")
+        # Worst first inside an agent: denials, then busiest, then alphabetical for a stable page.
+        node["servers"].sort(key=lambda p: (-p["denied"], not p["needs_signin"],
+                                            -p["calls"], p["server"]))
+
+    out = list(by_agent.values())
+    # Agents that blocked something lead; then the ones doing the most; unattributed last, because
+    # it is a bucket rather than an actor.
+    out.sort(key=lambda n: (not n["attributed"], -n["denied"], -n["calls"], n["agent"]))
+    return out
+
+
+#: Tree geometry. Fixed columns and a fixed row pitch: the layout is computed on the server, so
+#: every value here is a real coordinate rather than something a browser resolves later.
+_TW = {"agent_w": 272, "srv_w": 300, "tool_w": 260, "call_w": 320, "h": 46,
+       "pitch": 54, "gap": 44, "pad": 10}
+
+
+def _clip(text: str, n: int) -> str:
+    """SVG text does not wrap. A label that overruns its box would draw straight across the
+    connectors, so it is cut here rather than left to overlap the drawing."""
+    text = str(text)
+    return text if len(text) <= n else text[: n - 1] + "\u2026"
+
+
+def _wrap(text: str, width: int, lines: int) -> list[str]:
+    """Break on spaces into at most `lines` of `width`, the last one clipped.
+
+    SVG text does not wrap, and the deny reason is the whole point of the deepest node — a single
+    clipped line turned "explains why" back into "shows that it happened".
+    """
+    words, out, cur = str(text).split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            out.append(cur)
+            cur = w
+            if len(out) == lines:
+                break
+        else:
+            cur = f"{cur} {w}" if cur else w
+    if len(out) < lines and cur:
+        out.append(cur)
+    if len(out) == lines and (len(words) > sum(len(o.split()) for o in out)):
+        out[-1] = _clip(out[-1] + " …", width)
+    return out
+
+
+def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str, *,
+           accent: bool = False, alarm: bool = False, aria: str = "") -> str:
+    """One box. A link, so the whole node is the target — the drill-down is a GET and a
+    re-render, which is what keeps this drawing script-free under the panel's CSP.
+
+    TWO meta lines, not one. The first drawing packed four facts onto a single line and clipped
+    it, so the numbers this view exists to show ended in an ellipsis. Clipping is sized from the
+    box and the font (monospace advance ~0.6em) rather than a constant guessed before any real
+    label was seen — but the fix for a long line is a second line, not a smaller cap.
+    """
+    cls = "tn" + (" tnsel" if accent else "") + (" tnbad" if alarm else "")
+    label = f'<title>{_esc(aria or title)}</title>'
+    lines = [m for m in meta if m][:2]
+    tt = (f'<text class="tnt" x="{x + 12}" y="{y + (17 if lines else 27)}">'
+          f'{_esc(_clip(title, int((w - 24) / 7.5)))}</text>')
+    cap = int((w - 24) / 6.6)
+    mt = "".join(f'<text class="tnm" x="{x + 12}" y="{y + 30 + i * 12}">{_esc(_clip(m, cap))}</text>'
+                 for i, m in enumerate(lines))
+    return (f'<a href="{_esc_attr(href)}" class="{cls}">{label}'
+            f'<rect x="{x}" y="{y}" width="{w}" height="{_TW["h"]}" rx="9"/>{tt}{mt}</a>')
+
+
+def _elbow(x1: int, y1: int, x2: int, y2: int) -> str:
+    """The branch itself: out, across, in. Orthogonal because a tree read at a glance needs the
+    parent-child line to be traceable, not a curve crossing three siblings."""
+    mid = x1 + 22
+    return (f'<path class="tbr" d="M{x1} {y1} H{mid} V{y2} H{x2}"/>')
+
+
+def pair_tools(rows: list[dict], agent: str, server: str, limit: int = 10) -> tuple[list[dict], int]:
+    """What this AGENT actually called on this SERVER, by tool. Returns (shown, hidden).
+
+    Computed only for the branch the operator opened — the fleet window is thousands of rows and
+    every pair would be a scan nobody asked for. Per-pair, not per-server: `server_detail` has a
+    tools breakdown already and it is the WHOLE server's, which under an agent node would read as
+    that agent's traffic and would not be.
+
+    The hidden count is returned rather than swallowed: a list silently cut at ten reads as the
+    complete set, and this view's whole claim is that it shows what an agent can reach.
+    """
+    by: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if (r.get("adapter") or "?") != agent or r.get("server") != server:
+            continue
+        tool = r.get("tool") or "(unnamed)"
+        t = by.setdefault(tool, {"tool": tool, "calls": 0, "denied": 0, "last": None})
+        t["calls"] += 1
+        if r.get("decision") == "deny":
+            t["denied"] += 1
+        ts = r.get("ts")
+        if isinstance(ts, str):
+            t["last"] = max(t["last"], ts) if t["last"] else ts
+    out = sorted(by.values(), key=lambda t: (-t["denied"], -t["calls"], t["tool"]))
+    return out[:limit], max(0, len(out) - limit)
+
+
+def pair_calls(rows: list[dict], agent: str, server: str, tool: str,
+               limit: int = 8) -> tuple[list[dict], int]:
+    """The individual rulings for one agent+server+tool, newest first. Returns (shown, hidden).
+
+    This is where the tree stops counting and starts explaining: each row is a decision with the
+    basis it rested on and, for a refusal, the reason the engine gave. A count of "2 blocked" is
+    the claim; these are what backs it.
+    """
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if (r.get("adapter") or "?") != agent or r.get("server") != server:
+            continue
+        if (r.get("tool") or "(unnamed)") != tool:
+            continue
+        decision = r.get("decision") or "?"
+        why = r.get("reason")
+        if not why and decision == "deny":
+            # The spool does not always carry the text — the same reconstruction `activity_rows`
+            # uses. A refusal drawn without its reason is the bare counter this panel's own
+            # interaction contract forbids.
+            try:
+                from . import decision as _dec
+                why = _dec.deny_reason(str(server), str(tool))
+            except Exception:                          # noqa: BLE001 - a drawing must still draw
+                why = None
+        out.append({"ts": r.get("ts"), "decision": decision,
+                    "basis": r.get("basis") or "", "reason": why or "",
+                    "adapter": r.get("adapter") or ""})
+    # `read` already hands rows newest-first; sorting on the stamp keeps that true if it stops.
+    out.sort(key=lambda r: r["ts"] or "", reverse=True)
+    return out[:limit], max(0, len(out) - limit)
+
+
+def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | None = None,
+                      agurl=None, open_server: str | None = None, srvurl=None,
+                      rows: list[dict] | None = None, open_tool: str | None = None,
+                      toolurl=None) -> str:
+    """The fleet drawn as a tree: agents, the servers each can reach, and that pair's tools.
+
+    [FOUNDER 2026-08-26] "when i say it to be a branch in a tree i meant like this" — a drawn
+    node-link diagram, not a nested list. Two levels open at once now: agent -> server -> tool,
+    each opening to the RIGHT of its parent.
+
+    Server-rendered inline SVG, and that is a constraint doing real work rather than a preference.
+    The panel serves under a CSP that forbids inline script, so there is no client-side layout
+    step: every coordinate is computed here, each node is an `<a>`, and opening a branch is a GET
+    that re-renders the drawing. Colour comes from the panel's own tokens through `var(--…)`, so
+    the tree restyles with everything else and introduces no palette of its own.
+    """
+    if not tree:
+        return ('<p class="ddh">No agent has an MCP server configured, and no call has been '
+                'recorded yet. This fills in as soon as one does.</p>')
+
+    agurl = agurl or (lambda a: "/")
+    srvurl = srvurl or (lambda a, sv: "/")
+    toolurl = toolurl or (lambda a, sv, tl: "/")
+    rows = rows or []
+    names = [n["agent"] for n in tree]
+    open_agent = expanded if expanded in names else names[0]
+
+    pad, pitch, gap = _TW["pad"], _TW["pitch"], _TW["gap"]
+    ax, aw = pad, _TW["agent_w"]
+    sx, sw = pad + aw + gap, _TW["srv_w"]
+    tx, tw = sx + sw + gap, _TW["tool_w"]
+    cx, cw = tx + tw + gap, _TW["call_w"]
+    parts, notes, y = [], [], pad
+    widest = sx + sw
+
+    for node in tree:
+        is_open = node["agent"] == open_agent
+        ay = y
+        # Line one is the shape of the fleet, line two is what asks for a decision.
+        reach = [f'{len(node["servers"])} server{"" if len(node["servers"]) == 1 else "s"}']
+        if node["calls"]:
+            reach.append(f'{node["calls"]} calls')
+        asks = []
+        if node.get("awaiting_signin"):
+            asks.append(f'{node["awaiting_signin"]} awaiting sign-in')
+        if node["denied"]:
+            asks.append(f'{node["denied"]} blocked')
+        bits = reach + asks
+        # Closing is as reachable as opening: the link toggles rather than only ever descending.
+        parts.append(_tnode(ax, ay, aw, node["label"], [" · ".join(reach), " · ".join(asks)],
+                            agurl("" if is_open else node["agent"]),
+                            accent=is_open, alarm=bool(node["denied"]),
+                            aria=(f'{node["label"]}, {" · ".join(bits)}'
+                                  + (f' — {node["note"]}' if node.get("note") else "")
+                                  + f' — {"close" if is_open else "open"} this agent')))
+        if node.get("note"):
+            notes.append((node["label"], node["note"]))
+        if not is_open:
+            y = ay + pitch
+            continue
+
+        cursor = ay
+        for pair in node["servers"]:
+            sy = cursor
+            if pair["needs_signin"]:
+                state = "needs sign-in"
+            elif pair["declared"] and pair["observed"]:
+                state = ""
+            elif pair["declared"]:
+                state = "configured, never used"
+            else:
+                state = "used, not in this config"
+            nums = []
+            if pair["calls"]:
+                nums.append(f'{pair["calls"]} calls')
+            if pair["denied"]:
+                nums.append(f'{pair["denied"]} blocked')
+            if pair["last"]:
+                nums.append(_ago(pair["last"]))
+            meta = [state, " · ".join(nums) or ("" if state else "no calls recorded")]
+            srv_open = pair["server"] == open_server
+            parts.append(_elbow(ax + aw, ay + _TW["h"] // 2, sx, sy + _TW["h"] // 2))
+            parts.append(_tnode(
+                sx, sy, sw, pair["server"], meta,
+                srvurl(node["agent"], "" if srv_open else pair["server"]),
+                accent=srv_open, alarm=bool(pair["denied"]),
+                aria=(f'{pair["server"]}, {" · ".join(m for m in meta if m)} — '
+                      f'{"close" if srv_open else "open"} the tools this agent called')))
+            # TWO TARGETS ON ONE ROW, because they are two different questions. The box opens the
+            # branch; this opens the server's own detail drawer. Making the box do both would have
+            # cost the drawer its only route in from the fleet.
+            parts.append(
+                f'<a href="{_esc_attr(rowurl(pair["server"]))}" class="tdet">'
+                f'<title>{_esc(pair["server"])} — open the server detail</title>'
+                f'<text x="{sx + sw - 12}" y="{sy + 30}" text-anchor="end">detail ›</text></a>')
+
+            if not srv_open:
+                cursor = sy + pitch
+                continue
+
+            shown, hidden = pair_tools(rows, node["agent"], pair["server"])
+            if not shown:
+                parts.append(_elbow(sx + sw, sy + _TW["h"] // 2, tx, sy + _TW["h"] // 2))
+                parts.append(_tnode(tx, sy, tw, "no calls recorded",
+                                    ["this pair has made none in the window", ""],
+                                    srvurl(node["agent"], ""),
+                                    aria="no calls recorded for this pair in this window"))
+                widest = max(widest, tx + tw)
+                cursor = sy + pitch
+                continue
+
+            tcursor = sy
+            for tool in shown:
+                ty = tcursor
+                tnums = [f'{tool["calls"]} calls']
+                if tool["denied"]:
+                    tnums.append(f'{tool["denied"]} blocked')
+                tool_open = tool["tool"] == open_tool
+                parts.append(_elbow(sx + sw, sy + _TW["h"] // 2, tx, ty + _TW["h"] // 2))
+                parts.append(_tnode(
+                    tx, ty, tw, tool["tool"],
+                    [" · ".join(tnums), _ago(tool["last"]) if tool["last"] else ""],
+                    toolurl(node["agent"], pair["server"], "" if tool_open else tool["tool"]),
+                    accent=tool_open, alarm=bool(tool["denied"]),
+                    aria=(f'{tool["tool"]}, {" · ".join(tnums)} — '
+                          f'{"close" if tool_open else "open"} the individual rulings')))
+                if not tool_open:
+                    tcursor = ty + pitch
+                    continue
+
+                # LEVEL FOUR: where the tree stops counting and explains. "2 blocked" is the
+                # claim; these rulings, each with the basis it rested on and the reason the engine
+                # gave, are what backs it.
+                calls, chid = pair_calls(rows, node["agent"], pair["server"], tool["tool"])
+                for k, c in enumerate(calls):
+                    cy = ty + k * pitch
+                    # Basis joins the heading so BOTH meta lines belong to the reason — the
+                    # reason is what this node exists to say, and it needs the room.
+                    head = " · ".join(x for x in (c["decision"], _ago(c["ts"]), c["basis"]) if x)
+                    why = c["reason"] or ("no reason recorded" if c["decision"] == "deny" else "")
+                    parts.append(_elbow(tx + tw, ty + _TW["h"] // 2, cx, cy + _TW["h"] // 2))
+                    parts.append(_tnode(cx, cy, cw, head,
+                                        _wrap(why, int((cw - 24) / 6.6), 2) if why else ["", ""],
+                                        rowurl(pair["server"]),
+                                        alarm=c["decision"] == "deny",
+                                        aria=(f'{c["decision"]} at {c["ts"]}, basis {c["basis"]}'
+                                              + (f' — {why}' if why else ""))))
+                widest = max(widest, cx + cw)
+                if chid:
+                    parts.append(_tnode(cx, ty + len(calls) * pitch, cw,
+                                        f'+{chid} more ruling{"" if chid == 1 else "s"}',
+                                        ["older than the eight shown", ""], rowurl(pair["server"]),
+                                        aria=f'{chid} further rulings, not drawn'))
+                tcursor = ty + max(1, len(calls) + (1 if chid else 0)) * pitch
+            widest = max(widest, tx + tw)
+            if hidden:
+                # NO SILENT CAP. A list cut at ten reads as the complete set, and this view's
+                # whole claim is that it shows what an agent can reach.
+                parts.append(_tnode(tx, tcursor, tw, f'+{hidden} more tool{"" if hidden == 1 else "s"}',
+                                    ["quieter than the ten shown", ""], rowurl(pair["server"]),
+                                    aria=f'{hidden} further tools, not drawn — open the server'))
+                tcursor += pitch
+            cursor = max(sy + pitch, tcursor)
+        y = max(ay + pitch, cursor)
+
+    height = y + pad
+    width = widest + pad
+    svg = (f'<svg class="ftree" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+           f'role="group" aria-label="agents, the MCP servers each can reach, and the tools called" '
+           f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>')
+    # THE NOTES MUST REACH THE SCREEN, not just the data. Moving from a list to a drawing dropped
+    # them silently — the legacy node stopped saying why it is separate and the gateway bucket
+    # stopped saying it carries no agent identity — because the tests asserted the note on the
+    # node dict and nothing asserted it was rendered. A node that is set apart without its reason
+    # is exactly the unexplained number this view exists to avoid.
+    foot = ("".join(f'<p class="tfoot"><b>{_esc(label)}</b> — {_esc(text)}</p>'
+                    for label, text in notes))
+    basis = (f'<p class="ddh tbasis">Calls and blocks counted over the last {window} recorded '
+             f'call(s). "Configured" is read from each agent\'s own config; "used" means a call '
+             f'was actually recorded for that pair. Select an agent, then a server, to open its '
+             f'branch; "detail ›" opens the server itself.</p>')
+    return f'<div class="ftwrap">{svg}</div>{foot}{basis}'
+
+
 def sessions_summary(rows: list[dict]) -> list[dict]:
     """One row per agent session, newest first — the session record an operator reviews.
 
@@ -900,9 +1375,17 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
                 f"them right now. Open Decisions, or filter Servers by Changed.", "bad")
     findings = [f for f in (d.get("findings") or [])
                 if not f.get("suppressed") and not f.get("first_party")]
-    if findings:
-        servers = len({f.get("server") for f in findings})
-        return (f"{len(findings)} finding(s) across {servers} server(s) — open Findings and decide "
+    # Low-severity config findings (unpinned versions, install scripts) must not hijack the next
+    # best action: unpinned is the ecosystem's README default, so on a fresh install this branch
+    # would outrank real onboarding steps with an alarm about normality — the same tone rule the
+    # fleet rows and the scan exit code already follow (configcheck.RISKY_KINDS, founder call
+    # 2026-08-23). They stay in the count and the table; they just don't get to be "Next:".
+    # Alarm unless EXPLICITLY low: a finding with no severity field (older verify reports) must
+    # not be silently demoted — ambiguity never reads as safe (availability yes, ambiguity no).
+    alarming = [f for f in findings if str(f.get("severity")).lower() != "low"]
+    if alarming:
+        servers = len({f.get("server") for f in alarming})
+        return (f"{len(alarming)} finding(s) across {servers} server(s) — open Findings and decide "
                 f"which are real.", "bad")
     # PRESENT on this machine, not the size of the constant. `no_hook` is a static table of agents
     # that HAVE no interception point (VS Code, Claude Desktop) — so `len()` of it is 2 on every
@@ -1054,7 +1537,7 @@ def _setup_flow_html(setup_text: str) -> str:
         f'<li>Paste the API key you created:</li></ol>')
 
 
-def _action_banner(action: dict | None, token: str = "") -> str:
+def _action_banner(action: dict | None, token: str = "", fresh: bool = False) -> str:
     """The last action's state, full-width under the card header. Shown to EVERYONE — status is
     not an action, and gating it behind the token hid "Running verify…" from the founder's own
     read-only view (2026-07-30)."""
@@ -1073,8 +1556,14 @@ def _action_banner(action: dict | None, token: str = "") -> str:
                      f'rel="noopener noreferrer">Open the sign-in page</a>'
                      f'<div class="dim" style="margin-top:6px;word-break:break-all">{_esc(link)}</div>'
                      if link else "")
+        # LIVE ELAPSED TIME is the tracer bullet for the progress work (2026-08-24): the first
+        # thing a "is it hung?" reader needs is proof the clock is moving. It rides the existing
+        # self-refresh, and later slices (per-server tick, cancel) extend this same banner.
+        elapsed = _elapsed(action.get("at"))
         banner = (f'<div class="abanner run">Running {_esc(action.get("label"))}… '
-                  f'this can take a minute. This page updates itself.{note_html}{link_html}</div>')
+                  f'<b>{_esc(elapsed)}</b> so far. A fleet verify runs each server in a sandbox, '
+                  f'so this can take several minutes. This page updates itself.'
+                  f'{note_html}{link_html}</div>')
     elif action.get("message"):
         # The RESULT, per server, on the page. A one-line "done" that points at a terminal is the
         # CLI-only habit this surface replaces: the user must be able to see WHICH server produced
@@ -1126,13 +1615,23 @@ def _action_banner(action: dict | None, token: str = "") -> str:
                           f'rel="noopener noreferrer">Open the sign-in page</a>'
                           f'<div class="dim" style="margin-top:6px;word-break:break-all">'
                           f'{_esc(done_link)}</div>' if done_link else "")
-        banner = (f'<div class="abanner done {_esc(worst)}">'
+        # ROUND 2 (founder-approved 24 Aug), FIXED 24 Aug evening: the popup opens ONCE — on the
+        # load that immediately follows completion (`fresh`, from the POST redirect's done=1 or
+        # the live-update fragment at the completion moment) — and NEVER re-opens on later loads,
+        # where it renders as the slim collapsed record. The first version rendered `open` on
+        # every load while the result was recent, and its full-viewport scrim sat over the page
+        # swallowing every click — "none of the buttons are working" (founder). The popup also
+        # carries NO scrim now: a result should be visible, not block the page.
+        _open = " open" if fresh else ""
+        banner = (f'<details{_open} class="amodal"><summary><b>{subject}</b> — finished {when}'
+                  f'<span class="aclose"></span></summary>'
+                  f'<div class="abanner done {_esc(worst)}" role="dialog">'
                   f'<b>{subject}</b> — finished {when}<br>'
-                  f'{_esc(action.get("message"))}{setup_html}{done_link_html}{detail}</div>')
+                  f'{_esc(action.get("message"))}{setup_html}{done_link_html}{detail}</div></details>')
     return banner
 
 
-def _action_buttons(token: str, action: dict | None) -> str:
+def _action_buttons(token: str, action: dict | None, tab: str = "n0") -> str:
     """The buttons that make this a control surface, not a report: run a scan, verify the fleet.
     Pure POST forms (no script — the CSP forbids it), each carrying the session token so an agent
     that opens this page cannot press them. STATUS IS NOT AN ACTION: the token buys these buttons,
@@ -1143,13 +1642,13 @@ def _action_buttons(token: str, action: dict | None) -> str:
     tok = _esc(token)
     return f"""<form method="POST" action="/" style="display:inline">
   <input type="hidden" name="token" value="{tok}">
-  <input type="hidden" name="tab" value="n0">
-  <button class="act-btn" name="act" value="scan"{dis}>Re-scan</button>
+  <input type="hidden" name="tab" value="{tab}">
+  <button class="act-btn" name="act" value="verify"{dis}>Verify fleet (run &amp; watch)</button>
 </form>
 <form method="POST" action="/" style="display:inline">
   <input type="hidden" name="token" value="{tok}">
-  <input type="hidden" name="tab" value="n0">
-  <button class="act-btn" name="act" value="verify"{dis}>Verify fleet (run &amp; watch)</button>
+  <input type="hidden" name="tab" value="{tab}">
+  <button class="act-btn" name="act" value="scan"{dis}>Re-scan</button>
 </form>"""
 
 
@@ -1190,9 +1689,24 @@ def _connect_card() -> str:
 
 
 
-_TAB_LABELS = (("n0", "Servers"), ("n1", "Agents"), ("n2", "Evidence"), ("n3", "Decisions"),
-               ("n4", "Activity"), ("n5", "Trust"), ("n6", "Findings"), ("n7", "Gateway"),
-               ("n8", "Monitor"))
+_TAB_LABELS = (("n9", "Today"), ("n0", "Servers"), ("n1", "Agents"), ("n2", "Evidence"),
+               ("n3", "Decisions"), ("n4", "Activity"), ("n5", "Trust"), ("n6", "Findings"),
+               ("n7", "Gateway"), ("n8", "Monitor"))
+
+#: One written line per module, rendered under its name in the rail. The nav used to offer ten
+#: bare nouns with counts and no story (founder, 24 Aug); these lines make the rail read as
+#: what exists → what needs you → what runs → the receipts. Keep each under ~9 words.
+_TAB_BLURBS = {
+    "n0": "every server your agents can reach, and its state",
+    "n6": "what verification caught a server doing",
+    "n4": "every call an agent made, and the guard’s decision",
+    "n3": "servers that changed after you approved them",
+    "n1": "which agents carry the pre‑execution hook",
+    "n7": "one endpoint in front of the fleet, a key per agent",
+    "n8": "watches running servers for drift between scans",
+    "n2": "every artefact recorded, and where it lives on disk",
+    "n5": "what this build is and what actually ran",
+}
 
 
 def _radio_tabs(tab: str) -> str:
@@ -1200,7 +1714,9 @@ def _radio_tabs(tab: str) -> str:
     client-side only, so every full page load snapped back to Servers — a founder mid-review
     on Findings clicked "see every attempt" and landed on the first tab (2026-08-15). Links
     and forms carry `tab=`; unknown values fall back to Servers."""
-    current = tab if tab in {t for t, _ in _TAB_LABELS} else "n0"
+    # Today (n9) is the landing view — the reimagined shell (founder-approved 25 Aug): the glance
+    # first; the full instrument stays one click away under Detail.
+    current = tab if tab in {t for t, _ in _TAB_LABELS} else "n9"
     return "\n".join(
         f'<input type="radio" name="nav" id="{t}"{" checked" if t == current else ""} '
         f'aria-label="{label} tab">' for t, label in _TAB_LABELS)
@@ -1239,7 +1755,9 @@ def monitor_gap_note(d: dict[str, Any]) -> str:
 
 
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
-           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "", stale_token: bool = False) -> str:
+           q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "",
+           ag: str = "", br: str = "", tc: str = "", stale_token: bool = False,
+           fresh_action: bool = False) -> str:
     """The panel.
 
     Built against how LiteLLM, OpenRouter, Snyk and Stainless actually present this, not invented:
@@ -1361,9 +1879,12 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         f'<span class="seg {t}" style="width:{counts[t] / total * 100:.1f}%" '
         f'title="{_esc_attr(label)}: {counts[t]}"></span>'
         for t, label, _ in TIERS if counts[t])
+    # The tier DESCRIPTIONS existed since the TIERS table was written and were discarded by every
+    # renderer (24 Aug audit) — they surface here as tooltips, so the legend explains itself.
     legend = "".join(
-        f'<span class="lg"><i class="sw {t}"></i>{_esc(label)} <b>{counts[t]}</b></span>'
-        for t, label, _ in TIERS)
+        f'<span class="lg" title="{_esc_attr(why)}"><i class="sw {t}"></i>'
+        f'{_esc(label)} <b>{counts[t]}</b></span>'
+        for t, label, why in TIERS)
     coverage = f'<div class="bar">{segs}</div><div class="legend">{legend}</div>'
 
     # --- servers (the landing view) -------------------------------------------------------------
@@ -1392,19 +1913,73 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             + ([f"sel={_urlq(target)}"] if target else []) + ["tab=n0"]
         return "/?" + "&".join(parts) if parts else "/"
 
+    # THE FLEET ROOT IS THE PAIR, NOT THE SERVER. A server is not risky in itself; it is risky
+    # because some agent can reach it, so the agent owns the node and its servers are the branch.
+    _fleet_rows = d.get("fleet_calls") or d.get("session_calls") or []
+
+    def _agurl(target: str) -> str:
+        """Opening a branch is a GET, like every other drill-down on this page. The other query
+        state rides along so opening an agent never silently drops a filter or a selection."""
+        parts = ([f"t={_urlq(token)}"] if token else []) \
+            + ([f"q={_urlq(q)}"] if q else []) \
+            + ([f"tier={_urlq(tier_filter)}"] if tier_filter else []) \
+            + ([f"sel={_urlq(sel)}"] if sel else []) \
+            + ([f"ag={_urlq(target)}"] if target else []) + ["tab=n0"]
+        return "/?" + "&".join(parts)
+
+    def _srvurl(agent: str, target: str) -> str:
+        """Opening a server's tools keeps its agent open — a branch that closed its own parent
+        would make the second level unreachable in one click."""
+        parts = ([f"t={_urlq(token)}"] if token else []) \
+            + ([f"q={_urlq(q)}"] if q else []) \
+            + ([f"tier={_urlq(tier_filter)}"] if tier_filter else []) \
+            + ([f"sel={_urlq(sel)}"] if sel else []) \
+            + ([f"ag={_urlq(agent)}"] if agent else []) \
+            + ([f"br={_urlq(target)}"] if target else []) + ["tab=n0"]
+        return "/?" + "&".join(parts)
+
+    def _toolurl(agent: str, server: str, target: str) -> str:
+        """Opening a tool's rulings keeps its agent AND its server open — every ancestor stays
+        open, or the branch closes under the thing you just clicked."""
+        parts = ([f"t={_urlq(token)}"] if token else []) \
+            + ([f"q={_urlq(q)}"] if q else []) \
+            + ([f"tier={_urlq(tier_filter)}"] if tier_filter else []) \
+            + ([f"sel={_urlq(sel)}"] if sel else []) \
+            + ([f"ag={_urlq(agent)}"] if agent else []) \
+            + ([f"br={_urlq(server)}"] if server else []) \
+            + ([f"tc={_urlq(target)}"] if target else []) + ["tab=n0"]
+        return "/?" + "&".join(parts)
+
+    fleet_tree = render_fleet_tree(agent_server_tree(d), _rowurl, len(_fleet_rows),
+                                   expanded=ag, agurl=_agurl, open_server=br, srvurl=_srvurl,
+                                   rows=_fleet_rows, open_tool=tc, toolurl=_toolurl)
+
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
     drawer = ""
     srows = []
+    #: Baseline-only servers render grouped under ONE band that states their shared fact once,
+    #: instead of repeating it in every row's cells (panel UX pass, 24 Aug).
+    bo_rows: list[str] = []
+    #: Servers whose ONLY blocker is a browser sign-in — the one ask a machine cannot do for the
+    #: operator, so the briefing strip names them (founder, 24 Aug: "the only time it should ask
+    #: me is when a server needs authentication").
+    _auth_asks: list[str] = []
     for name, entry, key, tier in classified:
         detail = server_detail(store, key, calls) if key else None
         local = "local" if entry.get("command") else "remote"
         # A server present in the trust store but in nobody's config right now. It is shown (its
         # absence from this page was the defect) but must not be presented as something an agent
-        # can currently call.
-        if entry.get("_baseline_only"):
-            local = "not configured"
-        clients = ", ".join(entry.get("_clients") or []) or (
-            "approved, but in no agent config right now" if entry.get("_baseline_only") else "—")
+        # can currently call. THE FACT IS STATED ONCE, by the group band these rows render under —
+        # it used to be printed per row in TWO cells on top of the Blocked pill (founder, 24 Aug:
+        # one screen carried the same sentence nine times), so the cells go back to being data.
+        _baseline_only = bool(entry.get("_baseline_only"))
+        if _baseline_only:
+            local = "—"
+        clients = ", ".join(entry.get("_clients") or []) or "—"
+        # Agent names never break mid-word ("claude-\ndesktop" — founder's 24 Aug layout report):
+        # each name is its own no-wrap span, so the cell wraps BETWEEN names only.
+        _agents_cell = (", ".join(f'<i class="ag">{_esc(c)}</i>'
+                                  for c in (entry.get("_clients") or [])) or "—")
         seen = detail["calls_seen"] if detail else 0
         tools = len(detail["current_tools"]) if detail else "—"
         # THREE DIFFERENT FACTS WERE BEING SHOWN AS ONE NUMBER. `current_tools` is the latest
@@ -1417,8 +1992,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         drift_note = ""
         if detail and isinstance(tools, int) and tools_approved and tools != tools_approved:
             more = tools - tools_approved
-            drift_note = (f'<span class="dt"> ({tools_approved} approved, '
-                          f'{abs(more)} {"added" if more > 0 else "removed"} since)</span>')
+            # A NUMERIC COLUMN CARRIES NUMBERS; the annotation gets its own non-breaking line
+            # under the number. The old inline parenthetical ("(92 approved, 3 added since)")
+            # wrapped across four lines inside the narrow tools column (founder, 24 Aug); the
+            # full sentence survives in the tooltip.
+            drift_note = (f'<span class="dt" title="{tools_approved} approved, '
+                          f'{abs(more)} {"added" if more > 0 else "removed"} since">'
+                          f'{"+" if more > 0 else "−"}{abs(more)} since approval</span>')
         checked = min(((d.get("verified_runs") or {}).get(name) or {}).get("toolsChecked") or 0,
                       tools if isinstance(tools, int) else 0)
         # Two row actions. `approve` is offered only when this server is actually waiting on a
@@ -1443,11 +2023,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                            f'<button class="act-sm" name="act" value="login" title="Complete '
                            f'this server\'s browser sign-in now — a browser window opens on '
                            f'this machine and the token stays local">sign in</button></form>')
-        act_cell = (f'<form method="POST" action="/" class="rowact">'
-                    f'<input type="hidden" name="token" value="{_esc(token)}">'
-                    f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
-            f'<input type="hidden" name="tab" value="n0">'
-                    f'{_acts}</form>' if _acts else "") + _login_form
+        _forms = (f'<form method="POST" action="/" class="rowact">'
+                  f'<input type="hidden" name="token" value="{_esc(token)}">'
+                  f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
+                  f'<input type="hidden" name="tab" value="n0">'
+                  f'{_acts}</form>' if _acts else "") + _login_form
+        # ONE grid item per cell, always. Two sibling <form>s here became two grid items, so the
+        # row's 7-column grid pushed the sign-in button onto a phantom second line below the row
+        # (kite, founder's 24 Aug layout report). The wrapper makes the cell a single flex item.
+        act_cell = f'<span class="actwrap">{_forms}</span>' if _forms else ""
         if detail:
             # NB `tool_lines`, not `tl` — `tl` is render's finding-timeline parameter, and reusing
             # the name here silently clobbered it: the trail link rendered but never opened.
@@ -1485,8 +2069,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 elif none_observed:
                     obs_cell = '<span class="dim">—</span>'   # stated once above, not 22 times
                 else:
-                    obs_cell = ('<span class="dim">not observed — absence is not a claim of '
-                                'safety</span>')
+                    # The absence-is-not-safety clause is stated ONCE per drawer (the `why` line
+                    # and the table heading carry it) — not appended to every unobserved row.
+                    obs_cell = '<span class="dim">not observed</span>'
                 dvo_parts.append(
                     f'<tr><td class="nm">{_esc(r["tool"])}</td>'
                     f'<td><span class="chip {base}">{r["baseline"]}</span></td>'
@@ -1496,46 +2081,73 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             if name == sel:
                 backend = ((d.get("verified_runs") or {}).get(name) or {}).get("backend")
                 never = len(detail["current_tools"]) - checked
-                callout = (f'<div class="unobs">{never} tool(s) were never invoked. Absence of a '
-                           'finding for those is not a claim of safety.</div>'
+                callout = (f'<div class="unobs">{never} tool(s) were never invoked — their rows '
+                           'below are declared only.</div>'
                            if checked and never > 0 else '')
+                _dw = [w for w in re.split(r"[^0-9A-Za-z]+", name) if w]
+                _dmark = ((_dw[0][0] + (_dw[1][0] if len(_dw) > 1 else (_dw[0][1:2] or "")))
+                          .upper() if _dw else "?")
+                _cost = detail['cost_index']
                 drawer = f"""<aside class="side">
-  <div class="shead"><h3>{_esc(name)}</h3><a class="gbtn" href="{_rowurl(None)}">Close</a></div>
-  <span class="id">{_esc(key if key else "mcp:" + name)}</span>
-  {f'<div class="dacts">{act_cell}</div>' if act_cell else ''}
-  <dl class="kv">
-    <dt>Transport</dt><dd>{_esc(detail['transport'] or local)}</dd>
-    <dt>Protocol</dt><dd>{_esc(detail['protocol'] or '—')}</dd>
-    <dt>Tools now</dt><dd>{len(detail['current_tools'])}</dd>
-    <dt>Approved</dt><dd>{len(detail['approved_tools'])}</dd>
-    <dt>Watched</dt><dd>{checked}</dd>
-    <dt>Isolation</dt><dd>{_esc(backend or 'none recorded')}</dd>
-    <dt>Context cost</dt><dd>{detail['cost_index']} tok</dd>
-    <dt>Snapshots</dt><dd>{detail['snapshots']}</dd>
-    <dt>Measured</dt><dd>{_esc(detail['measured_at'][:19] or '—')}</dd>
-    <dt>Also known as</dt><dd>{_esc(', '.join(detail['aliases']) or '—')}</dd>
-  </dl>
+  <header class="mhead">
+    <span class="mmark {_tag[tier]}">{_esc(_dmark)}</span>
+    <div class="mtitle"><h3>{_esc(name)}</h3>
+      <span class="id">{_esc(key if key else "mcp:" + name)}</span></div>
+    <span class="chip {_tag[tier]}"><i></i>{_esc(_tlabel[tier])}</span>
+    <a class="mclose" href="{_rowurl(None)}" aria-label="Close" title="Close">&times;</a>
+  </header>
+  {f'<div class="mactions">{act_cell}</div>' if act_cell else ''}
+  <div class="mbody">
+  <div class="statgrid">
+    <div class="stat"><span class="sl">Transport</span><span class="sv">{_esc(detail['transport'] or local)}</span></div>
+    <div class="stat"><span class="sl">Protocol</span><span class="sv">{_esc(detail['protocol'] or '—')}</span></div>
+    <div class="stat"><span class="sl">Tools now</span><span class="sv">{len(detail['current_tools'])}</span></div>
+    <div class="stat"><span class="sl">Approved</span><span class="sv">{len(detail['approved_tools'])}</span></div>
+    <div class="stat"><span class="sl">Watched</span><span class="sv">{checked}</span></div>
+    <div class="stat"><span class="sl">Isolation</span><span class="sv">{_esc(backend or 'none')}</span></div>
+    <div class="stat"><span class="sl">Context cost</span><span class="sv">{_cost:,} tok</span></div>
+    <div class="stat"><span class="sl">Snapshots</span><span class="sv">{detail['snapshots']}</span></div>
+    <div class="stat"><span class="sl">Measured</span><span class="sv">{_esc(detail['measured_at'][:10] or '—')}</span></div>
+    <div class="stat"><span class="sl">Also known as</span><span class="sv">{_esc(', '.join(detail['aliases']) or '—')}</span></div>
+  </div>
   {callout}
   <div class="ddh">what the guard has seen</div>
-  <table class="mini"><tbody>{tool_lines}</tbody></table>
+  <div class="tscroll"><table class="mini"><tbody>{tool_lines}</tbody></table></div>
   <div class="ddh">declared vs observed · verdicts rest on observation, not names</div>
   {f'<div class="unobs">{_esc(why)}</div>' if why else ''}
-  <table class="mini"><thead><tr><th>tool</th><th>baseline</th><th>declared</th>
-  <th>observed</th></tr></thead><tbody>{dvo}</tbody></table>
+  <div class="tscroll"><table class="mini"><thead><tr><th>tool</th><th>baseline</th><th>declared</th>
+  <th>observed</th></tr></thead><tbody>{dvo}</tbody></table></div>
+  </div>
 </aside>"""
         elif name == sel:
             # Selected but never measured: the drawer states that instead of pretending detail.
+            _dw = [w for w in re.split(r"[^0-9A-Za-z]+", name) if w]
+            _dmark = ((_dw[0][0] + (_dw[1][0] if len(_dw) > 1 else (_dw[0][1:2] or "")))
+                      .upper() if _dw else "?")
             drawer = f"""<aside class="side">
-  <div class="shead"><h3>{_esc(name)}</h3><a class="gbtn" href="{_rowurl(None)}">Close</a></div>
-  <span class="id">mcp:{_esc(name)}</span>
-  {f'<div class="dacts">{act_cell}</div>' if act_cell else ''}
+  <header class="mhead">
+    <span class="mmark {_tag[tier]}">{_esc(_dmark)}</span>
+    <div class="mtitle"><h3>{_esc(name)}</h3><span class="id">mcp:{_esc(name)}</span></div>
+    <span class="chip {_tag[tier]}"><i></i>{_esc(_tlabel[tier])}</span>
+    <a class="mclose" href="{_rowurl(None)}" aria-label="Close" title="Close">&times;</a>
+  </header>
+  {f'<div class="mactions">{act_cell}</div>' if act_cell else ''}
+  <div class="mbody">
   <div class="unobs">Never measured — nothing is recorded for this server yet. Re-scan records
     its declared surface; verify watches it run.</div>
+  </div>
 </aside>"""
         # SERVER-SIDE FILTERING. The CSP here is `default-src 'none'` — no script — so a filter is a
         # GET form and a re-render, not a client-side hide. Eleven rows fit on a screen; forty do
         # not, and "scroll and squint" is the friction this removes.
-        if tier_filter and tier != tier_filter:
+        # `signin` is not a tier — it cuts ACROSS them, which is the whole reason the ask was
+        # wrong before: a server waiting on a person can sit in any tier. The briefing strip links
+        # here, so the control lands on exactly the servers it just counted instead of on a tier
+        # list that does not contain them.
+        if tier_filter == "signin":
+            if not _login_button_applicable(entry, name):
+                continue
+        elif tier_filter and tier != tier_filter:
             continue
         # Search the names each CLIENT uses too, not only the display name. One server can be
         # configured under a different name in every tool, so a reader typing the name their own
@@ -1553,44 +2165,64 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     <span class="mark">{_esc(mark)}</span><span>
     <span class="nm">{_esc(name)}</span>
     <span class="id">{_esc(key if key else "mcp:" + name)}</span></span></a>"""
-        state_tag = (f'<span><span class="chip {_tag[tier]}"><i></i>'
-                     f'{_esc(_tlabel[tier])}</span></span>')
-        if sel_active:
-            srows.append(f"""<div class="row s3{' sel' if _is_sel else ''}">
-  {who}
-  {state_tag}
-  <span class="n"><b>{tools}</b>{drift_note}</span>
-</div>""")
-        else:
+        # The state names the missing VERB where one is known: a server whose only blocker is
+        # authentication says "Needs sign-in" instead of a generic "Unverified", so the row's
+        # state and the row's action always agree (panel UX pass, founder-approved 24 Aug).
+        _row_tag, _row_lbl = _tag[tier], _tlabel[tier]
+        # THE ROW'S LABEL AND THE OPERATOR'S TO-DO LIST ARE TWO DIFFERENT QUESTIONS, and tying
+        # them together is what made the headline lie. Relabelling only makes sense where the tier
+        # would otherwise say "Unverified" — a server with findings must keep saying Findings. But
+        # the ASK does not belong to a tier: a server waiting on a sign-in is waiting whatever
+        # else is true of it. Gating the ask on `tier == "unverified"` meant kite (findings),
+        # notion and Revolut X (baseline) all needed a person while the strip said "Needs you:
+        # nothing" directly above the list that showed them. Measured on the founder's fleet
+        # 2026-08-27. The ask is now collected for every server; only the label is conditional.
+        if _login_button_applicable(entry, name):
+            _auth_asks.append(name)
+            if tier == "unverified":
+                _row_tag, _row_lbl = "warn", "Needs sign-in"
+        state_tag = (f'<span><span class="chip {_row_tag}"><i></i>'
+                     f'{_esc(_row_lbl)}</span></span>')
+        # ROWS KEEP ONE SHAPE. The old split view reshaped every row to three columns whenever a
+        # server was selected — the whole table reflowed under the reader. Detail is a MODAL now
+        # (round 2, founder-approved): the table never moves; the selected row just highlights.
+        if True:
             # "45 / 20 watched" read as forty-five-of-twenty ([FOUNDER] 2026-08-15: "45 of 20
             # what is this ???"). The fraction goes smaller-first, labelled, in brackets.
-            watched_s = (f' <s>({checked} of {tools} watched)</s>'
+            watched_s = (f'<span class="wt" title="{checked} of {tools} tools watched by a '
+                         f'verify run">{checked}/{tools} watched</span>'
                          if checked and isinstance(tools, int) and checked < tools else '')
-            srows.append(f"""<div class="row">
+            (bo_rows if _baseline_only else srows).append(f"""<div class="row{' sel' if _is_sel else ''}">
   {who}
   <span><span class="chip mode">{local}</span></span>
-  <span class="dim cl-agents">{_esc(clients)}</span>
+  <span class="dim cl-agents">{_agents_cell}</span>
   <span class="n cl-num"><b>{tools}</b>{drift_note}{watched_s}</span>
   <span class="n cl-num"><b>{seen}</b></span>
   {state_tag}
   {act_cell or '<span></span>'}
 </div>""")
 
-    _rows_html = "".join(srows) or (
+    _shown = len(srows) + len(bo_rows)             # the filter count counts ROWS, never the band
+    _band = (f'<div class="grpband">Approved but in no agent’s config ({len(bo_rows)}) '
+             f'— nothing can call these right now</div>' if bo_rows else '')
+    _rows_html = ("".join(srows) + _band + "".join(bo_rows)) or (
         '<div class="note" style="margin-top:13px">Nothing matches. '
         f'<a href="/?t={_esc(token)}">Clear the filter.</a></div>')
+    servers_table = (
+        '<div class="thead"><span>server</span><span>transport</span>'
+        '<span class="cl-agents">agents</span><span class="n cl-num">tools</span>'
+        '<span class="n cl-num">calls</span><span>state</span>'
+        # The column head appears only when the controls do (token present): a header naming
+        # actions over a tokenless read-only view would promise controls the page refuses.
+        + ('<span>actions</span>' if token else '<span></span>') + '</div>'
+        + _rows_html)
     if sel_active:
-        servers_table = (
-            '<div class="split"><div>'
-            '<div class="thead s3"><span>server</span><span>state</span>'
-            '<span class="n">tools</span></div>'
-            f'{_rows_html}</div>{drawer}</div>')
-    else:
-        servers_table = (
-            '<div class="thead"><span>server</span><span>transport</span>'
-            '<span class="cl-agents">agents</span><span class="n cl-num">tools</span>'
-            '<span class="n cl-num">calls</span><span>state</span><span></span></div>'
-            + _rows_html)
+        # ROUND 2 (founder-approved 24 Aug): detail is a centred modal over the dimmed, unmoved
+        # table — not a side drawer that reflowed everything. The scrim is a LINK (no script
+        # needed to close); Esc closes via panel.js; small screens get a bottom sheet (CSS).
+        servers_table += (
+            f'<a class="scrim" href="{_rowurl(None)}" aria-label="Close server detail"></a>'
+            f'<div class="modal" role="dialog" aria-modal="true">{drawer}</div>')
 
     # --- Coverage: the mockup's Spend-by-Team bars, measuring watched tools instead of money ----
     # One bar per MEASURED server; the number that matters is the gap. Servers never measured are
@@ -1607,6 +2239,127 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
          'An empty chart here is not coverage.</div>')
     cov_count = (f'<b>{_watched_sum}</b> of {_tools_sum} tools <i>currently exposed</i> watched'
                  + (f' · {_unmeasured} server(s) never measured' if _unmeasured else ''))
+
+    # --- THE BRIEFING STRIP (founder, 24 Aug): the first line of the Servers card answers
+    # "where does my fleet sit on the radar, and what actually needs ME" — and the only things
+    # that ever need the operator are a browser sign-in and a trust decision. Verification is
+    # the machine's job; the chips are the radar, worst tier first, each a filter link.
+    def _tierurl(t: str) -> str:
+        return ("/?" + "&".join(([f"t={_urlq(token)}"] if token else [])
+                                + [f"tier={_urlq(t)}", "tab=n0"]))
+    _radar = "".join(
+        f'<a class="chip {_tag[t]} bchip" href="{_tierurl(t)}"><i></i>{counts[t]} {_esc(lbl)}</a>'
+        for t, lbl, _why in TIERS if counts[t])
+    _asks = []
+    if _auth_asks:
+        _who = ", ".join(_esc(n) for n in _auth_asks[:2]) + \
+               (f" +{len(_auth_asks) - 2} more" if len(_auth_asks) > 2 else "")
+        _asks.append(f'<a class="bask" href="{_tierurl("signin")}">'
+                     f'{len(_auth_asks)} sign-in(s) — {_who}</a>')
+    if pending:
+        _asks.append(f'<label class="bask" for="n3">{len(pending)} approval(s) waiting</label>')
+    _needs = (' · '.join(_asks) if _asks
+              else 'nothing — sign-ins and trust decisions are the only things that ever will')
+    brief = (f'<div class="brief"><span class="bcount"><b>{len(classified)}</b> servers · '
+             f'{_watched_sum} of {_tools_sum} exposed tools watched</span>'
+             f'<span class="bradar">{_radar}</span>'
+             f'<span class="bneeds"><b>Needs you:</b> {_needs}</span></div>')
+
+    # ---- THE TODAY VIEW (slice 1 of the reimagined shell, founder-approved 25 Aug) -------------
+    # One verdict sentence · the only asks a machine cannot do · the fleet worst-first with quiet
+    # groups folded to one line. Depth lives one click away under Detail; nothing was deleted.
+    _f_by_srv: dict[str, int] = {}
+    for _f in (d.get("findings") or []):
+        if not _f.get("first_party") and not _f.get("suppressed"):
+            _s = str(_f.get("server") or "")
+            _f_by_srv[_s] = _f_by_srv.get(_s, 0) + 1
+    _asks_n = len(_auth_asks) + (1 if pending else 0)
+    _t_head = (f"{_asks_n} thing{'s' if _asks_n != 1 else ''} need"
+               f"{'' if _asks_n != 1 else 's'} you." if _asks_n else "All quiet.")
+    _cards = []
+    for _n in _auth_asks[:3]:
+        _act = (f'<form method="POST" action="/" class="rowact">'
+                f'<input type="hidden" name="token" value="{_esc(token)}">'
+                f'<input type="hidden" name="key" value="{_esc(_n)}">'
+                f'<input type="hidden" name="tab" value="n9">'
+                f'<button class="act-btn" name="act" value="login">Sign in now</button></form>'
+                if token else '<span class="dim">open the tokened URL from your terminal to act</span>')
+        _cards.append(f'<div class="ask"><span class="ak">sign in — only you can</span>'
+                      f'<h5>{_esc(_n)} is waiting on a browser sign-in</h5>'
+                      f'<p>Until then its tools stay unmeasured.</p>{_act}</div>')
+    if len(_auth_asks) > 3:
+        _cards.append(f'<div class="ask calm">+{len(_auth_asks) - 3} more sign-in(s) — see the '
+                      f'fleet below.</div>')
+    if pending:
+        _cards.append(f'<div class="ask"><span class="ak">trust decision — only you should</span>'
+                      f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed after '
+                      f'you approved {"them" if len(pending) != 1 else "it"}</h5>'
+                      f'<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
+                      f'<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
+    _asks_html = "".join(_cards) or ('<div class="ask calm">Nothing needs you — sign-ins and '
+                                     'trust decisions are the only things that ever will.</div>')
+    _PROBLEM = {"blocked", "findings", "changed"}
+    _trows = []
+    for _n2, _e2, _k2, _t2 in classified:
+        _is_auth = _n2 in _auth_asks
+        if _t2 not in _PROBLEM and not _is_auth:
+            continue
+        if _t2 == "blocked" and _e2.get("_baseline_only"):
+            continue                                   # folded to one group line below
+        if _is_auth:
+            _why2 = "waiting on your browser sign-in"
+        elif _t2 == "changed":
+            _why2 = "changed since approval — blocked until you decide"
+        elif _t2 == "findings":
+            _nf = _f_by_srv.get(_n2, 0)
+            _why2 = (f"{_nf} finding{'s' if _nf != 1 else ''} to review" if _nf
+                     else "has findings on record")
+        else:
+            _why2 = "blocked"
+        _w2 = [w for w in re.split(r"[^0-9A-Za-z]+", _n2) if w]
+        _mk2 = ((_w2[0][0] + (_w2[1][0] if len(_w2) > 1 else (_w2[0][1:2] or ""))).upper()
+                if _w2 else "?")
+        _lbl2, _tg2 = (("Needs sign-in", "warn") if _is_auth else (_tlabel[_t2], _tag[_t2]))
+        _trows.append(
+            f'<tr><td class="tmk"><span class="mmark {_tg2}" style="width:26px;height:26px;'
+            f'font-size:11px;border-radius:7px">{_esc(_mk2)}</span></td>'
+            f'<td><span class="nm">{_esc(_n2)}</span> '
+            f'<span class="id">{_esc(_k2 if _k2 else "mcp:" + _n2)}</span></td>'
+            f'<td class="dim">{_esc(_why2)}</td>'
+            f'<td><span class="chip {_tg2}"><i></i>{_esc(_lbl2)}</span></td>'
+            f'<td class="tact"><a href="{_rowurl(_n2).replace("tab=n0", "tab=n0")}">open</a></td></tr>')
+    _bo_n = sum(1 for _n2, _e2, _k2, _t2 in classified
+                if _t2 == "blocked" and _e2.get("_baseline_only"))
+    _quiet_unv = counts.get("unverified", 0) - len(_auth_asks)
+    _grp_lines = ""
+    if _bo_n:
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">approved but in no agent’s config '
+                       f'({_bo_n}) — nothing can call these '
+                       f'<a href="{_tierurl("blocked")}">show</a></td></tr>')
+    if _quiet_unv > 0:
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">unverified ({_quiet_unv}) '
+                       f'<a href="{_tierurl("unverified")}">show</a></td></tr>')
+    if counts.get("baseline"):
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">at baseline, quiet '
+                       f'({counts["baseline"]}) <a href="{_tierurl("baseline")}">show</a></td></tr>')
+    _mon_live = bool((d.get("monitor") or {}).get("running") or (d.get("monitor") or {}).get("servers"))
+    today_pane = f"""<section class="pane" id="p9">
+    <div class="card">
+      <div class="chead"><h1>Today</h1><div class="tools">
+        {_action_buttons(token, action, tab="n9")}</div></div>
+      <div class="mbody" style="padding:16px 18px 20px">
+        <div class="tverdict"><span class="th1">{_esc(_t_head)}</span>
+          <span class="tsub">{len(classified)} servers · {_watched_sum} of {_tools_sum} exposed
+          tools exercised{' · monitor live' if _mon_live else ''}</span>
+          <span class="bradar">{_radar}</span></div>
+        <div class="asks">{_asks_html}</div>
+        <div class="fhead2">Fleet · worst first</div>
+        <table class="ttable">{"".join(_trows) or
+          '<tr><td class="dim" style="padding:10px 4px">No server needs attention right now.</td></tr>'}
+        {_grp_lines}</table>
+      </div>
+    </div>
+  </section>"""
 
     # --- runtime: agents, then the call log with one Group by ----------------------------------
     _tiers = "".join(
@@ -1626,7 +2379,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # rendered "2 of 0 server(s)": a denominator smaller than its own numerator. The counter
         # has to describe the same universe the rows come from, or the fix for #12 just moves the
         # wrong number somewhere else.
-        + f'<span class="count rowcount">{len(srows)} of {len(classified)} server(s)'
+        + f'<span class="count rowcount">{_shown} of {len(classified)} server(s)'
         + (' matching this filter' if (q or tier_filter) else "") + '</span>'
         + '</form>')
 
@@ -1769,10 +2522,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             f'<td><span class="chip unv">{_esc(str(u.get("kind") or ""))}</span></td>'
             f'<td class="dim">{_esc(str(u.get("why") or ""))}</td></tr>'
             for u in d["unscannable"])
-        cannot = ('<div class="note">These are reachable by your agents but CANNOT be scanned or '
-                  'signed into from this machine — they are named so the fleet list above is not '
-                  'read as everything you have. This list is itself incomplete: a connector you '
-                  'added and never re-authorised leaves no trace on disk.</div>'
+        # ONE honesty sentence for this surface — the longer chorus (three claims in one note,
+        # echoed again by the drawer and the coverage card) taught the reader to skip all of it.
+        cannot = ('<div class="note">Reachable by your agents, not scannable from this machine — '
+                  'each is named with why, and this list cannot prove it is complete.</div>'
                   '<table><thead><tr><th>capability</th><th>kind</th><th>why not</th></tr></thead>'
                   f'<tbody>{rows_}</tbody></table>')
 
@@ -2089,28 +2842,43 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # THE GUIDED FIRST RUN (function tabs stay; the journey is a strip over them). Every stage
     # carries its real state and names the tab holding its control. Gone entirely once every
     # stage is done — a checklist of ticks is noise on a machine already set up.
+    # ONE LINE, NOT A CARD STACK. The six-item checklist card restated the nav and its counts
+    # above the servers table — the founder's recording opened on three onboarding cards before
+    # the product (24 Aug). Each step is now a chip: state dot + short verb, linking to the tab
+    # that finishes it; the full fact rides in the tooltip. Gone entirely once every step is done.
     _steps = journey_steps(d)
     journey = ""
     if any(st.get("state") != "done" for st in _steps):
-        _items = []
-        for i, st in enumerate(_steps, 1):
-            _mark = {"done": "✓", "now": str(i), "todo": "·"}.get(str(st.get("state") or ""), str(i))
-            _probs = ""
-            if st.get("problems"):
-                _probs = ('<span class="dim"> — ' + _esc("; ".join(st["problems"][:2])) + '</span>')
-            _items.append(
-                f'<li class="jstep {_esc(st.get("state") or "")}"><b>{_mark} '
-                f'{_esc(st.get("title") or "")}</b>'
-                f'<span>{_esc(st.get("fact") or "")}{_probs} · '
-                f'<i>{_esc(st.get("where") or "")}</i></span></li>')
-        journey = ('<div class="card"><div class="chead"><h1>Getting set up</h1></div>'
-                   '<ol class="jrny">' + "".join(_items) + '</ol></div>')
+        _step_tab = {"see": "n0", "connect": "n0", "verify": "n2",
+                     "protect": "n1", "gateway": "n7", "keys": "n7"}
+        _step_word = {"see": "See", "connect": "Sign in", "verify": "Verify",
+                      "protect": "Protect", "gateway": "Gateway", "keys": "Keys"}
+        _chips = []
+        for st in _steps:
+            sid = str(st.get("key") or "")
+            state = str(st.get("state") or "todo")
+            tip = _esc_attr(f"{st.get('title') or ''} — {st.get('fact') or ''} · "
+                            f"{st.get('where') or ''}")
+            _chips.append(
+                f'<label class="jchip {_esc(state)}" for="{_step_tab.get(sid, "n0")}" '
+                f'title="{tip}"><i class="jdot"></i>'
+                f'{_esc(_step_word.get(sid, str(st.get("title") or "")[:12]))}</label>')
+        journey = ('<div class="jstrip"><span class="ngrp" style="margin:0">Getting set up</span>'
+                   + "".join(_chips) + '</div>')
 
     _mon = d.get("monitor") or {}
     _mon_open = sum(int(r.get("open_alerts") or 0) for r in (_mon.get("servers") or []))
     _ct_mon = f'<span class="ct alert">{_mon_open}</span>' if _mon_open else ""
 
-    _ct_fnd = f'<span class="ct alert">{len(_f_real)}</span>' if _f_real else ""
+    # The badge alarms only for medium+ (verify convictions, TLS-off, plaintext credentials).
+    # Low-severity config findings still show the count — visible, not shouting — or a fresh
+    # install with ordinary unpinned `npx` servers boots to a red badge about the ecosystem's
+    # default and teaches the reader to ignore red (founder call 2026-08-23).
+    # "Not explicitly low" rather than "medium+": a missing severity (older verify reports) must
+    # alarm, never be silently demoted — ambiguity never reads as safe.
+    _f_alarm = any(str(f.get("severity")).lower() != "low" for f in _f_real)
+    _ct_fnd = (f'<span class="ct{" alert" if _f_alarm else ""}">{len(_f_real)}</span>'
+               if _f_real else "")
     _ct_dec = f'<span class="ct alert">{len(pending)}</span>' if pending else ""
     _ct_agt = f'<span class="ct">{agent_gaps} gap(s)</span>' if agent_gaps else ""
     _span = (f'{str(span_first or "")[:10]} → {str(span_last or "")[:10]}'
@@ -2126,14 +2894,20 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 /* Palette per the founder's reference (2026-08-15, chosen over Observatory dark): warm
    sage/cream field, white floating cards, ink-navy type, ONE hot orange accent used sparingly.
    Danger is deepened to crimson so an alarm never reads as the brand colour. */
-:root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;
+:root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;--line-strong:#C2CCBB;
 --ink:#1D2A30;--mut:#5C6B66;--fai:#626D66;--acc:#E8502B;--accent:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;
 --ok:#157A40;--ok-bg:#E9F3EA;--warn:#96590A;--warn-bg:#FBF1E3;
 --bad:#B3261E;--bad-bg:#F9E9E7;--unv:#707B74;--unv-bg:#EDF0EB;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
 --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
 --ease:cubic-bezier(.23,1,.32,1);
---srow:minmax(200px,1.6fr) .7fr 1.1fr .5fr .5fr .95fr minmax(80px,auto)}}
+--srow:minmax(190px,1.5fr) minmax(64px,.5fr) minmax(104px,.9fr) minmax(112px,.6fr)
+ minmax(48px,.35fr) minmax(96px,.85fr) minmax(118px,auto)}}
+/* LAYOUT CONTRACT (founder, 24 Aug): every column carries a PIXEL floor sized to its widest
+   normal content, so nothing squeezes to a width its words cannot survive. One grid item per
+   cell, always. Numeric columns carry numbers; their annotations (.dt/.wt) are their own
+   non-breaking line beneath. Words never break mid-token: chips, pills, buttons, agent names
+   and annotation lines are no-wrap; prose wraps at word boundaries only. */
 *{{box-sizing:border-box}}
 /* INSTRUMENT fusion ([FOUNDER] 2026-08-15): the two-voice rebrand's product voice FUSES
    with this shipped system rather than replacing it — same tokens, plus the paper dot-grid
@@ -2147,6 +2921,8 @@ line-height:1.5}}
 .sheet{{max-width:1280px;margin:0 auto;padding:22px 22px 90px;
 display:grid;grid-template-columns:196px minmax(0,1fr);gap:0 26px;align-items:start}}
 .sheet>:not(.rail):not(.pane){{grid-column:1/-1}}
+.sheet>.abar.gtop{{grid-column:2;grid-row:2;align-self:start}}
+.rail{{grid-row:2/span 2}}
 .bhead{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
 .brandmark{{width:22px;height:22px;display:block}}
 .ronote{{margin:0 0 14px;padding:10px 13px;border-radius:10px;font-size:12px;
@@ -2163,8 +2939,139 @@ padding:0;margin:0;position:sticky;top:18px}}
 .pill{{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--mut);
 padding:7px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
 .pill .ct{{margin-left:auto}}
-.pill .dot{{width:6px;height:6px;border-radius:50%;background:var(--fai)}}
+.pill .dot{{width:6px;height:6px;border-radius:50%;background:var(--fai);flex:none;margin-top:6px}}
 .pill .ct{{font-size:12px;color:var(--fai)}}
+.pill{{align-items:flex-start}}
+.pill .pw{{flex:1;min-width:0}}
+.pill .prow{{display:flex;align-items:center;gap:8px}}
+.pill .prow .ct{{margin-left:auto}}
+.pill .pdesc{{display:block;font-size:11px;color:var(--fai);line-height:1.3;margin-top:1px}}
+/* The group promise sits on its OWN line under the group label — deliberate structure instead
+   of a mid-phrase wrap ("what runs in / the path", founder screenshot 24 Aug). The dot ties the
+   promise to its label; the label itself never wraps. */
+.ngrp{{white-space:nowrap}}
+.ngrp i{{display:block;font-style:normal;text-transform:none;letter-spacing:0;font-weight:400;
+font-size:11px;color:var(--mut);margin-top:1px;white-space:normal}}
+.csub{{margin:1px 0 0;font-size:12.5px;color:var(--mut)}}
+/* The briefing strip — radar first, and the ONLY asks a machine cannot do for the operator. */
+.brief{{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 16px;
+border-bottom:1px solid var(--line);font-size:12.5px;color:var(--mut)}}
+.brief .bcount b{{color:var(--ink);font-weight:650}}
+.brief .bradar{{display:inline-flex;gap:6px;flex-wrap:wrap}}
+.brief .bchip{{text-decoration:none;cursor:pointer}}
+.brief .bneeds{{margin-left:auto}}
+.brief .bneeds b{{color:var(--ink)}}
+.brief .bask{{color:var(--acc-ink);font-weight:600;cursor:pointer;text-decoration:none}}
+.brief .bask:hover{{text-decoration:underline}}
+/* ---- TODAY (slice 1 of the reimagined shell) ---- */
+.pill.pc{{align-items:center;padding:5px 10px;font-size:13px}}
+.pill.pc .dot{{margin-top:0}}
+.tverdict{{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:2px 0 16px}}
+.tverdict .th1{{font-size:22px;font-weight:650;letter-spacing:-.01em}}
+.tverdict .tsub{{font-size:12.5px;color:var(--mut)}}
+.tverdict .bradar{{margin-left:auto}}
+.asks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px;margin:0 0 18px}}
+.ask{{border:1px solid var(--line-strong);border-radius:12px;padding:12px 14px;background:var(--card)}}
+.ask .ak{{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--fai)}}
+.ask h5{{margin:3px 0 2px;font-size:14px;font-weight:650}}
+.ask p{{margin:0 0 10px;font-size:12px;color:var(--mut)}}
+.ask.calm{{border-style:dashed;border-color:var(--line);color:var(--mut);display:flex;
+align-items:center;font-size:13px}}
+.albl{{display:inline-block;cursor:pointer}}
+.fhead2{{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+color:var(--fai);margin:0 0 6px}}
+.ttable{{width:100%;border-collapse:collapse;font-size:13px}}
+.ttable td{{padding:8px 10px 8px 0;border-top:1px solid var(--line);vertical-align:middle}}
+.ttable .tmk{{width:34px}}
+.ttable .id{{font-family:var(--mono);font-size:11px;color:var(--fai);display:block}}
+.ttable .tact{{text-align:right}}
+.ttable .tact a{{color:var(--acc-ink);font-weight:600;font-size:12.5px;text-decoration:none}}
+.tgrp td{{background:var(--rail);font-family:var(--mono);font-size:11px;letter-spacing:.05em;
+text-transform:uppercase;color:var(--mut);padding:6px 10px}}
+.tgrp a{{color:var(--acc-ink);font-family:var(--sans);font-weight:600;text-transform:none;
+letter-spacing:0;text-decoration:none;float:right}}
+.grpband{{margin-top:10px;padding:5px 12px;border-radius:7px;background:var(--bad-bg);
+color:var(--bad);font-family:var(--mono);font-size:11px;letter-spacing:.04em;
+text-transform:uppercase;font-weight:600}}
+.jstrip{{display:flex;align-items:center;gap:4px;flex-wrap:wrap;
+margin:0 0 14px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;
+background:var(--card)}}
+.jchip{{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);
+padding:3px 10px;border-radius:99px;cursor:pointer}}
+.jchip:hover{{background:var(--srow)}}
+.jchip .jdot{{width:7px;height:7px;border-radius:50%;background:var(--bad)}}
+.jchip.done .jdot{{background:var(--ok)}}
+.jchip.done{{color:var(--fai)}}
+details.cwrap{{margin-top:14px}}
+details.cwrap>summary{{cursor:pointer;font-size:13.5px;font-weight:600;color:var(--mut);
+padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);
+list-style-position:inside}}
+details.cwrap[open]>summary{{margin-bottom:10px}}
+/* ROUND 2 — popups. Server detail: a centred modal over the dimmed, unmoved table; the scrim is
+   a link, so closing needs no script. Small screens get a bottom sheet. */
+.scrim{{position:fixed;inset:0;background:rgba(23,23,15,.32);z-index:40;cursor:default}}
+.modal{{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:41;
+width:min(680px,94vw);max-height:86vh;overflow:hidden;background:var(--card);
+border:1px solid var(--line-strong);border-radius:18px;
+box-shadow:0 24px 70px rgba(23,23,15,.30),0 2px 8px rgba(23,23,15,.12);
+display:flex;flex-direction:column;animation:modalin .16s cubic-bezier(.16,1,.3,1)}}
+@keyframes modalin{{from{{opacity:0;transform:translate(-50%,-46%) scale(.98)}}
+to{{opacity:1;transform:translate(-50%,-50%) scale(1)}}}}
+@media (prefers-reduced-motion:reduce){{.modal{{animation:none}}}}
+.modal .side{{border:none;padding:0;display:flex;flex-direction:column;min-height:0}}
+/* MODAL HEADER — a tinted identity band: the same coloured mark as the row it came from, the
+   name over its id, the state pill, and a round close. This is what makes it a dialog, not a
+   rectangle of text (founder, 24 Aug). */
+.mhead{{display:flex;align-items:center;gap:12px;padding:16px 18px;
+background:var(--rail);border-bottom:1px solid var(--line-strong)}}
+.mhead .mtitle{{flex:1;min-width:0}}
+.mhead h3{{margin:0;font-size:17px;font-weight:640;letter-spacing:-.01em;line-height:1.2}}
+.mhead .id{{font-family:var(--mono);font-size:11.5px;color:var(--fai);display:block;
+margin-top:1px;overflow-wrap:anywhere}}
+.mmark{{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none;
+font-family:var(--mono);font-size:14px;font-weight:700;
+background:var(--acc-soft);color:var(--acc-ink)}}
+.mmark.ok{{background:var(--ok-bg);color:var(--ok)}}
+.mmark.warn{{background:var(--warn-bg);color:var(--warn)}}
+.mmark.bad{{background:var(--acc-soft);color:var(--acc-ink)}}
+.mmark.unv{{background:var(--rail);color:var(--mut)}}
+.mclose{{width:30px;height:30px;border-radius:50%;flex:none;display:grid;place-items:center;
+font-size:20px;line-height:1;color:var(--mut);text-decoration:none;
+border:1px solid var(--line-strong);background:var(--card);transition:all 140ms var(--ease)}}
+.mclose:hover{{color:var(--ink);border-color:var(--mut)}}
+/* Action bar under the header — the verbs sit on their own strip, not floating in the corner. */
+.mactions{{display:flex;gap:8px;padding:12px 18px;border-bottom:1px solid var(--line);
+background:var(--card)}}
+.mactions .rowact,.mactions form{{display:inline-flex;gap:8px}}
+.mbody{{padding:16px 18px 20px;overflow:auto;min-height:0}}
+/* Stat grid — the metadata as a row of small tiles, not a bare two-column list. */
+.statgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;
+margin:0 0 14px}}
+.stat{{border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:var(--page)}}
+.stat .sl{{display:block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+color:var(--fai);margin-bottom:2px}}
+.stat .sv{{display:block;font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums;
+overflow-wrap:anywhere}}
+@media (max-width:700px){{.modal{{left:0;right:0;bottom:0;top:auto;transform:none;width:auto;
+max-height:90vh;border-radius:16px 16px 0 0;animation:none}}}}
+/* Finished-action popup: a <details> that arrives OPEN only on the load right after completion
+   (done=1); every later load renders it collapsed to the slim record. Dismissal is the native
+   toggle; the once-only open is the one piece of state, carried by the URL, then scrubbed. */
+details.amodal>summary{{list-style:none;cursor:pointer;font-size:12.5px;color:var(--mut);
+padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--card);
+display:flex;align-items:center;gap:8px}}
+details.amodal>summary::-webkit-details-marker{{display:none}}
+details.amodal>summary .aclose{{margin-left:auto;font-size:12px;color:var(--acc-ink)}}
+details.amodal[open]>summary .aclose::after{{content:"Close"}}
+details.amodal:not([open])>summary .aclose::after{{content:"View result"}}
+/* NO SCRIM on a result popup — a full-viewport overlay here swallowed every click on the page
+   ("none of the buttons are working", founder 24 Aug). The popup floats; the page stays live. */
+details.amodal[open]>.abanner{{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+z-index:41;width:min(560px,92vw);max-height:80vh;overflow:auto;margin:0;
+border:1px solid var(--line-strong);border-radius:14px;
+box-shadow:0 24px 70px rgba(23,23,15,.30),0 2px 8px rgba(23,23,15,.14)}}
+@media (max-width:700px){{details.amodal[open]>.abanner{{left:0;right:0;bottom:0;top:auto;
+transform:none;width:auto;border-radius:14px 14px 0 0}}}}
 .ct.alert{{color:var(--bad);font-weight:600}}
 #n0:checked~.sheet label[for=n0],#n1:checked~.sheet label[for=n1],
 #n2:checked~.sheet label[for=n2],#n3:checked~.sheet label[for=n3],
@@ -2172,6 +3079,14 @@ padding:7px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}}
 #n8:checked~.sheet label[for=n8],
 #n6:checked~.sheet label[for=n6],#n7:checked~.sheet label[for=n7]{{background:var(--acc-soft);
 color:var(--acc);font-weight:600;border-color:transparent}}
+/* The active state highlights the NAME; the blurb stays quiet. Without this, the checked rule
+   above bolds and tints the whole label, and the active blurb shouts (founder screenshot,
+   24 Aug 14:39). Same id-level specificity so it wins over the rule above. */
+#n0:checked~.sheet label[for=n0] .pdesc,#n1:checked~.sheet label[for=n1] .pdesc,
+#n2:checked~.sheet label[for=n2] .pdesc,#n3:checked~.sheet label[for=n3] .pdesc,
+#n4:checked~.sheet label[for=n4] .pdesc,#n5:checked~.sheet label[for=n5] .pdesc,
+#n6:checked~.sheet label[for=n6] .pdesc,#n7:checked~.sheet label[for=n7] .pdesc,
+#n8:checked~.sheet label[for=n8] .pdesc{{color:var(--fai);font-weight:400}}
 #n0:checked~.sheet label[for=n0] .dot,#n1:checked~.sheet label[for=n1] .dot,
 #n2:checked~.sheet label[for=n2] .dot,#n3:checked~.sheet label[for=n3] .dot,
 #n4:checked~.sheet label[for=n4] .dot,#n5:checked~.sheet label[for=n5] .dot,
@@ -2180,11 +3095,21 @@ color:var(--acc);font-weight:600;border-color:transparent}}
 .pane{{display:none}}
 #n0:checked~.sheet #p0,#n1:checked~.sheet #p1,#n2:checked~.sheet #p2,
 #n3:checked~.sheet #p3,#n4:checked~.sheet #p4,#n5:checked~.sheet #p5,
-#n6:checked~.sheet #p6,#n7:checked~.sheet #p7,#n8:checked~.sheet #p8{{display:block}}
-.card{{background:var(--card);border:1px solid var(--line);border-radius:12px;
-box-shadow:0 16px 40px rgba(35,42,38,.09),0 2px 6px rgba(35,42,38,.05);
-overflow:hidden;margin-bottom:18px}}
-.chead{{display:flex;align-items:center;gap:12px;padding:14px 16px;flex-wrap:wrap}}
+#n6:checked~.sheet #p6,#n7:checked~.sheet #p7,#n8:checked~.sheet #p8,
+#n9:checked~.sheet #p9{{display:block}}
+#n9:checked~.sheet label[for=n9]{{background:var(--acc-soft);color:var(--acc);font-weight:600;
+border-color:transparent}}
+/* BOUNDARIES (founder, 24 Aug): the card edge is drawn by its border, not implied by a blur —
+   the old 40px shadow softened exactly the line it should have defined. Every card gets a
+   HEADER BAND (tinted, hairline below) so where a panel starts is never ambiguous, and every
+   in-card section (notes, filters, tables) sits between hairlines rather than floating. */
+/* EACH PANE IS ITS OWN TILE (founder, 24 Aug): a firmer outline than the inner hairlines so the
+   pane edge reads as a boundary at a glance, consistently across every tab. */
+.card{{background:var(--card);border:1px solid var(--line-strong);border-radius:14px;
+box-shadow:0 1px 2px rgba(35,42,38,.05),0 10px 26px rgba(35,42,38,.06);
+overflow:hidden;margin-bottom:20px}}
+.chead{{display:flex;align-items:center;gap:12px;padding:12px 16px;flex-wrap:wrap;
+background:var(--rail);border-bottom:1px solid var(--line)}}
 .chead h1{{margin:0;font-size:15px;font-weight:640;letter-spacing:-.01em}}
 .tools{{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
 .gbtn{{font:inherit;font-size:12px;padding:5px 11px;border:1px solid var(--line);
@@ -2200,6 +3125,7 @@ transition:background 160ms var(--ease),transform 160ms var(--ease)}}
 .act-btn.sm{{background:var(--card);color:var(--acc)}}
 a.act-btn{{text-decoration:none;display:inline-block}}
 .abar{{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px}}
+.abar.gtop{{grid-column:2;padding:0;margin:0 0 12px}}
 .abar:empty{{display:none}}
 .abanner{{width:100%;padding:10px 13px;border-radius:10px;font-size:12px;margin:0 0 13px;
 border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
@@ -2237,6 +3163,7 @@ border-bottom:1px solid var(--line);font-size:11.5px;letter-spacing:.09em;
 text-transform:uppercase;color:var(--fai);font-weight:500}}
 .row{{display:grid;grid-template-columns:var(--srow);gap:12px;align-items:center;
 padding:11px 16px;border-bottom:1px solid var(--line)}}
+.row:hover{{background:var(--srow)}}
 .thead.s3,.row.s3{{grid-template-columns:minmax(180px,1.6fr) .9fr .5fr}}
 .row.sel{{background:var(--acc-soft)}}
 .who{{display:flex;align-items:center;gap:10px;min-width:0}}
@@ -2288,6 +3215,14 @@ color:var(--warn);background:var(--warn-bg)}}
 .chip.bad{{color:var(--bad);background:var(--bad-bg)}}
 .chip.unv{{color:var(--unv);background:var(--unv-bg)}}
 .rowact{{display:inline-flex;gap:7px;justify-content:flex-end}}
+.actwrap{{display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap;align-items:center}}
+.actwrap .act-sm,.actwrap button{{white-space:nowrap}}
+.dt,.wt{{display:block;font-size:11px;font-weight:400;color:var(--fai)}}
+.row .dt,.row .wt{{white-space:nowrap}}
+.cl-agents .ag{{font-style:normal;white-space:nowrap}}
+/* .chip is the status pill — no-wrap. `.pill` is the NAV tab whose blurb MUST wrap; naming it
+   here once painted every rail blurb as one endless line straight across the cards. */
+.chip{{white-space:nowrap}}
 .act-sm{{font:inherit;font-size:12px;padding:4px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
@@ -2320,7 +3255,12 @@ table{{width:100%;border-collapse:collapse;font-size:13.5px}}
    simply did not exist ([FOUNDER] 2026-08-15: "it is not scrollable"). The scrollbar is
    therefore always painted when there is overflow, the region is keyboard-focusable
    (arrow keys scroll it), and a right-edge fade says "there is more" without words. */
-.tscroll{{overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--fai) var(--rail)}}
+/* Every table is a bounded TILE inset from the card edge — so a pane with two or three tables
+   reads as two or three tiles, not one flat sheet (boundaries, 24 Aug). */
+.tscroll{{overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--fai) var(--rail);
+margin:0 16px 16px;border:1px solid var(--line);border-radius:10px}}
+.tscroll table{{margin:0}}
+.tscroll thead th{{background:var(--rail)}}
 .tscroll::-webkit-scrollbar{{height:8px}}
 .tscroll::-webkit-scrollbar-track{{background:var(--rail);border-radius:999px}}
 .tscroll::-webkit-scrollbar-thumb{{background:var(--fai);border-radius:999px}}
@@ -2356,8 +3296,8 @@ font-weight:500;margin:14px 0 8px}}
 .mini td{{padding:5px 0;background:none}}
 .unobs{{background:var(--rail);border-radius:10px;padding:10px 12px;margin:0 0 8px;
 font-size:12px;color:var(--mut);line-height:1.5}}
-.note{{margin:0 16px 13px;padding:10px 12px;border-radius:10px;background:var(--rail);
-font-size:12px;color:var(--mut);line-height:1.5}}
+.note{{margin:13px 16px;padding:10px 12px;border-radius:10px;background:var(--rail);
+border:1px solid var(--line);font-size:12px;color:var(--mut);line-height:1.5}}
 .note.ok{{background:var(--ok-bg);color:var(--ok)}}
 .note.warn{{background:var(--warn-bg);color:var(--warn)}}
 .whysum{{cursor:pointer;color:var(--acc-ink);font-size:12px}}
@@ -2370,13 +3310,33 @@ padding:11px 16px;font-size:13.5px;font-weight:550;margin-bottom:14px}}
 var(--warn);border-radius:10px;padding:11px 16px;font-size:13.5px;margin-bottom:14px}}
 .stalecode code{{color:var(--warn)}}
 /* In-place drill-downs (sessions, gateway principals): a row must OPEN, not dead-end. */
+/* Agent x server tree (fleet root), drawn server-side as inline SVG. Tokens only, no new
+   colour: the accent marks the ONE open branch and nothing else competes with it. */
+.ftwrap{{overflow-x:auto;margin-top:10px}}
+svg.ftree{{display:block;max-width:100%;height:auto}}
+svg.ftree .tn rect{{fill:var(--card);stroke:var(--line);stroke-width:1}}
+svg.ftree .tn:hover rect{{stroke:var(--acc-ink)}}
+svg.ftree .tnsel rect{{stroke:var(--acc);stroke-width:1.6;fill:var(--acc-soft)}}
+svg.ftree .tnbad rect{{stroke:var(--bad)}}
+svg.ftree .tnt{{font:550 12.5px var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+fill:var(--ink)}}
+svg.ftree .tnm{{font:11px var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);fill:var(--mut)}}
+svg.ftree .tn:focus-visible rect{{outline:2px solid var(--accent);outline-offset:2px}}
+/* The branch. Drawn under the boxes because a line that crosses a node reads as a connection. */
+svg.ftree .tbr{{fill:none;stroke:var(--line);stroke-width:1.2}}
+svg.ftree .tdet text{{font:11px var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);fill:var(--acc-ink)}}
+svg.ftree .tdet:hover text{{text-decoration:underline}}
+.tfoot{{margin-top:10px;font-size:12px;color:var(--mut);line-height:1.45}}
+.tbasis{{margin-top:12px}}
 .sessdrill{{margin-top:4px}}
 .sessdrill .mini{{margin-top:6px;font-size:12px}}
 .sessdrill .mini th,.sessdrill .mini td{{padding:4px 8px;font-size:11.5px}}
 .whyfull{{white-space:pre-wrap;font-size:12px;color:var(--mut);margin-top:6px;max-width:60ch;
 line-height:1.5}}
+/* A sub-section heading is the LABEL of the tile beneath it — the tile's own border draws the
+   boundary now (boundaries pass, 24 Aug), so the heading is clean text, not a divider. */
 h2{{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--fai);
-font-weight:500;margin:18px 16px 8px}}
+font-weight:500;margin:0;padding:16px 16px 8px}}
 .gwrap{{padding:0 16px 13px}}
 .gl{{display:inline-block;font-size:12px;padding:4px 11px;border:1px solid var(--line);
 border-radius:8px;margin:0 5px 10px 0;color:var(--mut);cursor:pointer}}
@@ -2393,7 +3353,7 @@ border-radius:8px;margin:0 5px 10px 0;color:var(--mut);cursor:pointer}}
 .cs .snip{{margin:0}}
 .barcell span{{display:block;height:6px;background:var(--acc);opacity:.45;border-radius:999px}}
 .fr{{padding:20px 16px 24px;max-width:620px}}
-.fr h2{{margin:0 0 7px;font-size:19px;font-weight:640;letter-spacing:-.02em;text-transform:none;
+.fr h2{{margin:0 0 7px;border-top:none;padding:0;font-size:19px;font-weight:640;letter-spacing:-.02em;text-transform:none;
 color:var(--ink)}}
 .fr>p{{color:var(--mut);margin:0 0 20px;font-size:13.5px;max-width:62ch}}
 .fr ol{{list-style:none;margin:0;padding:0;counter-reset:s}}
@@ -2460,41 +3420,59 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
    '<code>mcpgawk panel</code> printed in your terminal. Reopen from there to act. '
    'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}
   <div class="rail">
-    <span class="ngrp">Oversee</span>
-    <label class="pill" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified)}</span></label>
-    <label class="pill" for="n6"><span class="dot"></span>Findings {_ct_fnd}</label>
-    <label class="pill" for="n4"><span class="dot"></span>Activity</label>
-    <span class="ngrp">Decide</span>
-    <label class="pill" for="n3"><span class="dot"></span>Decisions {_ct_dec}</label>
-    <label class="pill" for="n1"><span class="dot"></span>Agents {_ct_agt}</label>
-    <span class="ngrp">Platform</span>
-    <label class="pill" for="n7"><span class="dot"></span>Gateway</label>
-    <label class="pill" for="n8"><span class="dot"></span>Monitor{_ct_mon}</label>
-    <span class="ngrp">System</span>
-    <label class="pill" for="n2"><span class="dot"></span>Evidence</label>
-    <label class="pill" for="n5"><span class="dot"></span>Trust</label>
+    <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct alert">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
+    <label class="pill" for="n4"><span class="dot"></span><span class="pw"><span class="prow">History</span><span class="pdesc">every call, run and decision, newest first</span></span></label>
+    <span class="ngrp">Detail <i>go deeper on demand</i></span>
+    <label class="pill pc" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified)}</span></label>
+    <label class="pill pc" for="n6"><span class="dot"></span>Findings {_ct_fnd}</label>
+    <label class="pill pc" for="n3"><span class="dot"></span>Decisions {_ct_dec}</label>
+    <label class="pill pc" for="n1"><span class="dot"></span>Agents {_ct_agt}</label>
+    <label class="pill pc" for="n7"><span class="dot"></span>Gateway</label>
+    <label class="pill pc" for="n8"><span class="dot"></span>Monitor{_ct_mon}</label>
+    <label class="pill pc" for="n2"><span class="dot"></span>Evidence</label>
+    <label class="pill pc" for="n5"><span class="dot"></span>Trust</label>
   </div>
+  <!-- ACTION FEEDBACK IS GLOBAL CHROME (25 Aug): a POST from ANY tab (keep/approve on
+       Decisions, protect on Agents, the Gateway controls) reports HERE, visible wherever you
+       are — the founder pressed Keep blocked and Approve on Decisions and saw nothing, because
+       the banner used to live inside two specific panes only. -->
+  <div class="abar gtop" id="action" data-live data-t="{token}">{_action_banner(action, token, fresh=fresh_action)}</div>
   {errs}
+  {today_pane}
   <section class="pane" id="p0">
     {journey}
     {firstrun}
-    {_connect_card()}
     <div class="card">
-      <div class="chead"><h1>Servers</h1><div class="tools">
-        <a class="gbtn" href="/export/servers.csv">Export .csv</a>
-        {_action_buttons(token, action)}</div></div>
+      <div class="chead"><h1>Servers</h1>
+        <div class="tools">
+        {_action_buttons(token, action)}
+        <a class="gbtn" href="/export/servers.csv">Export .csv</a></div></div>
+      {brief}
       {'' if token else
        '<div class="note">Read-only view — the state is open, the controls are not. The buttons '
        '(scan, verify, approve, protect) appear only through the link printed in the terminal '
        'that started the panel, which an agent that merely opens this page cannot supply. '
        'Lost the link? Restart <code>mcpgawk panel</code> and use the fresh one it prints.</div>'}
-      <div class="abar" id="action" data-t="{token}">{_action_banner(action, token)}</div>
       {nba}
       {disc_problems}
       {cannot}
-      {filterbar}
-      {servers_table}
+      {fleet_tree}
+      <!-- Distinct class (cwrap ftable): a test pins the connect card below the fleet listing by
+           searching for the first bare cwrap disclosure, so an identical wrapper here would
+           satisfy that search while the card itself had moved. The rule still holds; this element
+           is only made not to impersonate the one being checked. Note for whoever edits this
+           comment: do not spell that element out literally here — a comment containing it is
+           found by the same search, which is exactly how this went wrong once. -->
+      <details class="cwrap ftable">
+        <summary>Every server as one flat table</summary>
+        {filterbar}
+        {servers_table}
+      </details>
     </div>
+    <details class="cwrap">
+      <summary>Connect your agent — one paste</summary>
+      {_connect_card()}
+    </details>
     <div class="card">
       <div class="chead"><h1>Coverage</h1></div>
       <div class="filters"><span class="count" style="margin-left:0">{cov_count}</span></div>
@@ -2539,7 +3517,8 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 
   <section class="pane" id="p2">
     <div class="card">
-      <div class="chead"><h1>Evidence</h1>{f'<div class="tools"><span class="count">verified {_esc(d.get("verify_at") or "")[:19]}</span></div>' if d.get("verify_at") else ''}</div>
+      <div class="chead"><div><h1>Evidence</h1><p class="csub">The receipts of every run: what was
+        scanned or verified, when, and how it went — this is provenance, not findings.</p></div>{f'<div class="tools"><span class="count">verified {_esc(d.get("verify_at") or "")[:19]}</span></div>' if d.get("verify_at") else ''}</div>
       <!-- Findings moved to their own screen (2026-07-31). Evidence keeps PROVENANCE — what ran,
            when, and how it went. Rendering the same findings in two places is two answers. -->
       <div class="note">Findings live on their own screen. This page is provenance: what ran, when,
@@ -2570,7 +3549,9 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
        engine reported, not what a label claimed. -->
   <section class="pane" id="p5">
     <div class="card">
-      <div class="chead"><h1>Trust</h1>
+      <div class="chead"><div><h1>Trust</h1><p class="csub">Why you can believe this panel: which
+        sandbox actually held each server, where every file lives on disk, and what this build
+        is.</p></div>
         <div class="tools"><a class="gbtn" href="/export/calls.jsonl">Export .jsonl</a>
           <a class="gbtn" href="/export/calls.csv">Export .csv</a></div></div>
       <h2>what actually ran</h2>
@@ -2724,6 +3705,20 @@ def state() -> dict[str, Any]:
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _elapsed(stamp: object) -> str:
+    """"1m 12s" since an ISO-8601 Z stamp — a MOVING clock for a running action, distinct from
+    _ago's past-tense phrasing. "0s" rather than a guess when unparseable."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return "0s"
+    try:
+        when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "0s"
+    secs = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    return f"{secs}s" if secs < 60 else f"{secs // 60}m {secs % 60:02d}s"
 
 
 def run_scan() -> dict[str, Any]:
@@ -2906,6 +3901,20 @@ def _begin_action(label: str) -> None:
                    at=_now())
 
 
+def _open_login_in_browser(url: str) -> None:
+    """The panel runs on the operator's own machine, so a sign-in link OPENS THE BROWSER ITSELF —
+    rendering only a link was a CLI habit ("it is just providing the link", founder 25 Aug). The
+    banner keeps the link as the fallback for a blocked popup or an unusual default browser."""
+    if not url or os.environ.get("MCPGAWK_NO_BROWSER"):
+        return
+    try:
+        import threading
+        import webbrowser
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
+    except Exception:                              # noqa: BLE001 — the link on the banner remains
+        pass
+
+
 #: The last completed action, kept ON DISK. `_ACTION` is in-memory, so restarting the panel erased
 #: the result of a five-minute verify — the founder restarted three times and each time the page
 #: went blank of everything he had just run. A result that vanishes when the process does is not a
@@ -2978,8 +3987,9 @@ def _run_action_bg(kind: str, target: str | None = None,
             # as "it is running in the background throughout whenever we click on any button"
             # (2026-08-13). The dropped click is now SAID on the running banner.
             wanted = f"{kind} · {target}" if target else kind
-            _ACTION.update(notice=f"'{wanted}' not started — waiting for {_ACTION['label']} "
-                                  f"to finish; click again when this banner clears")
+            _ACTION.update(notice=f"‘{wanted}’ is queued — {_ACTION['label']} is still running "
+                                  f"({_elapsed(_ACTION.get('at'))} so far). One action at a time; "
+                                  f"start ‘{wanted}’ again once this finishes.")
             return
         _begin_action(f"{kind} · {target}" if target else kind)
         _ACTION.update(running=True)
@@ -3983,11 +4993,17 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
         opts = "".join(f'<option value="+{_esc(r)}">{_esc(r)} — {_esc(desc)}</option>'
                        for r, desc in ROLE_TEMPLATES if r in derived)
         return (issued
-                + f'<div class="note">{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
+                + f'<div class="ddh">Give an agent its own key</div>'
+                + f'<div class="note">Name an agent, pick what it may touch, get a key — shown '
+                  f'once. Paste that key into the agent\'s gateway config above; from then on '
+                  f'its calls are attributed to it in the trail and limited to its grant. '
+                  f'{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
                 + f'<form method="POST" action="/" class="filters">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
                   f'<input type="hidden" name="tab" value="n7">'
-                  f'<input name="name" aria-label="agent name" placeholder="agent name, e.g. claude-code@laptop" '
+                  f'<input name="name" aria-label="agent name" list="gw-principals" '
+                  f'placeholder="pick a known agent or type a new name" '
+                  f'title="Agents already seen by the gateway are in the list; a new name creates a new principal" '
                   f'maxlength="80" required>'
                   f'<select name="role"><option value="">no grants yet</option>{opts}</select>'
                   f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key'
@@ -4006,7 +5022,9 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
             + f'<form method="POST" action="/" class="filters">'
               f'<input type="hidden" name="token" value="{_esc(token)}">'
               f'<input type="hidden" name="tab" value="n7">'
-              f'<input name="name" aria-label="agent name" placeholder="agent name, e.g. claude-code@laptop" '
+              f'<input name="name" aria-label="agent name" list="gw-principals" '
+              f'placeholder="pick a known agent or type a new name" '
+              f'title="Agents already seen by the gateway are in the list; a new name creates a new principal" '
               f'maxlength="80" required>{role_field}'
               f'<button class="act-btn sm" name="act" value="issue-key">Issue agent key</button>'
               f'</form>')
@@ -4035,13 +5053,18 @@ def _playground_form(live: dict[str, Any], token: str) -> str:
                 if not probe.get("ok") else
                 '<div class="note">An unauthenticated caller sees no tools here — that is the '
                 'gateway filtering by identity. Paste an agent key and name its tool.</div>')
-    return (f'<div class="note">Call a tool through the gateway, as an agent would — the same '
+    return (f'<div class="ddh">Try the gateway as an agent</div>'
+            f'<div class="note">Prove a key works before wiring an agent: pick a tool, paste the '
+            f'key, send it. The call takes the same '
             f'handlers, the same policy, and the decision lands in the trail below.</div>{note}'
             f'<form method="POST" action="/" class="filters">'
             f'<input type="hidden" name="token" value="{_esc(token)}">{picker}'
             f'<input type="hidden" name="tab" value="n7">'
-            f'<input name="key" aria-label="agent key" placeholder="agent key (Bearer)" maxlength="200">'
-            f'<input name="arguments" aria-label="tool arguments, JSON" placeholder=\'{{"arg": "value"}}\' maxlength="400">'
+            f'<input name="key" aria-label="agent key" placeholder="paste an agent key — issue one above if you have none" '
+            f'title="The key is shown ONCE when you issue it (Issue agent key, above); it is never stored readable" '
+            f'maxlength="200">'
+            f'<input name="arguments" aria-label="tool arguments, JSON" placeholder=\'JSON arguments — {{}} for none\' '
+            f'title=\'The tool&#39;s arguments as JSON, e.g. {{"query": "AAPL"}}; use {{}} to call with none\' maxlength="400">'
             f'<button class="act-btn sm" name="act" value="gw-call">Call through gateway</button>'
             f'</form>')
 
@@ -4093,10 +5116,14 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
     # be able to tell the two apart at a glance.
     _failed = gw.get("backend_failures", 0)
     head = (f'<div class="filters"><span class="count" style="margin-left:0">'
-            f'{gw.get("blocks", 0)} block(s) · '
-            + (f'{_failed} backend failure(s) · ' if _failed else '')
-            + f'{gw.get("sessions", 0)} session(s) · '
-              f'principals: {_esc(", ".join(gw.get("principals") or []) or "—")}</span></div>')
+            f'Since it started, this gateway has refused {gw.get("blocks", 0)} call(s)'
+            + (f', seen {_failed} backend failure(s)' if _failed else '')
+            + f' across {gw.get("sessions", 0)} agent session(s) · agents seen: '
+              f'{_esc(", ".join(gw.get("principals") or []) or "none yet")}</span></div>'
+              + '<datalist id="gw-principals">'
+              + "".join(f'<option value="{_esc(p)}"></option>'
+                        for p in (gw.get("principals") or []) if p and "identity" not in p)
+              + '</datalist>')
     if not live and not gw.get("runs_error"):
         _gtok = _D_FOR_ROLES.get("_token", "") if isinstance(_D_FOR_ROLES, dict) else ""
         _gw_dir = behaviour_profile_path().parent / "gateway"
@@ -4363,6 +5390,7 @@ def run_login(name: str | None) -> dict[str, Any]:
                 if inband:
                     auth_url, server_text = inband
                     _ACTION.update(login_url=auth_url or "", notice="")
+                    _open_login_in_browser(auth_url or "")
                     return {"ok": True,
                             "message": f"{name}, in its own words:",
                             "rows": [{"server": name, "outcome": "sign-in steps",
@@ -4390,28 +5418,43 @@ def run_login(name: str | None) -> dict[str, Any]:
         inband = remote_login.inband_login_held(url=url)
         if inband:
             auth_url, server_notice = inband
-            _ACTION.update(login_url=auth_url,
-                           notice=f"{name} signs in through its own login tool. "
-                                  f"{server_notice}")
+            _ACTION.update(
+                login_url=auth_url,
+                notice=(f"{name} signs in through its own login tool, and that login belongs to "
+                        f"ONE MCP session. This link authorises the session mcpgawk is holding — "
+                        f"it does NOT sign your agent in. {server_notice}"))
+            _open_login_in_browser(auth_url)
+            # SAY WHAT THIS CANNOT DO. Measured twice on the founder's fleet (2026-08-27): a brand
+            # new session is "Please log in first" hours after a successful browser login, so a
+            # login completed here is worth nothing to Claude Desktop or any other client. The old
+            # copy said the agent "may ask once more … that is kite's model, not an error", which
+            # reads as a quirk to tolerate rather than the flat fact that this button cannot
+            # connect an agent. A control that implies more than it delivers is the same false
+            # reassurance as a clean bill on an unrun check.
             return {"ok": True,
-                    "message": f"{name} sign-in link is ready — open it from this banner within "
-                               f"5 minutes (it is bound to a live session we are holding for "
-                               f"you). Your agent may ask once more in its own chat; that is "
-                               f"{name}'s model, not an error."}
+                    "message": (f"{name} sign-in link is ready — open it within 5 minutes, while "
+                                f"mcpgawk holds the session it is bound to. WHAT THIS DOES: lets "
+                                f"mcpgawk measure {name} as a signed-in user. WHAT IT DOES NOT DO: "
+                                f"sign your agent in — {name} binds a login to the one session "
+                                f"that asked, so Claude Desktop (and every other client) must run "
+                                f"{name}'s own login tool from inside that client.")}
         return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
     try:
         proc, log_path = _run_login_cli(url, _transport_flag(entry, url))
     except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "message": f"sign-in for {name} did not complete: {exc}"}
 
-    # PUBLISH THE LINK THE MOMENT IT EXISTS. The child prints the authorisation URL for exactly
-    # this reason; the panel used to swallow it for 330s and then blame the sign-in. We poll the
-    # child's log, and the first http(s) URL it prints goes straight onto the banner as a real
-    # link — so a browser that did not open is a two-second inconvenience, not a dead feature.
+    # PUBLISH THE AUTHORISATION LINK — and ONLY that link. The first version published the first
+    # http(s) URL in the child's log, which is the server's own MCP ENDPOINT from the header
+    # lines; opening a JSON-RPC endpoint in a browser is a 404 page ({"status":404} — figma,
+    # founder 25 Aug). The child prints the real authorize URL after a fixed marker and opens
+    # the browser ITSELF (oauth_login), so the panel anchors on the marker, never re-opens
+    # (double browser tabs), and never publishes the endpoint.
     import re as _re
     import time as _time
     deadline = _time.monotonic() + 330
     published = False
+    _endpoint = (url or "").rstrip("/")
     while _time.monotonic() < deadline:
         if proc.poll() is not None:
             break
@@ -4420,12 +5463,14 @@ def run_login(name: str | None) -> dict[str, Any]:
                 text = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 text = ""
-            hit = _re.search(r"https?://\S+", text)
+            hit = _re.search(r"paste this into a browser:\s*(https?://\S+)", text)
             if hit:
-                link = hit.group(0).rstrip(".,)")
-                _ACTION.update(login_url=link,
-                               notice=f"Open this to finish signing in to {name}")
-                published = True
+                link = hit.group(1).rstrip(".,)")
+                if link.rstrip("/") != _endpoint:
+                    _ACTION.update(login_url=link,
+                                   notice=f"Your browser opened {name}'s sign-in page — the "
+                                          f"link below is the fallback if it didn't.")
+                    published = True
         _time.sleep(0.5)
     else:                                          # loop exhausted: the human never finished
         proc.kill()
@@ -4486,6 +5531,19 @@ def _login_button_applicable(entry: dict, name: str = "") -> bool:
             except Exception:  # noqa: BLE001 - an unreadable store must not add buttons
                 return False
         return False
+    # A STORED TOKEN IS NOT PROOF OF ACCESS. `auth-needed.json` is rewritten wholesale by every
+    # scan, so a name in it means THE LAST SCAN WAS REFUSED FOR CREDENTIALS — fresher and stronger
+    # evidence than a token sitting in the store, which may be expired, revoked, or for a
+    # different audience. Measured on the founder's fleet 2026-08-27: notion had a stored token,
+    # the server refused a scan carrying that very token, and the panel called it "configured,
+    # never used" — a server that needs a person shown as one that needs nothing, which is the
+    # precise mislabel the sign-in state exists to prevent.
+    if name and name in remote_login.auth_needed():
+        stale = remote_login.refused_after_login(url)
+        if stale:
+            return True
+        if stale is None and not remote_login.stored_access_token(url):
+            return True
     return not remote_login.stored_access_token(url)
 
 
@@ -4761,6 +5819,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                             except ValueError:
                                 continue
                             if ev.get("type") == "auth-needed" and ev.get("url"):
+                                _open_login_in_browser(str(ev["url"]))
                                 _ACTION.update(
                                     login_url=str(ev["url"]),
                                     notice=f"{ev.get('server')} signs in through its own "
@@ -4986,6 +6045,16 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
 _PANEL_JS = """\
 (function () {
   "use strict";
+  // Esc closes whatever popup is open (round 2): a finished-action popup collapses to its
+  // summary line; the server-detail modal navigates to its scrim's close href. Enhancement
+  // only — both popups close without script (summary click / scrim link).
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    var am = document.querySelector("details.amodal[open]");
+    if (am) { am.removeAttribute("open"); return; }
+    var scrim = document.querySelector("a.scrim");
+    if (scrim && scrim.href) { window.location = scrim.href; }
+  });
   document.addEventListener("click", function (ev) {
     var el = ev.target && ev.target.closest ? ev.target.closest("[data-copy]") : null;
     if (!el || !navigator.clipboard) return;
@@ -5019,8 +6088,13 @@ _PANEL_JS = """\
   };
   markScrollables();
   window.addEventListener("resize", markScrollables);
-  var bar = document.getElementById("action");
+  var bars = document.querySelectorAll(".abar[data-live]");
+  var bar = bars.length ? bars[0] : null;
   if (!bar || !window.EventSource) return;   // no bar or ancient browser: noscript refresh rules
+  // Result pop must survive the fast-action race: when the action finished BEFORE the stream
+  // connected (wasRunning never true), the settle-reload never fires — so if THIS load followed
+  // an action (done=1, noted before the URL is scrubbed), open the result popup on delivery.
+  var justActed = location.search.indexOf("done=1") !== -1;
   var wasRunning = null;
   var t = bar.getAttribute("data-t") || "";
   var es = new EventSource(t ? "/events?t=" + encodeURIComponent(t) : "/events");
@@ -5051,16 +6125,52 @@ _PANEL_JS = """\
   es.onmessage = function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
-    if (typeof d.html === "string") bar.innerHTML = d.html;  // server-escaped fragment
+    if (typeof d.html === "string") {
+      // PRESERVE the user's open/closed choice across swaps: the fragment re-delivers whenever
+      // its text ages ("just now" -> "1m ago"), and a naive innerHTML replace slammed the record
+      // shut the moment the user opened it (caught live, 25 Aug).
+      var wasOpen = !!bar.querySelector("details.amodal[open]");
+      bars.forEach(function (b) { b.innerHTML = d.html; });   // every live banner, every tab
+      var det = bar.querySelector("details.amodal");
+      if (det && (wasOpen || (justActed && d.running === false))) {
+        det.setAttribute("open", "");
+      }
+      if (d.running === false) justActed = false;   // survive running frames; spend on the result
+    }
     var slog = document.getElementById("slog");
     if (slog && typeof d.log === "string" && d.log) slog.innerHTML = d.log;
     if (wasRunning === true && d.running === false) {
       es.close();
-      location.reload();      // one settle with fresh rows, instead of a refresh loop
+      // One settle with fresh rows — routed through done=1 so the finished action pops exactly
+      // once on that load (the URL is scrubbed below, so a later refresh shows the collapsed
+      // record instead of re-opening the popup).
+      var u = new URL(location.href);
+      u.searchParams.set("done", "1");
+      location.replace(u.toString());
       return;
     }
     wasRunning = d.running;
   };
+  // A result popup DISMISSES ITSELF when you move on: switching tabs or clicking anywhere
+  // outside it collapses the details (founder recording, 25 Aug: the gateway-call popup
+  // followed them across four tabs until they found Close).
+  document.addEventListener("change", function (ev) {
+    if (ev.target && ev.target.name === "nav") {
+      document.querySelectorAll("details.amodal[open]").forEach(function (d) {
+        d.removeAttribute("open");
+      });
+    }
+  });
+  document.addEventListener("click", function (ev) {
+    var open = document.querySelector("details.amodal[open]");
+    if (open && !open.contains(ev.target)) open.removeAttribute("open");
+  });
+  // Scrub done=1 after it has done its one job, so refresh/bookmark never re-pops the result.
+  if (location.search.indexOf("done=1") !== -1) {
+    var clean = new URL(location.href);
+    clean.searchParams.delete("done");
+    history.replaceState(null, "", clean.toString());
+  }
 })();
 """
 
@@ -5111,6 +6221,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/javascript; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")   # ship with the page, never stale
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -5197,14 +6308,23 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             shown = token if secrets.compare_digest(_traw, token) else ""
             body = render(collect(), token=shown, action=dict(_ACTION),
                           stale_token=bool(_traw) and not shown,
+                          fresh_action=bool((q.get("done") or [""])[0]),
                           q=(q.get("q") or [""])[0][:80],
                           tier_filter=(q.get("tier") or [""])[0][:20],
                           sel=(q.get("sel") or [""])[0][:120],
                           tl=(q.get("tl") or [""])[0][:200],
+                          ag=(q.get("ag") or [""])[0][:80],
+                          br=(q.get("br") or [""])[0][:120],
+                          tc=(q.get("tc") or [""])[0][:120],
                           tab=(q.get("tab") or [""])[0][:3]).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # NEVER CACHE THE PAGE. A live control surface must reflect the machine's state right
+            # now — and, in dev, a rebuilt panel. Without this the browser served a stale copy and
+            # a real change read as "nothing changed" (founder, 24 Aug). The page is state, not an
+            # asset; only the versioned favicon/JS opt into caching above.
+            self.send_header("Cache-Control", "no-store, must-revalidate")
             # Actions are same-origin POST forms; keep the strict CSP but allow the form submit.
             # `script-src 'self'` is the allowlist, not a relaxation: /panel.js (ours) runs,
             # and an inline <script> smuggled through a server-controlled description still
@@ -5231,7 +6351,9 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # state dies with the page load, and every action used to dump them on Servers.
             _rtab = (form.get("tab") or [""])[0]
             _rtab = _rtab if _rtab in {t for t, _ in _TAB_LABELS} else "n0"
-            _back = f"/?t={urllib.parse.quote(token)}&tab={_rtab}#action"
+            # done=1 marks the ONE load that follows the action, so its result pops exactly once
+            # (see _action_banner) and a later refresh shows the collapsed record instead.
+            _back = f"/?t={urllib.parse.quote(token)}&tab={_rtab}&done=1#action"
             if act in ("issue-key", "monitor-start", "monitor-start-local", "gw-call",
                        "gateway-setup", "gateway-start", "keep", "protect", "approve"):
                 # The synchronous actions get the same two rules as the background ones:
@@ -5239,9 +6361,9 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 # result renders under ITS OWN label — driven live 2026-08-14, "Start
                 # monitoring" reported under the headline "login-configure · __nosuch__".
                 if _ACTION.get("running"):
-                    _ACTION.update(notice=f"'{act}' not started — waiting for "
-                                          f"{_ACTION['label']} to finish; click again when "
-                                          f"this banner clears")
+                    _ACTION.update(notice=f"‘{act}’ is queued — {_ACTION['label']} is still "
+                                          f"running ({_elapsed(_ACTION.get('at'))} so far). One "
+                                          f"action at a time; start ‘{act}’ again once it finishes.")
                     act = ""
                 else:
                     _k = (form.get("key") or [""])[0]
