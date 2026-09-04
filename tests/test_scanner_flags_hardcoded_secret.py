@@ -7,7 +7,7 @@ real finding rendering ● CLEAN); a secret is another such finding.
 from __future__ import annotations
 
 from mcpgawk import label as label_mod
-from mcpgawk.signals import Finding, _scan_text, as_dicts, detect
+from mcpgawk.signals import _scan_text, detect
 
 
 class _Snap:

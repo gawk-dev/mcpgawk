@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 import webbrowser
 from datetime import datetime, timezone
@@ -39,7 +40,12 @@ from mcp.shared.auth import (
 #: test point at an isolated store instead of ~/.gawk. Redirecting HOME is NOT an alternative:
 #: the licence cache is deliberately machine-bound to hostname + home directory, so moving HOME
 #: invalidates it (which is the anti-copy protection doing its job).
-_STORE_DIR = Path(os.environ.get("GAWK_OAUTH_STORE") or (Path.home() / ".gawk" / "oauth"))
+def _store_dir() -> Path:
+    """Read the redirect AT USE, not at import. As a module constant it was fixed the moment
+    this module was first imported — before the test session's redirect was set for any test
+    file importing it at the top — so such a test wrote a token document into the founder's
+    REAL `~/.gawk/oauth` (2026-09-03, caught by the real-home tripwire)."""
+    return Path(os.environ.get("GAWK_OAUTH_STORE") or (Path.home() / ".gawk" / "oauth"))
 
 
 class _SdkFlowLog(logging.Handler):
@@ -61,6 +67,27 @@ _sdk_auth_logger.addHandler(_SdkFlowLog())
 _sdk_auth_logger.propagate = False
 
 
+def mark_inband_login(server_url: str) -> str:
+    """Record that a human completed a server's OWN in-band sign-in for `server_url`, and return
+    the minted `login_id`.
+
+    kite issues no OAuth token — its login binds to the one MCP session that asked — so nothing
+    in this store ever said "a person signed in here". The panel's tile therefore asked for a
+    sign-in forever, including right after one succeeded (founder, 2026-09-04: "when i signed in
+    to kite successfully still it shows the login to kite tile"). Same document, same writer and
+    mode as the OAuth path; `tokens` (if a server has both) are left untouched. The id is minted
+    per completed sign-in, exactly as `set_tokens` mints it for a browser flow, so `drift.compare`
+    treats a second sign-in the same way for both kinds of server.
+    """
+    storage = FileTokenStorage(server_url)
+    d = storage._read()
+    d["login_id"] = uuid.uuid4().hex[:12]
+    d["logged_in_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    d["inband_login"] = True
+    storage._write(d)
+    return d["login_id"]
+
+
 def last_flow_error() -> str | None:
     """The SDK's own words for why the most recent OAuth flow died, or None if it did not."""
     return _SdkFlowLog.last
@@ -73,7 +100,7 @@ class FileTokenStorage:
 
     def __init__(self, server_url: str) -> None:
         key = hashlib.sha256(server_url.encode()).hexdigest()[:16]
-        self._path = _STORE_DIR / f"{key}.json"
+        self._path = _store_dir() / f"{key}.json"
         self._new_login = False
 
     def arm_new_login(self) -> None:
@@ -104,9 +131,9 @@ class FileTokenStorage:
         a change to the parent, and every sibling store (`history.json`, `runs.db`,
         `enforce-audit.db`) is already 0600. This one was the exception.
         """
-        _STORE_DIR.mkdir(parents=True, exist_ok=True)
+        _store_dir().mkdir(parents=True, exist_ok=True)
         try:
-            _STORE_DIR.chmod(0o700)
+            _store_dir().chmod(0o700)
         except OSError:
             pass                      # a directory we cannot narrow is not a reason to lose a login
         payload = json.dumps(data).encode("utf-8")
@@ -143,6 +170,10 @@ class FileTokenStorage:
         """
         d = self._read()
         d["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        # WHEN these tokens were obtained. The SDK computes an expiry only for tokens it set in
+        # the same process; a token loaded from disk has no expiry and is treated as valid
+        # forever — sent stale, 401, browser flow, never a refresh (notion, 2026-09-03).
+        d["tokens_obtained_at"] = time.time()
         if self._new_login or not d.get("login_id"):
             # Back-filling an existing store is safe: `drift.compare` claims nothing when either
             # side lacks the field, so a store that gains its first id does not report a change.
@@ -189,14 +220,87 @@ def store_preregistered_client(server_url: str, client_id: str,
         client_name="mcpgawk",
     )
     storage = FileTokenStorage(server_url)
-    asyncio.run(storage.set_client_info(info))
+    # SYNCHRONOUS on purpose. This used to `asyncio.run(storage.set_client_info(info))`, and the
+    # one caller — `cli._run`, an async function — is already inside a running loop, so the
+    # shipped `--oauth-client-id` route died with "asyncio.run() cannot be called from a running
+    # event loop" on its first real use (founder, figma, 2026-09-04). The unit test called this
+    # helper from outside any loop and stayed green. `set_client_info` only does file IO.
+    d = storage._read()
+    d["client_info"] = info.model_dump(mode="json", exclude_none=True)
     # Mark it OPERATOR-registered: the SDK also stores client info after ordinary dynamic
     # registration (with an ephemeral redirect port), and pinning THAT port broke every
     # second login. Only a client the operator supplied carries an immovable redirect.
-    d = storage._read()
     d["preregistered"] = True
     storage._write(d)
     return uri
+
+
+class LoginNeeded(RuntimeError):
+    """The stored login cannot be refreshed and a browser sign-in is required. Raised INSTEAD of
+    opening a browser by the refresh-only provider, so an unattended scan can classify it as
+    auth-required and say so, rather than spawn a browser tab nobody asked for."""
+
+
+def refresh_only_provider(server_url: str) -> Optional[OAuthClientProvider]:
+    """An OAuth provider over the STORED login that refreshes an expired access token and never
+    opens a browser. None when nothing refreshable is stored.
+
+    THE DEFECT THIS CLOSES (measured on notion, 2026-09-03): the scan path attached the stored
+    access token as a static `Authorization: Bearer …` header. notion's tokens live eight hours
+    (`expires_in: 28800`); the store held one from 2026-08-27 22:26 AND a refresh token, and
+    every scan since has said "needs credentials — not scanned". The refresh token was on disk
+    the whole time; nothing on the scan path ever used it. `build_login_provider` does refresh —
+    through the SDK — but it also starts a callback server and opens a browser when the refresh
+    fails, which an unattended scan must never do. This is the same provider with the browser
+    half replaced by a refusal.
+    """
+    storage = FileTokenStorage(server_url)
+    doc = storage._read()
+    tokens = doc.get("tokens") or {}
+    if not tokens.get("refresh_token"):
+        return None
+    client_metadata = OAuthClientMetadata(
+        redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],   # never used: no browser flow
+        token_endpoint_auth_method=("none" if not doc.get("preregistered")
+                                    else str(((doc.get("client_info") or {})
+                                              .get("token_endpoint_auth_method")) or "none")),
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        client_name="mcpgawk",
+    )
+
+    async def _no_browser(auth_url: str) -> None:
+        raise LoginNeeded(f"the stored login for {server_url} could not be refreshed — sign in "
+                          f"again: mcpgawk scan --http {server_url} --login")
+
+    async def _no_callback() -> AuthorizationCodeResult:
+        raise LoginNeeded(f"the stored login for {server_url} could not be refreshed — sign in "
+                          f"again: mcpgawk scan --http {server_url} --login")
+
+    # THE EXPIRY THE SDK DOES NOT KNOW. `OAuthClientProvider._initialize` loads tokens from
+    # storage and leaves `token_expiry_time` unset, so `is_token_valid()` is True for a token
+    # that expired days ago; the refresh branch is skipped, the stale token is sent, the 401
+    # goes straight to the browser flow. Hand it the real expiry from our own obtained-at
+    # stamp — or, for a store written before that stamp existed, force a refresh before the
+    # first request (an expiry of 1.0 — a POSITIVE instant in 1970; the SDK reads a zero as
+    # "unknown" and therefore valid): one cheap round trip, and the refresh response sets the
+    # real expiry from then on.
+    obtained = doc.get("tokens_obtained_at")
+    expires_in = tokens.get("expires_in")
+    expiry = (float(obtained) + float(expires_in)
+              if isinstance(obtained, (int, float)) and isinstance(expires_in, (int, float))
+              else 1.0)
+
+    class _KnowsExpiry(OAuthClientProvider):
+        async def _initialize(self) -> None:
+            await super()._initialize()
+            self.context.token_expiry_time = expiry
+
+    provider = _KnowsExpiry(server_url=server_url, client_metadata=client_metadata,
+                            storage=storage, redirect_handler=_no_browser,
+                            callback_handler=_no_callback)
+    provider.known_expiry = expiry            # visible, so a test can pin the arithmetic
+    return provider
 
 
 def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientProvider, HTTPServer]:
@@ -232,8 +336,12 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
     # exact port — loudly failing if it is taken beats silently authing with a mismatched
     # redirect (Claude Code 2.1.231's bug class). Otherwise: ephemeral port + DCR, as before.
     _pre_store = FileTokenStorage(server_url)
-    _pre = (asyncio.run(_pre_store.get_client_info())
-            if _pre_store._read().get("preregistered") else None)
+    # Read SYNCHRONOUSLY: this runs inside `cli._run`'s loop, where `asyncio.run` raises — the
+    # second such line on the `--oauth-client-id` route to die on its first real use (figma,
+    # 2026-09-04), one call after the first was fixed. The store is a file; no loop is needed.
+    _pre_doc = _pre_store._read()
+    _pre = (OAuthClientInformationFull.model_validate(_pre_doc["client_info"])
+            if _pre_doc.get("preregistered") and _pre_doc.get("client_info") else None)
     if _pre is not None and _pre.redirect_uris:
         _pre_uri = urlparse(str(_pre.redirect_uris[0]))
         try:

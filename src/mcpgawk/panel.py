@@ -65,7 +65,7 @@ def _config_finding_rows(entries: dict[str, Any]) -> list[dict[str, Any]]:
                 "severity": "medium" if f.kind in RISKY_KINDS else "low",
                 "repro": "—",
                 "suppressed": False,
-                "evidence": f.evidence[:160],
+                "evidence": _clip(f.evidence),
                 "first_party": False,
             })
     return rows
@@ -99,7 +99,12 @@ def collect() -> dict[str, Any]:
         # panel did not, so on the screen the operator actually uses they were simply absent,
         # which is the one rendering a discovery tool must never produce.
         from .discover import detect_unscannable
-        data["unscannable"] = detect_unscannable()
+        from .cli import _known_names
+        # A server configured on this machine is never "beyond this machine" — robinhood-trading
+        # was listed once as a Claude Code server needing sign-in and once as an account-hosted
+        # connector that cannot be scanned, on the same page (2026-09-03).
+        data["unscannable"] = detect_unscannable(exclude=_known_names(data.get("entries") or {},
+                                                                     []))
     except Exception as exc:                       # noqa: BLE001
         data["unscannable"] = []
         data["errors"]["unscannable"] = f"{type(exc).__name__}: {exc}"
@@ -121,6 +126,15 @@ def collect() -> dict[str, Any]:
     try:
         data["activity"] = spool.summarise()
         data["recent_calls"] = spool.read(limit=40)
+        # How many of the DECLINED calls went to a capability no scan can baseline (a browser
+        # host)? "Run a scan" is the wrong advice for those, and on this machine they were
+        # 1,323 of 1,933 (2026-09-03). Same window as `summarise`.
+        _unsc = {str(u.get("name")) for u in (data.get("unscannable") or [])
+                 if isinstance(u, dict)}
+        if _unsc and isinstance(data["activity"], dict):
+            data["activity"]["deferred_unscannable"] = sum(
+                1 for r in spool.read(limit=5000)
+                if r.get("decision") == "defer" and str(r.get("server")) in _unsc)
         # DENIALS ARE NOT A RECENT-EVENTS QUESTION. `recent_calls` is a 40-row display window, and
         # classification used it — so a server the guard blocked 100 calls ago silently lost its
         # "Blocked" tier while the banner (which reads full state) still said a server was blocked
@@ -219,7 +233,9 @@ def collect() -> dict[str, Any]:
                         "suppressed": bool(f.get("suppressed")),
                         # WHAT IT ACTUALLY DID. A class name is a label; the hosts it contacted are
                         # the evidence, and the whole product rests on showing evidence not labels.
-                        "evidence": (", ".join(where) or str(ev.get("note") or ""))[:160],
+                        "evidence": _clip(", ".join(where) or str(ev.get("note") or "")),
+                        # Every host it reached is this machine's own loopback: it never left.
+                        "loopback": bool(_hosts) and all(_is_loopback_host(h) for h in _hosts),
                         # Classified, never dropped: a first-party finding stays listed and says why.
                         "first_party": first_party(str(s.get("server") or ""), _hosts,
                                                    (data.get("entries") or {}).get(s.get("server"))),
@@ -294,7 +310,8 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
                     det = "hook installed — no MCP calls seen yet, so nothing has been checked"
                 elif deferred:
                     det = (f"hook installed — on this machine {checked} of {seen} call(s) were "
-                           f"checked; {deferred} were NOT (no or stale baseline). Run a scan.")
+                           f"checked; {deferred} were NOT — no or stale baseline, or a capability "
+                           f"no scan can reach (a browser host). Run a scan for the servers.")
                 else:
                     det = (f"every MCP call checked against your baseline "
                            f"({checked} on this machine)")
@@ -325,9 +342,12 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
 #: the page.
 TIERS = (
     ("blocked", "Blocked", "a call was denied — the guard stopped something"),
-    ("findings", "Findings", "verification caught it doing something — exfiltration, SSRF or "
-                             "injected output"),
     ("changed", "Changed", "moved since you approved it; your agents cannot call it"),
+    # "With findings", not "Findings": every tier counts SERVERS, and the Findings tab's badge
+    # counts FINDINGS. One page read "5 Findings" in the radar and "6" on the Findings tab —
+    # the same word, two units (live 2026-09-03). The label now carries its unit.
+    ("findings", "With findings", "verification caught it doing something — exfiltration, SSRF "
+                                  "or injected output"),
     ("unverified", "Unverified", "never watched — absence of a finding, not safety"),
     ("baseline", "At baseline", "matches what you approved, and behaviour was observed"),
 )
@@ -346,12 +366,17 @@ def _classify(name: str, key: str | None, d: dict) -> str:
     # Convictions outrank "changed" and "unverified": a server verification CAUGHT doing something
     # is a stronger statement than one whose declared surface moved, and it must never fall through
     # to "baseline" just because it was observed.
+    # CHANGED OUTRANKS FINDINGS. The briefing's own rule: "a server waiting on a decision is
+    # BLOCKED right now; findings are evidence already in hand". Ordering findings first put
+    # browserstack, gitnexus and resend — all changed, all blocked — under the Findings chip, so
+    # one page said "1 Changed" in the radar, "4 servers changed" in the ask card and "4
+    # approval(s) waiting" in the strip (2026-09-03). Three numbers for one fact.
+    if key and key in (d.get("pending") or []):
+        return "changed"
     real = [f for f in (d.get("findings") or [])
             if f.get("server") == name and not f.get("first_party") and not f.get("suppressed")]
     if real:
         return "findings"
-    if key and key in (d.get("pending") or []):
-        return "changed"
     # OBSERVED means "a run exercised it", not "a run convicted it". Testing membership of the
     # convictions map made every clean server permanently "unverified", so the coverage bar could
     # only ever improve by finding something WRONG. A run that exercised nothing (toolsChecked 0 —
@@ -363,6 +388,86 @@ def _classify(name: str, key: str | None, d: dict) -> str:
     return "baseline"
 
 
+
+
+def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
+    """(policy, enforced by, state on this machine now, chip class) — five statements an
+    enterprise reviewer maps to controls (founder, 2026-09-03: "Server approval required · Least
+    privilege · Continuously verify integrity · Detect & respond to change · Audit everything").
+    mcpgawk enforced most of these and stated none as policy. The state column is READ, never
+    asserted: a control that is off says off, and no row is ever a percentage.
+    """
+    from . import history as _h
+    store = d.get("store") if isinstance(d.get("store"), dict) else {"servers": {}}
+    agents = _agent_rows(d)
+    covered = sum(1 for _k, _l, st, _n, _det in agents if st == "on")
+    pending = len(d.get("pending") or [])
+    approved_n = sum(1 for e in (store.get("servers") or {}).values()
+                     if isinstance(e, dict) and isinstance(e.get("approved"), dict))
+    rows: list[tuple[str, str, str, str]] = []
+    # 1
+    st = (f"guard in {covered} of {len(agents)} agent(s) · {pending} changed server(s) blocked now"
+          if agents else "no agents found on this machine")
+    rows.append(("Server approval required",
+                 "a baseline is trusted only after `mcpgawk approve`; the guard hook refuses a "
+                 "server whose surface moved off it",
+                 st, "ok" if covered and covered == len(agents) else "warn"))
+    # 2
+    gw = d.get("gateway") or {}
+    gw_live = bool((gw.get("live") or {}).get("listen"))
+    rows.append(("Least privilege",
+                 "per-principal tool allowlists at the gateway; the scan names every tool that "
+                 "can write or send data and says when a read-only token would do",
+                 "gateway running — allowlists enforced" if gw_live
+                 else "gateway not running — nothing narrows what an agent may call",
+                 "ok" if gw_live else "warn"))
+    # 3
+    mon = d.get("monitor") or {}
+    mon_live = bool(mon.get("running"))
+    watched = len(mon.get("servers") or {}) if isinstance(mon.get("servers"), dict) else 0
+    rows.append(("Continuously verify integrity",
+                 "every scan compares the exact surface pin against the approved one; the "
+                 "monitor re-checks on a schedule",
+                 (f"monitor running · {watched} server(s) re-checked on a schedule" if mon_live
+                  else f"monitor NOT running — {approved_n} baseline(s) re-checked only when "
+                       f"someone scans"),
+                 "ok" if mon_live else "warn"))
+    # 4
+    moved = _h.changed_within(store, days=7)
+    rows.append(("Detect and respond to change",
+                 "drift is itemised per tool and blocks the server until a person decides; "
+                 "verify reproduces behaviour in a sandbox",
+                 f"{len(moved)} server(s) first seen changed in the last 7 days · {pending} awaiting a "
+                 f"decision · last verify {str(d.get('verify_at') or 'never')[:19]}",
+                 "warn" if pending else "ok"))
+    # 5
+    act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+    calls = act.get("calls") or 0
+    audit = bool(gw.get("audit_present"))
+    rows.append(("Audit everything",
+                 "every hooked call lands in the spool (arguments never recorded); every gateway "
+                 "decision in a hash-chained trail; every run in the run registry",
+                 f"{calls} call(s) recorded · gateway trail {'present' if audit else 'absent'} · "
+                 f"{len(d.get('runs') or [])} recent run(s)",
+                 "ok" if calls else "warn"))
+    return rows
+
+
+def _servers_of_this_run(rep_doc: dict, targets: dict) -> list[dict]:
+    """The report entries THIS run produced — never the ones `_merge_verify_report` carried
+    forward from earlier runs. The banner for a one-server verify of resend read "20 first-party
+    finding(s) folded" (2026-09-03): browserstack's, from the fleet run four minutes earlier,
+    counted off the merged file. A banner describes its own run, or it is the stale-verify
+    banner in a new coat."""
+    out = []
+    for s in (rep_doc.get("servers") or []):
+        if not isinstance(s, dict):
+            continue
+        sname = str(s.get("server") or "")
+        if not sname or (targets and sname not in targets):
+            continue
+        out.append(s)
+    return out
 
 
 def _merge_verify_report(report_path: Path | str, prev_report: dict) -> None:
@@ -916,10 +1021,42 @@ def pair_calls(rows: list[dict], agent: str, server: str, tool: str,
     return out[:limit], max(0, len(out) - limit)
 
 
+def _surface_nodes(server: str, surfaces: dict | None, surfurl, x: int, y: int, w: int,
+                   sx: int, sw: int, sy: int, pitch: int) -> tuple[list[str], int]:
+    """THE SIBLING BRANCH. Findings, decisions and evidence hang off the SERVER, not off a tool,
+    so they are drawn beside the tool list rather than as a fifth column (founder's tree,
+    27 Aug; re-verified open 3 Sep). One node per surface that has something, each a link into
+    the drill-through that already exists — nothing new is computed here, and a server with
+    nothing on any surface draws nothing, so absence stays absence."""
+    surf = (surfaces or {}).get(server) or {}
+    out: list[str] = []
+    cy = y
+    items: list[tuple[str, list[str], str, bool]] = []
+    if surf.get("findings"):
+        n = surf["findings"]
+        items.append((f'{n} finding{"" if n == 1 else "s"}',
+                      ["verification caught it", "open the Findings tab"],
+                      surfurl("findings"), True))
+    if surf.get("decisions"):
+        n = surf["decisions"]
+        items.append((f'{n} decision{"" if n == 1 else "s"} waiting',
+                      ["changed since you approved it", "open the Decisions tab"],
+                      surfurl("decisions"), False))
+    if surf.get("evidence"):
+        items.append(("evidence", ["the verify run behind these numbers", "open the Evidence tab"],
+                      surfurl("evidence"), False))
+    for title, meta, href, alarm in items:
+        out.append(_elbow(sx + sw, sy + _TW["h"] // 2, x, cy + _TW["h"] // 2))
+        out.append(_tnode(x, cy, w, title, meta, href, alarm=alarm,
+                          aria=f'{server}: {title} — {meta[1]}'))
+        cy += pitch
+    return out, cy
+
+
 def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | None = None,
                       agurl=None, open_server: str | None = None, srvurl=None,
                       rows: list[dict] | None = None, open_tool: str | None = None,
-                      toolurl=None) -> str:
+                      toolurl=None, surfaces: dict | None = None, surfurl=None) -> str:
     """The fleet drawn as a tree: agents, the servers each can reach, and that pair's tools.
 
     [FOUNDER 2026-08-26] "when i say it to be a branch in a tree i meant like this" — a drawn
@@ -939,6 +1076,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
     agurl = agurl or (lambda a: "/")
     srvurl = srvurl or (lambda a, sv: "/")
     toolurl = toolurl or (lambda a, sv, tl: "/")
+    surfurl = surfurl or (lambda kind: "/")
     rows = rows or []
     names = [n["agent"] for n in tree]
     open_agent = expanded if expanded in names else names[0]
@@ -1024,7 +1162,12 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                                     srvurl(node["agent"], ""),
                                     aria="no calls recorded for this pair in this window"))
                 widest = max(widest, tx + tw)
-                cursor = sy + pitch
+                # The server's own surfaces are drawn even when this pair made no calls: a
+                # finding is a fact about the server, not about this agent's traffic.
+                snodes, send = _surface_nodes(pair["server"], surfaces, surfurl,
+                                              tx, sy + pitch, tw, sx, sw, sy, pitch)
+                parts.extend(snodes)
+                cursor = max(sy + pitch, send)
                 continue
 
             tcursor = sy
@@ -1078,6 +1221,9 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                                     ["quieter than the ten shown", ""], rowurl(pair["server"]),
                                     aria=f'{hidden} further tools, not drawn — open the server'))
                 tcursor += pitch
+            snodes, tcursor = _surface_nodes(pair["server"], surfaces, surfurl,
+                                             tx, tcursor, tw, sx, sw, sy, pitch)
+            parts.extend(snodes)
             cursor = max(sy + pitch, tcursor)
         y = max(ay + pitch, cursor)
 
@@ -1231,6 +1377,30 @@ def finding_timeline(server: str, tool: str, code: str = "") -> dict[str, Any]:
     return out
 
 
+def _clip(text: str, limit: int = 160) -> str:
+    """Cut long evidence at a WORD boundary with an ellipsis — never mid-word. The Findings table
+    showed "then v1.0" and "then v1.0.16 exfiltrated —" as two different endings of one sentence
+    (2026-09-03), which reads as two different facts."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:—-(")
+    return cut + "…"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """localhost, 127.0.0.0/8, ::1 — traffic that never left this machine."""
+    import ipaddress
+    h = str(host or "").strip().lower().split(":")[0] if not str(host).startswith("[") \
+        else str(host)[1:].split("]")[0]
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
 def first_party(server: str, hosts: list[str], entry: dict | None) -> bool:
     """Is every host this tool contacted the server's OWN documented back end?
 
@@ -1283,8 +1453,7 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     approved = sum(1 for k in store if _h.approved({"servers": store}, k))
     clients = sorted({c for e in entries.values() if isinstance(e, dict)
                       for c in (e.get("_clients") or [])})
-    signins = [n for n, e in entries.items()
-               if isinstance(e, dict) and _login_button_applicable(e, n)]
+    signins = signin_asks(entries)      # ONE source — the briefing strip reads the same list
     # An audit row whose principal is not the process-wide declared name is a call the gateway
     # attributed to a KEY — the end state this whole journey exists to reach.
     attributed = [p for p in (gw.get("by_principal") or [])
@@ -1415,6 +1584,34 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
 _BANNER_MAX_AGE_S = 15 * 60
 
 
+def _local_stamp(stamp: object) -> str:
+    """An ISO timestamp as this machine's local `YYYY-MM-DD HH:MM:SS`; unreadable stamps come
+    back trimmed as written. The Evidence page listed runs at `05:05:46` under a header that
+    said the panel started at `10:37` (2026-09-03) — UTC and local, neither labelled."""
+    from datetime import datetime, timezone
+    s_ = str(stamp or "")
+    try:
+        dt = datetime.fromisoformat(s_.replace("Z", "+00:00"))
+    except ValueError:
+        return s_[:19]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _local_hms(stamp: object) -> str:
+    """A spool timestamp (UTC, `Z`) as this machine's wall-clock HH:MM:SS. The call table showed
+    05:07:57 under a header saying 10:37 (2026-09-03): UTC in one column, local in the other,
+    neither labelled. Unreadable stamps come back as written."""
+    from datetime import datetime, timezone
+    s_ = str(stamp or "")
+    try:
+        dt = datetime.strptime(s_[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return s_[11:19]
+    return dt.astimezone().strftime("%H:%M:%S")
+
+
 def _ago(stamp: object) -> str:
     """"2m ago" for an ISO-8601 Z timestamp; "just now" under a minute; the raw value if unparseable
     (never an empty string — a result with no time is exactly what this is fixing)."""
@@ -1448,6 +1645,8 @@ def _banner_is_stale(action: dict | None, max_age_s: int = _BANNER_MAX_AGE_S) ->
     """
     if not isinstance(action, dict) or action.get("running"):
         return False
+    if action.get("signin_pending") and _signin_child_alive():
+        return False                   # a person is mid sign-in; the link and the button must stay
     from datetime import datetime, timezone
     stamp = action.get("at")
     if not isinstance(stamp, str) or not stamp:
@@ -1490,8 +1689,16 @@ def _activity_headline(summary: object) -> str:
                 f"recorded in this log</span>")
     out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against an approved baseline"
     if deferred:
+        unsc = summary.get("deferred_unscannable") or 0
+        scannable = max(deferred - unsc, 0)
         out += (f" · <span class=\"warn\"><b>{deferred}</b> NOT checked — the guard declined "
-                f"(no or stale baseline) and let them through; run a scan</span>")
+                f"(no or stale baseline) and let them through")
+        if unsc:
+            out += (f"; {unsc} of those went to a browser host no scan can baseline"
+                    + (f", run a scan for the other {scannable}" if scannable else ""))
+        else:
+            out += "; run a scan"
+        out += "</span>"
     return out
 
 
@@ -1575,7 +1782,7 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
                 f'<tr><td class="nm">{_esc(r.get("server"))}</td>'
                 f'<td><span class="chip {_esc(r.get("level") or "bad")}">'
                 f'{_esc(r.get("outcome"))}</span></td>'
-                f'<td class="dim">{_esc(r.get("detail")).replace(chr(10), "<br>")}'
+                f'<td class="dim">{_esc(r.get("detail")).replace(chr(10), "<br>").replace(" ⏎ ", "<br>")}'
                 f'{_fixblock(r)}</td></tr>'
                 for r in rows) + "</tbody></table>")
         # THE BANNER TAKES THE WORST ROW'S COLOUR. It used to be green whenever the action
@@ -1615,6 +1822,19 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
                           f'rel="noopener noreferrer">Open the sign-in page</a>'
                           f'<div class="dim" style="margin-top:6px;word-break:break-all">'
                           f'{_esc(done_link)}</div>' if done_link else "")
+        # An in-band sign-in (kite) is measured through the session the link belongs to, and
+        # only a person knows when the browser said yes: this button is that "yes". Re-asking
+        # the server's login tool would mint a NEW link each time (measured on kite, 2026-09-04),
+        # so the panel never polls — it waits for the click, exactly as the CLI waits for Enter.
+        _pending = action.get("signin_pending") or ""
+        if _pending and token:
+            done_link_html += (
+                f'<form method="POST" action="/" style="margin-top:8px">'
+                f'<input type="hidden" name="token" value="{_esc(token)}">'
+                f'<input type="hidden" name="key" value="{_esc(_pending)}">'
+                f'<input type="hidden" name="tab" value="n0">'
+                f'<button class="act-btn" name="act" value="login-done">I have signed in — '
+                f'measure {_esc(_pending)} now</button></form>')
         # ROUND 2 (founder-approved 24 Aug), FIXED 24 Aug evening: the popup opens ONCE — on the
         # load that immediately follows completion (`fresh`, from the POST redirect's done=1 or
         # the live-update fragment at the completion moment) — and NEVER re-opens on later loads,
@@ -1622,7 +1842,10 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
         # every load while the result was recent, and its full-viewport scrim sat over the page
         # swallowing every click — "none of the buttons are working" (founder). The popup also
         # carries NO scrim now: a result should be visible, not block the page.
-        _open = " open" if fresh else ""
+        # A pending in-band sign-in keeps the record OPEN on every load: the person leaves for the
+        # browser and comes back to a self-refreshed page, and the "I have signed in" button must
+        # not be folded away behind the summary (advisor, 2026-09-04, before the founder's walk).
+        _open = " open" if (fresh or action.get("signin_pending")) else ""
         banner = (f'<details{_open} class="amodal"><summary><b>{subject}</b> — finished {when}'
                   f'<span class="aclose"></span></summary>'
                   f'<div class="abanner done {_esc(worst)}" role="dialog">'
@@ -1754,6 +1977,95 @@ def monitor_gap_note(d: dict[str, Any]) -> str:
             f'not covered here. See <b>Monitor</b>.')
 
 
+#: The JSON face of `collect()` (ledger 108, step 1). AN ALLOW-LIST, NEVER A DUMP: `entries`
+#: carry `headers` and `env` — credentials — and a `json.dumps(..., default=str)` over the raw
+#: dict is exactly how a secret leaks through a repr. Every top-level key of `collect()` must be
+#: named here or in `API_WITHHELD`; `tests/test_panel_api_state.py` fails the moment a new key is
+#: added to `collect()` without a decision. Reading is open (the page and the exports are too);
+#: the session token buys the buttons, not the state — do not "fix" that in the route.
+API_SCHEMA = 1
+API_ALLOWED = ("errors", "discovery_problems", "unscannable", "pending", "activity",
+               "denied_servers", "hooks", "hook_health", "adapters", "no_hook", "runs",
+               "observed", "verified_runs", "findings", "verify_at", "verify_blocked",
+               "monitor", "gateway", "recent_calls")
+#: Present in `collect()`, deliberately NOT in the API as-is: the two wide call windows are
+#: thousands of rows (a consumer wants the agent→server tree, served as `tree` instead); `entries`
+#: and `store` are PROJECTED below rather than copied.
+API_WITHHELD = ("session_calls", "fleet_calls", "entries", "store")
+#: Entry fields a consumer may see. `headers`/`env` become NAME lists; `_meta` (a plugin's icon
+#: paths and tool titles) is dropped.
+_API_ENTRY_FIELDS = ("url", "command", "args", "type", "_clients", "_names", "_aliases")
+
+
+def _api_entry(entry: dict) -> dict:
+    out = {k: entry.get(k) for k in _API_ENTRY_FIELDS if entry.get(k) is not None}
+    headers = entry.get("headers")
+    env = entry.get("env")
+    out["header_names"] = sorted(str(k) for k in headers) if isinstance(headers, dict) else []
+    out["env_names"] = sorted(str(k) for k in env) if isinstance(env, dict) else []
+    return out
+
+
+def _api_store(store: dict) -> dict:
+    """The approved surface per server: names, pin, when, tool NAMES. Never the raw record."""
+    servers = {}
+    for key, se in ((store or {}).get("servers") or {}).items():
+        if not isinstance(se, dict):
+            continue
+        approved = se.get("approved") if isinstance(se.get("approved"), dict) else None
+        hist = se.get("history") if isinstance(se.get("history"), list) else []
+        last = hist[-1] if hist and isinstance(hist[-1], dict) else None
+        def _surface(rec):
+            if not rec:
+                return None
+            tools = rec.get("tools")
+            names = sorted(tools) if isinstance(tools, dict) else \
+                sorted(str(t.get("name")) for t in tools if isinstance(t, dict)) if isinstance(tools, list) else []
+            return {"pin": rec.get("pin"), "measured_at": rec.get("measured_at"),
+                    "login_id": rec.get("login_id"), "tools": names}
+        servers[str(key)] = {"aliases": list(se.get("aliases") or []),
+                             "approved": _surface(approved), "last": _surface(last),
+                             "history_len": len(hist), "retired": se.get("retired")}
+    return {"servers": servers}
+
+
+def _api_jsonable(v):
+    if isinstance(v, dict):
+        return {str(k): _api_jsonable(x) for k, x in v.items()}
+    if isinstance(v, (set, frozenset)):
+        return sorted(_api_jsonable(x) for x in v)
+    if isinstance(v, (list, tuple)):
+        return [_api_jsonable(x) for x in v]
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    return str(type(v).__name__)                   # never repr(): a repr is where secrets hide
+
+
+def api_state(d: dict[str, Any]) -> dict[str, Any]:
+    """`collect()` projected for a machine consumer. COST: `collect()` reads sqlite, a 5000-row
+    spool and the verify runs — a consumer polls this on the daemon's cadence (minutes), never
+    per second."""
+    from datetime import datetime, timezone
+    try:
+        from . import __version__ as _ver
+    except Exception:                              # noqa: BLE001
+        _ver = "0+unknown"
+    out: dict[str, Any] = {"schema": API_SCHEMA, "mcpgawk": _ver,
+                           "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    for k in API_ALLOWED:
+        if k in d:
+            out[k] = _api_jsonable(d[k])
+    out["entries"] = {str(n): _api_entry(e) for n, e in (d.get("entries") or {}).items()
+                      if isinstance(e, dict)}
+    out["store"] = _api_jsonable(_api_store(d.get("store") or {}))
+    try:
+        out["tree"] = _api_jsonable(agent_server_tree(d))
+    except Exception as exc:                       # noqa: BLE001 — the rest of the state still ships
+        out["tree"] = None
+        out.setdefault("errors", {})["tree"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def render(d: dict[str, Any], token: str = "", action: dict | None = None,
            q: str = "", tier_filter: str = "", sel: str = "", tl: str = "", tab: str = "",
            ag: str = "", br: str = "", tc: str = "", stale_token: bool = False,
@@ -1815,6 +2127,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     _fleet_names = set((d.get("entries") or {}).keys())
     for _se in ((d.get("store") or {}).get("servers") or {}).values():
         _fleet_names.update((_se or {}).get("aliases") or [])
+    # A capability no scan can reach is still part of THIS machine's fleet: claude-in-chrome's
+    # 1,323 live calls were folded as "removed servers and old test fixtures" (2026-09-03).
+    _fleet_names.update(str(u.get("name")) for u in (d.get("unscannable") or [])
+                        if isinstance(u, dict) and u.get("name"))
 
     sess_parts: list[str] = []
     _sess_calls = d.get("session_calls") or calls
@@ -1950,9 +2266,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             + ([f"tc={_urlq(target)}"] if target else []) + ["tab=n0"]
         return "/?" + "&".join(parts)
 
+    # The server-scoped surfaces for the tree's sibling branch: counts the tabs already hold,
+    # keyed by the server's display name — no new truth, only a route to the existing ones.
+    _surfaces: dict[str, dict[str, int | bool]] = {}
+    _pending_keys = set(d.get("pending") or [])
+    for _n, _e, _k, _t in classified:
+        _fn = sum(1 for f in (d.get("findings") or [])
+                  if isinstance(f, dict) and f.get("server") == _n
+                  and not f.get("first_party") and not f.get("suppressed"))
+        _dn = 1 if (_k and _k in _pending_keys) else 0
+        if _fn or _dn:
+            _surfaces[_n] = {"findings": _fn, "decisions": _dn, "evidence": bool(_fn)}
+    _surf_tab = {"findings": "n6", "decisions": "n3", "evidence": "n2"}
+
+    def _surfurl(kind: str) -> str:
+        return "/?" + "&".join(([f"t={_urlq(token)}"] if token else [])
+                               + [f"tab={_surf_tab.get(kind, 'n0')}"])
+
     fleet_tree = render_fleet_tree(agent_server_tree(d), _rowurl, len(_fleet_rows),
                                    expanded=ag, agurl=_agurl, open_server=br, srvurl=_srvurl,
-                                   rows=_fleet_rows, open_tool=tc, toolurl=_toolurl)
+                                   rows=_fleet_rows, open_tool=tc, toolurl=_toolurl,
+                                   surfaces=_surfaces, surfurl=_surfurl)
 
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
     drawer = ""
@@ -1963,7 +2297,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     #: Servers whose ONLY blocker is a browser sign-in — the one ask a machine cannot do for the
     #: operator, so the briefing strip names them (founder, 24 Aug: "the only time it should ask
     #: me is when a server needs authentication").
-    _auth_asks: list[str] = []
+    #: ONE SOURCE OF TRUTH with the Getting-set-up stepper (`journey_steps`): both read
+    #: `signin_asks`. The strip used to collect this inside the row loop, AFTER the search
+    #: filter's `continue` — so a search narrowed the operator's to-do count, and the stepper
+    #: (reading the full fleet) said "1 pending" while the strip said "nothing" (25 Aug, 09-03).
+    _auth_asks: list[str] = signin_asks(d.get("entries") or {})
+    #: name -> measured tool count, so the sign-in card can say whether the server has been
+    #: measured at all (kite: 22 tools signed out) or genuinely stays unmeasured (notion: 401).
+    _tools_by_name: dict[str, int] = {}
+    _ghosts = 0                      # remembered in the trust store, configured nowhere now
     for name, entry, key, tier in classified:
         detail = server_detail(store, key, calls) if key else None
         local = "local" if entry.get("command") else "remote"
@@ -1982,6 +2324,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                                   for c in (entry.get("_clients") or [])) or "—")
         seen = detail["calls_seen"] if detail else 0
         tools = len(detail["current_tools"]) if detail else "—"
+        _tools_by_name[name] = tools if isinstance(tools, int) else 0
+        _ghosts += 1 if entry.get("_baseline_only") else 0
         # THREE DIFFERENT FACTS WERE BEING SHOWN AS ONE NUMBER. `current_tools` is the latest
         # sighting, `approved_tools` is what the operator agreed to, and the verify line counts
         # against whatever that run saw — so one screen could read "baseline 44", "45" and
@@ -2041,7 +2385,11 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 '<tr><td colspan="2" class="dim">no calls recorded for this server</td></tr>'
             dvo_rows = declared_vs_observed(detail, (d.get("observed") or {}).get(name))
             _destr[name] = sum(1 for r in dvo_rows if r["declared"] == "destructive")
-            _cov[name] = (checked, len(detail["current_tools"]))
+            if not entry.get("_baseline_only"):
+                # A record for a server no longer configured anywhere is HISTORY: its tools are
+                # not "currently exposed", and counting them (18 of "271", 2026-09-03) inflates
+                # the fleet the coverage bar claims to describe.
+                _cov[name] = (checked, len(detail["current_tools"]))
             # SAY A SERVER-LEVEL FACT ONCE, AT THE SERVER. When NOTHING on this server was
             # observed, every row used to repeat "not observed — absence is not a claim of safety".
             # On kite that is 22 identical sentences, which reads as filler and buries the fact
@@ -2177,8 +2525,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # notion and Revolut X (baseline) all needed a person while the strip said "Needs you:
         # nothing" directly above the list that showed them. Measured on the founder's fleet
         # 2026-08-27. The ask is now collected for every server; only the label is conditional.
-        if _login_button_applicable(entry, name):
-            _auth_asks.append(name)
+        if name in _auth_asks:
             if tier == "unverified":
                 _row_tag, _row_lbl = "warn", "Needs sign-in"
         state_tag = (f'<span><span class="chip {_row_tag}"><i></i>'
@@ -2229,7 +2576,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # counted in words, not silently absent — absence from this list must not read as coverage.
     _watched_sum = sum(c for c, _ in _cov.values())
     _tools_sum = sum(t for _, t in _cov.values())
-    _unmeasured = len(classified) - len(_cov)
+    _unmeasured = len(classified) - _ghosts - len(_cov)   # ghosts are not 'never measured'
     cov_bars = "".join(
         f'<div class="cbar"><span class="lb">{_esc(n)}</span>'
         f'<div class="track"><div class="fill" style="width:{(c / t * 100) if t else 0:.0f}%">'
@@ -2250,6 +2597,16 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     _radar = "".join(
         f'<a class="chip {_tag[t]} bchip" href="{_tierurl(t)}"><i></i>{counts[t]} {_esc(lbl)}</a>'
         for t, lbl, _why in TIERS if counts[t])
+    # THE CHANGE WINDOW ("Changes (7d)"): how many servers first moved off their approved pin
+    # this week — the fleet's change rate, from sightings already in the store. Distinct from
+    # the Changed tier, which is what is STILL pending; a server changed and approved on
+    # Tuesday counts here and not there.
+    from .history import changed_within as _changed_within
+    _moved_7d = _changed_within(store, days=7) if isinstance(store, dict) else []
+    if _moved_7d:
+        _radar += (f'<a class="chip warn bchip" href="{_tierurl("changed")}" title="'
+                   f'{_esc(", ".join(_h.display_name(store, k) for k, _ in _moved_7d[:8]))}">'
+                   f'<i></i>{len(_moved_7d)} first seen changed in 7d</a>')
     _asks = []
     if _auth_asks:
         _who = ", ".join(_esc(n) for n in _auth_asks[:2]) + \
@@ -2260,7 +2617,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         _asks.append(f'<label class="bask" for="n3">{len(pending)} approval(s) waiting</label>')
     _needs = (' · '.join(_asks) if _asks
               else 'nothing — sign-ins and trust decisions are the only things that ever will')
-    brief = (f'<div class="brief"><span class="bcount"><b>{len(classified)}</b> servers · '
+    _ghost_note = (f' · {_ghosts} remembered, configured nowhere now' if _ghosts else '')
+    brief = (f'<div class="brief"><span class="bcount"><b>{len(classified) - _ghosts}</b> servers'
+             f'{_ghost_note} · '
              f'{_watched_sum} of {_tools_sum} exposed tools watched</span>'
              f'<span class="bradar">{_radar}</span>'
              f'<span class="bneeds"><b>Needs you:</b> {_needs}</span></div>')
@@ -2284,9 +2643,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 f'<input type="hidden" name="tab" value="n9">'
                 f'<button class="act-btn" name="act" value="login">Sign in now</button></form>'
                 if token else '<span class="dim">open the tokened URL from your terminal to act</span>')
+        _nt = _tools_by_name.get(_n, 0)
+        # "Its tools stay unmeasured" was printed for kite and Revolut X, both measured (22 and
+        # 21 tools) minutes earlier by a scan. Say what is true for THIS server.
+        _until = (f"Measured signed out: {_nt} tool{'s' if _nt != 1 else ''}. Sign in to "
+                  f"measure what it shows a signed-in session." if _nt
+                  else "Until then its tools stay unmeasured.")
         _cards.append(f'<div class="ask"><span class="ak">sign in — only you can</span>'
                       f'<h5>{_esc(_n)} is waiting on a browser sign-in</h5>'
-                      f'<p>Until then its tools stay unmeasured.</p>{_act}</div>')
+                      f'<p>{_esc(_until)}</p>{_act}</div>')
     if len(_auth_asks) > 3:
         _cards.append(f'<div class="ask calm">+{len(_auth_asks) - 3} more sign-in(s) — see the '
                       f'fleet below.</div>')
@@ -2306,20 +2671,30 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             continue
         if _t2 == "blocked" and _e2.get("_baseline_only"):
             continue                                   # folded to one group line below
-        if _is_auth:
-            _why2 = "waiting on your browser sign-in"
-        elif _t2 == "changed":
+        # THE PROBLEM KEEPS ITS NAME. A sign-in is an ask, not a state: kite (findings) and
+        # Revolut X (measured, at baseline) both rendered as "waiting on your browser sign-in"
+        # here, hiding the finding and contradicting the Servers table one click away.
+        if _t2 == "changed":
             _why2 = "changed since approval — blocked until you decide"
+            # A changed server with findings says BOTH: the reorder that made the counts agree
+            # must not hide the conviction ("a server we convicted is not at its baseline").
+            _nf2 = _f_by_srv.get(_n2, 0)
+            if _nf2:
+                _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
         elif _t2 == "findings":
             _nf = _f_by_srv.get(_n2, 0)
             _why2 = (f"{_nf} finding{'s' if _nf != 1 else ''} to review" if _nf
                      else "has findings on record")
-        else:
+        elif _t2 == "blocked":
             _why2 = "blocked"
+        else:
+            _why2 = "waiting on your browser sign-in"
+        if _is_auth and _t2 in _PROBLEM:
+            _why2 += " · also waiting on your sign-in"
         _w2 = [w for w in re.split(r"[^0-9A-Za-z]+", _n2) if w]
         _mk2 = ((_w2[0][0] + (_w2[1][0] if len(_w2) > 1 else (_w2[0][1:2] or ""))).upper()
                 if _w2 else "?")
-        _lbl2, _tg2 = (("Needs sign-in", "warn") if _is_auth else (_tlabel[_t2], _tag[_t2]))
+        _lbl2, _tg2 = ((_tlabel[_t2], _tag[_t2]) if _t2 in _PROBLEM else ("Needs sign-in", "warn"))
         _trows.append(
             f'<tr><td class="tmk"><span class="mmark {_tg2}" style="width:26px;height:26px;'
             f'font-size:11px;border-radius:7px">{_esc(_mk2)}</span></td>'
@@ -2349,7 +2724,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         {_action_buttons(token, action, tab="n9")}</div></div>
       <div class="mbody" style="padding:16px 18px 20px">
         <div class="tverdict"><span class="th1">{_esc(_t_head)}</span>
-          <span class="tsub">{len(classified)} servers · {_watched_sum} of {_tools_sum} exposed
+          <span class="tsub">{len(classified) - _ghosts} servers{_ghost_note} · {_watched_sum} of {_tools_sum} exposed
           tools exercised{' · monitor live' if _mon_live else ''}</span>
           <span class="bradar">{_radar}</span></div>
         <div class="asks">{_asks_html}</div>
@@ -2558,6 +2933,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         isorows += (f'<tr><td colspan="4" class="dim">{len(_ran_gone)} record(s) from servers '
                     f'not in your current fleet (removed servers and old test fixtures) — kept '
                     f'in the store, folded here: {_esc(_gone_shown)}</td></tr>')
+    policyrows = "".join(
+        f'<tr><td class="nm">{_esc(p_)}</td><td class="dim">{_esc(m_)}</td>'
+        f'<td><span class="chip {c_}"><i></i>{_esc(s_)}</span></td></tr>'
+        for p_, m_, s_, c_ in policy_rows(d))
     from .history import default_path as _history_path
     pathrows = "".join(
         f'<tr><td class="nm">{_esc(label)}</td><td class="dim">{_esc(str(pth))}</td></tr>'
@@ -2607,7 +2986,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                    f'<table class="gt" id="gt{gi}"><tbody>{body}</tbody></table>')
 
     log = "".join(
-        f'<tr><td class="dim">{_esc(c.get("ts", "")[11:19])}</td>'
+        f'<tr><td class="dim">{_esc(_local_hms(c.get("ts", "")))}</td>'
         f'<td><span class="chip {"bad" if c.get("decision") == "deny" else "dim"}">'
         f'{_esc(c.get("decision", ""))}</span></td>'
         f'<td class="nm">{_esc(c.get("server", ""))}.{_esc(c.get("tool", ""))}</td>'
@@ -2635,7 +3014,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 else "warn" if status in ("findings", "incomplete") else "ok")
 
     runs = "".join(
-        f'<tr><td class="dim">{_esc(str(getattr(r, "started_at", ""))[:19])}</td>'
+        f'<tr><td class="dim">{_esc(_local_stamp(getattr(r, "started_at", "")))}</td>'
         f'<td class="nm">{_esc(getattr(r, "kind", ""))}</td>'
         f'<td><span class="chip {_run_status(r)[1]}">{_esc(_run_status(r)[0])}</span></td>'
         f'<td class="dim">{_esc(str(getattr(r, "target", "") or "fleet-wide")[:56])}</td></tr>'
@@ -2711,9 +3090,19 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
     if _foreign_acts:
+        # NAME THEM, with counts. "removed servers and old test fixtures" described 1,323 live
+        # claude-in-chrome calls (a browser capability the spool names differently from the
+        # native host discovery finds) as dead history (2026-09-03). Say what was folded.
+        _fc: dict[str, int] = {}
+        for _a in _foreign_acts:
+            _fc[str(_a.get("server"))] = _fc.get(str(_a.get("server")), 0) + 1
+        _top = ", ".join(f"{_esc(n)} ({c})" for n, c in
+                         sorted(_fc.items(), key=lambda kv: -kv[1])[:4])
+        _more = f", +{len(_fc) - 4} more" if len(_fc) > 4 else ""
         acts_full += (f'<tr><td colspan="6" class="dim">{len(_foreign_acts)} call(s) from '
-                      f'servers not in your current fleet (removed servers and old test '
-                      f'fixtures) — folded, kept in the exports.</td></tr>')
+                      f'{len(_fc)} server(s) not in your current fleet — {_top}{_more} — '
+                      f'used but configured nowhere now, or old test fixtures. Folded here, '
+                      f'kept in the exports.</td></tr>')
 
     def _dec_action(k: str) -> str:
         if not token:
@@ -2741,9 +3130,20 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         rep = it["report"]
         plain_changed = [t for t in rep.changed if t not in rep.hostile]
         bits = []
-        for t in rep.hostile[:2]:
+        # Two hostile kinds, two sentences. "rewrote its own description" for a tool whose only
+        # change was declaring itself destructive (browserstack, 2026-09-03) sends the reader to
+        # compare text that did not change.
+        _inj = getattr(rep, "injected", None)
+        _esc_ = getattr(rep, "escalated", None)
+        if _inj is None and _esc_ is None:
+            _inj = list(rep.hostile)
+        for t in (_inj or [])[:2]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">rewrote its own '
                         'description after you approved it — the rug-pull signature.</span>')
+        for t in [x for x in (_esc_ or []) if x not in (_inj or [])][:2]:
+            bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">now declares more '
+                        'power than you approved — it marked itself destructive or open-world '
+                        'after approval.</span>')
         for t in rep.added[:2]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">appeared after you '
                         'approved this server. A tool that shows up later is how a malicious '
@@ -2776,8 +3176,19 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return ('<span class="chip warn"><i></i>NOT blocked — schema/annotations only, '
                 'calls still pass</span>')
 
+    def _dec_who(k: str) -> str:
+        at, by = _h.approval_provenance(store, k)
+        if not at and not by:
+            base = _h.approved(store, k) or {}
+            m = str(base.get("measured_at") or "")[:10]
+            # The sighting's date is NOT the approval's date; say which one this is.
+            return (f'<br><span class="dim">baseline measured {_esc(m)} · approval time and '
+                    f'actor not recorded</span>') if m else ""
+        return (f'<br><span class="dim">approved {_esc(str(at)[:10])}'
+                f'{" · by " + _esc(by) if by else ""}</span>')
+
     dec = "".join(
-        f'<tr><td class="nm">{_esc(_h.display_name(store, k))}</td>'
+        f'<tr><td class="nm">{_esc(_h.display_name(store, k))}{_dec_who(k)}</td>'
         f'<td>{_dec_what(k)}</td>'
         f'<td>{_dec_chip(k)}</td>'
         f'<td>{_dec_action(k)}</td></tr>'
@@ -3135,7 +3546,12 @@ border:1px solid var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .abanner.done.warn{{border-color:var(--warn);background:var(--warn-bg);color:var(--warn)}}
 .abanner.done.bad{{border-color:var(--bad);background:var(--bad-bg);color:var(--bad)}}
 .arows{{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}}
-.arows td{{padding:5px 8px;border-top:1px solid var(--line);vertical-align:top}}
+.arows td{{padding:5px 8px;border-top:1px solid var(--line);vertical-align:top;
+overflow-wrap:anywhere}}
+/* A verify row's detail carries paths and pins — one unbreakable 90-character token widened the
+   table past the 560px popup and the detail column scrolled sideways (founder, 09-03; measured
+   in Chrome: table 659px in a 558px box). `anywhere` lets the token break and the table fit. */
+.arows .fixit{{overflow-wrap:anywhere}}
 .arows td.nm{{font-family:var(--mono);white-space:nowrap;width:1%}}
 .fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--acc);
 background:var(--acc-soft);color:var(--ink);font-size:12px;line-height:1.5}}
@@ -3423,7 +3839,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
     <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct alert">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
     <label class="pill" for="n4"><span class="dot"></span><span class="pw"><span class="prow">History</span><span class="pdesc">every call, run and decision, newest first</span></span></label>
     <span class="ngrp">Detail <i>go deeper on demand</i></span>
-    <label class="pill pc" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified)}</span></label>
+    <label class="pill pc" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified) - sum(1 for _c in classified if (_c[1] or {}).get("_baseline_only"))}</span></label>
     <label class="pill pc" for="n6"><span class="dot"></span>Findings {_ct_fnd}</label>
     <label class="pill pc" for="n3"><span class="dot"></span>Decisions {_ct_dec}</label>
     <label class="pill pc" for="n1"><span class="dot"></span>Agents {_ct_agt}</label>
@@ -3561,6 +3977,11 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
         how many were deliberately not invoked — an untested tool is never a clean one.</div>
       <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>server</th><th>isolation used</th><th>tools checked</th>
       <th>not invoked</th></tr></thead><tbody>{isorows}</tbody></table></div>
+      <h2>policy — what is enforced here, and its state on this machine now</h2>
+      <div class="note">Five statements a security review maps to controls. Each names the
+        mechanism that enforces it and what that mechanism is doing on THIS machine right now —
+        never a percentage: a control that is off says off.</div>
+      <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>policy</th><th>enforced by</th><th>on this machine now</th></tr></thead><tbody>{policyrows}</tbody></table></div>
       <h2>where everything lives</h2>
       <div class="note">Every store this product writes, by full path — all local, nothing leaves
         this machine. Open them yourself; nothing here is asking to be trusted unread.</div>
@@ -3898,7 +4319,7 @@ def _begin_action(label: str) -> None:
     A banner that mixes two actions' state is wrong twice at once."""
     _ACTION.update(label=label, message="", rows=[], notice="", level="",
                    secret="", snippet="", login_url="", setup_text="", setup_key="",
-                   at=_now())
+                   signin_pending="", at=_now())
 
 
 def _open_login_in_browser(url: str) -> None:
@@ -4011,6 +4432,8 @@ def _run_action_bg(kind: str, target: str | None = None,
                 res = run_verify_fleet(target)
             elif kind == "login":
                 res = run_login(target)
+            elif kind == "login-done":
+                res = run_login_done(target)
             else:
                 res = {"ok": False, "message": f"unknown action {kind!r}"}
             msg = res.get("message") or ("done" if res.get("ok") else "failed")
@@ -4019,9 +4442,14 @@ def _run_action_bg(kind: str, target: str | None = None,
             status = (_runlog.FINDINGS if level == "bad"
                       else _runlog.OK if res.get("ok") else _runlog.INCOMPLETE)
         except Exception as exc:                  # noqa: BLE001 — an action must not kill the panel
-            msg, rows = f"{type(exc).__name__}: {exc}", []
+            msg, rows, level = f"{type(exc).__name__}: {exc}", [], "bad"
         with _ACTION_LOCK:
-            _ACTION.update(running=False, message=msg, rows=rows, notice="", at=_now())
+            # `level` travels too. `_begin_action` clears it and this update never set it, so a
+            # result with no rows — "verify timed out — INCOMPLETE, not clean", "did not complete
+            # (exit 3)", an exception — rendered under the banner's fallback: GREEN. The headline
+            # is the worst thing found; a failure with nothing to list is still a failure.
+            _ACTION.update(running=False, message=msg, rows=rows, notice="", level=level,
+                           at=_now())
         _persist_action()
         _runlog.finish_run(run_id, status, {"message": msg[:400]})
 
@@ -4581,7 +5009,15 @@ def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
                 if status == "running" and not (getattr(r, "host", "") == _sock.gethostname()
                                                 and runlog._pid_alive(getattr(r, "pid", None))):
                     status = "interrupted"
-                summary = (getattr(r, "summary", "") or "").strip()
+                _sm = getattr(r, "summary", "") or ""
+                # `finish_run` writes a DICT ({"message": …} from the panel, {"exit_code": …}
+                # from the CLI). `.strip()` on it raised AttributeError, the except below turned
+                # the WHOLE runs section into "run log unreadable (AttributeError)", and no scan
+                # or verify ever appeared in the Session log (2026-09-03).
+                if isinstance(_sm, dict):
+                    _sm = str(_sm.get("message") or _sm.get("error")
+                              or (f"exit {_sm['exit_code']}" if "exit_code" in _sm else ""))
+                summary = str(_sm).strip()
                 text = f"{what} · {status}" + (f" — {summary[:90]}" if summary else "")
                 lines.append({"when": getattr(r, "started_at", "") or "", "text": text,
                               "level": {"ok": "ok", "findings": "warn", "error": "bad",
@@ -4701,8 +5137,23 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
 
     parts = []
     stale = 0
+    retired_n = 0
     for r in rows:
         ok = r.get("last_ok")
+        retired = r.get("retired") if isinstance(r.get("retired"), dict) else None
+        if retired and retired.get("retired_at"):
+            # The operator said this server has left. Not watched, not stale, not counted as
+            # coverage — and its alerts were closed by that decision, on record (who, when).
+            retired_n += 1
+            parts.append(
+                f'<tr><td class="nm">{_esc(str(r.get("server_id") or ""))}</td>'
+                f'<td><span class="chip unv" title="{_esc(str(retired.get("reason") or ""))}">'
+                f'retired {_esc(str(retired.get("retired_at") or "")[:10])} · by '
+                f'{_esc(str(retired.get("retired_by") or "?"))}</span></td>'
+                f'<td>{"yes" if r.get("has_baseline") else "<b>no</b>"}</td>'
+                f'<td class="num">{r.get("open_alerts") or 0}</td>'
+                f'<td class="dim">{_esc(str(r.get("last_check") or "never"))[:19]}</td></tr>')
+            continue
         # A green "checked" with a 13-day-old timestamp read as coverage (founder's tab audit,
         # 2026-08-15: 8 local servers, last checked 1 Aug, under "11 watched" and RUNNING).
         # Local servers are excluded from polling BY DEFAULT — polling one spawns it with the
@@ -4726,10 +5177,11 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
             f'<td class="num">{alerts}</td>'
             f'<td class="dim">{_esc(str(r.get("last_check") or "never"))[:19]}</td></tr>')
     open_total = sum(int(r.get("open_alerts") or 0) for r in rows)
-    live = len(rows) - stale
+    live = len(rows) - stale - retired_n
     head = (f'<div class="filters"><span class="count" style="margin-left:0">{live} '
             f'server(s) watched live'
             + (f' · {stale} stale (in the store, NOT being re-checked)' if stale else '')
+            + (f' · {retired_n} retired (left this machine — recorded, not erased)' if retired_n else '')
             + f' · {open_total} unresolved alert(s)</span></div>')
     stale_note = ""
     if stale:
@@ -4993,7 +5445,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
         opts = "".join(f'<option value="+{_esc(r)}">{_esc(r)} — {_esc(desc)}</option>'
                        for r, desc in ROLE_TEMPLATES if r in derived)
         return (issued
-                + f'<div class="ddh">Give an agent its own key</div>'
+                + '<div class="ddh">Give an agent its own key</div>'
                 + f'<div class="note">Name an agent, pick what it may touch, get a key — shown '
                   f'once. Paste that key into the agent\'s gateway config above; from then on '
                   f'its calls are attributed to it in the trail and limited to its grant. '
@@ -5144,9 +5596,14 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                 f'loopback config from your fleet if none exists (no secrets written), then '
                 f'starts the gateway detached — your click is the consent">{_glabel}'
                 f'</button></form>')
+        # ONE command, and the real path. This note and the "Your generated config" note above it
+        # gave two different start commands on one screen, this one pointing at a path that only
+        # exists in the repo checkout (2026-09-03). When a generated config exists, name it.
+        _cfg_path = (str(_gw_dir / "gateway.yaml") if (_gw_dir / "gateway.yaml").exists()
+                     else "deploy/gateway.example.yaml")
         live_html += ('<div class="note">No gateway running right now — the trail below is '
                       'from earlier sessions. Start one: <code>mcpgawk enforce serve '
-                      '--gateway-config deploy/gateway.example.yaml</code></div>')
+                      f'--gateway-config {_esc(_cfg_path)}</code></div>')
     per = ""
     if gw.get("by_principal"):
         ups = principal_upstreams((live or {}).get("keys_file"))
@@ -5255,6 +5712,124 @@ def _run_login_cli(url: str, flag: str = "--http"):
     proc = subprocess.Popen([_sys.executable, "-m", "mcpgawk", "scan", flag, url, "--login"],
                             stdout=log, stderr=subprocess.STDOUT, text=True)
     return proc, log.name
+
+
+#: The ONE in-band sign-in the panel is holding for a click — name, child, log, url, started.
+_SIGNIN_CHILD: dict[str, Any] = {}
+_SIGNIN_LOCK = __import__("threading").Lock()
+
+
+def _run_signin_cli(name: str):
+    """The real `mcpgawk scan --only <name> --sign-in --yes` flow as a child, stdin piped.
+
+    `MCPGAWK_SIGNIN_WAIT=stdin` tells the CLI a person is behind the pipe (the panel's button);
+    the child prints the link, then blocks on one newline, then checks the server's OWN word on
+    the session once and measures through it. One implementation, two front doors."""
+    import subprocess
+    import sys as _sys
+    import tempfile
+    log = tempfile.NamedTemporaryFile("w+", prefix="mcpgawk-signin-", suffix=".log", delete=False)
+    env = {**os.environ, "MCPGAWK_SIGNIN_WAIT": "stdin"}
+    proc = subprocess.Popen([_sys.executable, "-m", "mcpgawk", "scan", "--only", name,
+                             "--sign-in", "--yes"],
+                            stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
+                            text=True, env=env)
+    return proc, log.name
+
+
+def _signin_child_alive() -> bool:
+    with _SIGNIN_LOCK:
+        proc = _SIGNIN_CHILD.get("proc")
+    try:
+        return proc is not None and proc.poll() is None
+    except Exception:                              # noqa: BLE001 — a fake or a gone process
+        return False
+
+
+def _stop_signin_child(proc) -> None:
+    """TERM first so the child's `held.close()` runs and its mcp-remote grandchild follows; KILL
+    only if it lingers. An orphaned `mcp-remote https://mcp.kite.trade/mcp` is exactly what a
+    careless cleanup mistook for its own on 2026-09-04."""
+    try:
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:                          # noqa: BLE001 — subprocess.TimeoutExpired
+            proc.kill()
+    except Exception:                              # noqa: BLE001 — already gone is fine
+        pass
+
+
+def _read_log(log_path: str) -> str:
+    try:
+        return pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _await_child_link(proc, log_path: str, seconds: float) -> str:
+    """Poll the child's log for the sign-in link (the OAuth flow's phrase, printed by --sign-in
+    too) until it appears, the child exits, or `seconds` pass. "" when there is none."""
+    import re as _re
+    import time as _time
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        hit = _re.search(r"paste this into a browser:\s*(https?://\S+)", _read_log(log_path))
+        if hit:
+            return hit.group(1).rstrip(".,)")
+        if proc.poll() is not None:
+            break
+        _time.sleep(0.5)
+    hit = _re.search(r"paste this into a browser:\s*(https?://\S+)", _read_log(log_path))
+    return hit.group(1).rstrip(".,)") if hit else ""
+
+
+def run_login_done(name: str | None) -> dict[str, Any]:
+    """The human says the browser said yes: hand the held child its Enter, and report what the
+    server said and what was measured — in the child's words, never a guess."""
+    with _SIGNIN_LOCK:
+        held = dict(_SIGNIN_CHILD)
+    if not held or (name and held.get("name") != name):
+        return {"ok": False,
+                "message": (f"no sign-in is waiting for {name or 'this server'} — click "
+                            f"‘sign in’ first, then ‘I have signed in’ once the browser says so")}
+    proc, log_path, url = held["proc"], held["log_path"], held.get("url") or ""
+    name = held["name"]
+    try:
+        if proc.poll() is None and proc.stdin is not None:
+            try:
+                proc.stdin.write("\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+        try:
+            proc.wait(timeout=300)
+        except Exception:                          # noqa: BLE001 — subprocess.TimeoutExpired
+            proc.kill()
+            return {"ok": False,
+                    "message": f"{name}: the signed-in measurement did not finish within 5 minutes"}
+    finally:
+        with _SIGNIN_LOCK:
+            if _SIGNIN_CHILD.get("proc") is proc:
+                _SIGNIN_CHILD.clear()
+    out = _read_log(log_path)
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    measured = next((ln for ln in lines if ln.startswith("measured ") and "signed-in session" in ln), "")
+    if measured:                                   # the child's own word is the evidence, not its exit code
+        signed = next((ln for ln in lines if ln.startswith("signed in —")), "")
+        return {"ok": True, "level": "ok",
+                "message": f"{name}: {measured}" + (f" · {signed}" if signed else "")}
+    refused = next((ln for ln in lines if "does not consider this session signed in" in ln), "")
+    if refused:
+        return {"ok": False, "message": f"{name}: {refused.split(': ', 1)[-1]}"}
+    ended = next((ln for ln in lines if "held session" in ln and "scanning it the ordinary way" in ln), "")
+    if ended:
+        return {"ok": False, "message": f"{name}: {ended.split(': ', 1)[-1]}"}
+    return {"ok": False,
+            "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
 
 
 def _oauth_unsupported_reason(url: str) -> str:
@@ -5415,30 +5990,46 @@ def run_login(name: str | None) -> dict[str, Any]:
         # and closing that session killed every link on arrival ("session error" the moment the
         # founder clicked, 2026-08-14). The session now stays alive ~5 minutes while the human
         # authorises.
-        inband = remote_login.inband_login_held(url=url)
-        if inband:
-            auth_url, server_notice = inband
+        # kite and Revolut X sign in through their OWN login tool — the tool returns the real
+        # authorisation URL bound to a session ([FOUNDER] 2026-08-14: "every time kite connects
+        # me to the webpage and i need to provide access"). The button used to hand out that link
+        # and let the held session close having measured nothing (`inband_login_held`) — the same
+        # defect d011d04 fixed in the CLI (`scan --sign-in`) and left in place here, so the
+        # founder's successful kite sign-in on 2026-09-04 changed nothing on the page. The panel
+        # now drives THAT CLI path as a child, publishes its link, and keeps the child waiting for
+        # the "I have signed in" click (login-done), which is the child's Enter.
+        proc, log_path = _run_signin_cli(name)
+        link = _await_child_link(proc, log_path, seconds=60.0)
+        if link:
+            with _SIGNIN_LOCK:
+                previous = _SIGNIN_CHILD.get("proc")
+                _SIGNIN_CHILD.clear()
+                _SIGNIN_CHILD.update(name=name, proc=proc, log_path=log_path, url=url,
+                                     started=_now())
+            if previous is not None and previous is not proc:
+                _stop_signin_child(previous)        # a second click must not orphan the first
             _ACTION.update(
-                login_url=auth_url,
+                login_url=link, signin_pending=name,
                 notice=(f"{name} signs in through its own login tool, and that login belongs to "
                         f"ONE MCP session. This link authorises the session mcpgawk is holding — "
-                        f"it does NOT sign your agent in. {server_notice}"))
-            _open_login_in_browser(auth_url)
-            # SAY WHAT THIS CANNOT DO. Measured twice on the founder's fleet (2026-08-27): a brand
-            # new session is "Please log in first" hours after a successful browser login, so a
-            # login completed here is worth nothing to Claude Desktop or any other client. The old
-            # copy said the agent "may ask once more … that is kite's model, not an error", which
-            # reads as a quirk to tolerate rather than the flat fact that this button cannot
-            # connect an agent. A control that implies more than it delivers is the same false
-            # reassurance as a clean bill on an unrun check.
+                        f"it does NOT sign your agent in."))
+            _open_login_in_browser(link)
             return {"ok": True,
-                    "message": (f"{name} sign-in link is ready — open it within 5 minutes, while "
-                                f"mcpgawk holds the session it is bound to. WHAT THIS DOES: lets "
-                                f"mcpgawk measure {name} as a signed-in user. WHAT IT DOES NOT DO: "
-                                f"sign your agent in — {name} binds a login to the one session "
-                                f"that asked, so Claude Desktop (and every other client) must run "
-                                f"{name}'s own login tool from inside that client.")}
-        return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
+                    "message": (f"{name} sign-in link is ready — open it, sign in, then click "
+                                f"‘I have signed in’ within 5 minutes, while mcpgawk holds the "
+                                f"session it is bound to. WHAT THIS DOES: measures {name} as a "
+                                f"signed-in user and records which sign-in it was measured "
+                                f"through. WHAT IT DOES NOT DO: sign your agent in — {name} binds "
+                                f"a login to the one session that asked, so Claude Desktop (and "
+                                f"every other client) must run {name}'s own login tool from "
+                                f"inside that client.")}
+        # No link: the child ended (or said why) before offering one — its reason, never a guess.
+        _stop_signin_child(proc)
+        out = _read_log(log_path)
+        if "does not sign in through a login tool" in out:
+            return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
+        return {"ok": False,
+                "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
     try:
         proc, log_path = _run_login_cli(url, _transport_flag(entry, url))
     except Exception as exc:                      # noqa: BLE001
@@ -5486,13 +6077,48 @@ def run_login(name: str | None) -> dict[str, Any]:
     if remote_login.stored_access_token(url):
         return {"ok": True, "message": f"signed in to {name} — the token is stored on this "
                                        f"machine; verify can use it now"}
-    tail = [ln for ln in out.splitlines() if ln.strip()]
-    # The child's ACTUAL last line, never a bare "did not complete" — that phrasing blamed the
-    # sign-in for an argument bug once already, and for this swallowing bug a second time.
-    detail = f" — {tail[-1].strip()}" if tail else (" — the flow printed nothing at all; run "
-                                                   f"`mcpgawk scan --http {url} --login` in a "
-                                                   f"terminal to see it")
-    return {"ok": False, "message": f"sign-in for {name} did not complete{detail}"}
+    # The child's ACTUAL reason, never a bare "did not complete" — that phrasing blamed the
+    # sign-in for an argument bug once already, and for this swallowing bug a second time. And
+    # never the child's LAST line: that was the scan footer ("Scanned locally — your server
+    # inventory never left this machine.") on the founder's figma click, 2026-09-03, with the
+    # 403 registration refusal five lines above it.
+    return {"ok": False,
+            "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
+
+
+def _login_failure_detail(name: str, url: str, out: str) -> str:
+    """The one line of a failed `scan --http <url> --login` that says WHY, from its merged output.
+
+    Order: the line that already names the way through a registration refusal; else the
+    refusal itself, rendered by the CLI's own `_signin_failure_line` (so the panel and the
+    terminal say the same thing); else the probe's per-attempt error line; else the "✗" summary;
+    else the last line. The circular "retry with `--login`" clause is cut wherever it survives."""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return (f"the flow printed nothing at all; run `mcpgawk scan --http {url} --login` in "
+                f"a terminal to see it")
+    for ln in lines:
+        if "refuses automatic client registration" in ln:
+            return ln.split(": ", 1)[1] if ln.startswith(f"{name}: ") else ln
+    refusal = next((ln for ln in lines if "Registration failed" in ln), None)
+    if refusal:
+        from .cli import _signin_failure_line
+        return _signin_failure_line(name, refusal, None).strip().split(": ", 1)[1]
+    reason = next((ln for ln in lines if ln.startswith("- ")), None) \
+        or next((ln for ln in lines if ln.startswith("✗")), None) \
+        or lines[-1]
+    return reason.split("; retry with")[0].rstrip(":")
+
+
+def signin_asks(entries: dict) -> list[str]:
+    """The servers waiting on a browser sign-in — the operator's to-do list, in config order.
+
+    THE ONE PLACE this question is answered. The Getting-set-up stepper and the briefing strip's
+    "Needs you" each computed it before, and disagreed (a search filter narrowed one of them):
+    two sources of truth for "what needs me" is the two-truths class this panel keeps hitting.
+    """
+    return [n for n, e in (entries or {}).items()
+            if isinstance(e, dict) and _login_button_applicable(e, n)]
 
 
 def _login_button_applicable(entry: dict, name: str = "") -> bool:
@@ -5544,7 +6170,11 @@ def _login_button_applicable(entry: dict, name: str = "") -> bool:
             return True
         if stale is None and not remote_login.stored_access_token(url):
             return True
-    return not remote_login.stored_access_token(url)
+    # A completed sign-in suppresses the offer — a token for OAuth servers, the sign-in MARK for
+    # in-band ones (kite: no token exists; `mark_inband_login` is the only evidence). Without the
+    # second half the tile asked kite for a sign-in forever, including right after one succeeded
+    # (founder, 2026-09-04).
+    return not (remote_login.stored_access_token(url) or remote_login.stored_login_id(url))
 
 
 #: Launchers that complete an INTERACTIVE browser sign-in before a server will speak MCP.
@@ -5561,12 +6191,21 @@ def _fchip(f: dict) -> str:
     """Severity colour, unless the finding was folded as first-party — then it is not an alarm."""
     if f.get("suppressed") or f.get("first_party"):
         return ""
+    if f.get("loopback"):
+        return "warn"                     # a local call is a question, not an exfiltration alarm
     return "bad" if str(f.get("severity")).lower() in ("critical", "high") else "warn"
 
 
 def _foldnote(f: dict) -> str:
     if f.get("suppressed"):
         return ' <span class="chip">muted by you</span>'
+    if f.get("loopback") and not f.get("first_party"):
+        # Deliberately NOT folded (test_local_surface_token pins that localhost is not the
+        # vendor): a server reaching 127.0.0.1 may be probing a local service, which is SSRF's
+        # home turf. But "undeclared-egress · high" reads as exfiltration, and vault-rag
+        # reaching Ollama is not that. Name what it is so the reader checks the right thing.
+        return (' <span class="chip">loopback · reached a service on THIS machine — not '
+                'exfiltration; check what listens there</span>')
     if f.get("first_party"):
         return ' <span class="chip">first-party · matches this server\'s own identity</span>'
     return ""
@@ -5917,10 +6556,8 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         try:
             _rep_doc = json.loads(report_path.read_text(encoding="utf-8"))
             report_readable = True
-            for s in (_rep_doc.get("servers") or []):
+            for s in _servers_of_this_run(_rep_doc, all_targets):
                 sname = str(s.get("server") or "")
-                if not sname:
-                    continue
                 if s.get("sandboxDegradedReason"):
                     degraded_map[sname] = str(s["sandboxDegradedReason"])
                 if s.get("labelNoiseNote"):
@@ -6276,6 +6913,19 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # The record, downloadable. "Everything logged and available to download" — the raw
             # append-only log verbatim, or a spreadsheet-friendly CSV of the same rows. No token:
             # this is your own local record of your own machine, the same bytes `cat` would show.
+            if path == "/api/state":
+                # The JSON face (ledger 108). Token-free and read-only, like the exports and the
+                # page: reading is open on this machine, the token buys the buttons. An
+                # allow-list projection — see `api_state`.
+                body = json.dumps(api_state(collect()), sort_keys=True).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == "/export/calls.jsonl":
                 self._send_download(export_log_jsonl(), "application/x-ndjson", "mcpgawk-log.jsonl")
                 return
@@ -6378,7 +7028,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                    "protect": f"protect · {_k}" if _k else "protect",
                                    "approve": f"approve · {_k}" if _k else "approve",
                                    }[act])
-            if act in ("scan", "verify", "login"):
+            if act in ("scan", "verify", "login", "login-done"):
                 # `key` carries the server for a row action; absent = whole fleet.
                 _run_action_bg(act, (form.get("key") or [""])[0] or None)
             elif act == "login-configure":

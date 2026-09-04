@@ -73,7 +73,17 @@ create index if not exists runs_kind_idx    on runs (kind, started_at desc);
 
 
 def default_path() -> str:
-    return os.environ.get("MCPGAWK_RUNS") or os.path.expanduser("~/.mcpgawk/runs.db")
+    """`MCPGAWK_RUNS`, else BESIDE the history store, else `~/.mcpgawk/runs.db`.
+
+    GATE THE WRITE, NOT THE CALLER. The public repo's test suite redirects `MCPGAWK_HISTORY` and
+    nothing else, so every `cli.main(["scan", …])` it ran on 2026-09-02 wrote a run into the
+    founder's real `runs.db` — four `stdio:/Users/…/mcpgawk-public/` rows on the Evidence page.
+    A store that has been moved takes its registry with it."""
+    explicit = os.environ.get("MCPGAWK_RUNS")
+    if explicit:
+        return explicit
+    from . import history                      # the ONE module that knows where the store is
+    return os.path.join(os.path.dirname(os.path.abspath(history.default_path())), "runs.db")
 
 
 @dataclass(frozen=True)

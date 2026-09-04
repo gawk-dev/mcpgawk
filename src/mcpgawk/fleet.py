@@ -101,6 +101,13 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             # so anything that later appears at that path is executed without being asked about
             # again. That is a standing invitation, not a dead link.
             return "UNREACHABLE", "its program no longer exists — still configured, so anything at that path would run"
+        if x.get("error_kind") == "nothing-listening":
+            # The loopback twin of command-missing, and the worse one: a missing program needs a
+            # file planted at a known path before anything runs; a free loopback port needs only a
+            # process that binds it. Same standing invitation, no planting required.
+            return "UNREACHABLE", ("nothing is listening at its loopback address — still "
+                                   "configured, so whatever binds that port next answers as this "
+                                   "server")
         # NOT YET: surfacing the server's own reason here is worth doing — a config pointing at a
         # deleted file reads only as "no MCP endpoint found" while the server's stderr named the
         # missing path. Attempted 2026-07-28 and backed out: redact() mangles ordinary paths

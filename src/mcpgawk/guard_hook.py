@@ -497,9 +497,12 @@ def _record(event: dict, output: dict | None, fmt: str = "claude",
         # them made a machine with no usable projection indistinguishable in the log
         # from a fully enforced one.
         decision = "deny" if output else ("allow" if checked else "defer")
+        # This module is the ONE pinned exception allowed to know the store's path
+        # (test_layer_invariants); spool.py, loaded here by file with no package, must be told.
         spool.record_decision(
             server=server, tool=tool, decision=decision, adapter=adapter, basis=basis,
             session=_session_id(event),
+            path=spool.spool_path(store_path=str(history_path())),
         )
     except Exception:                              # noqa: BLE001 - a lost record is not a verdict
         return

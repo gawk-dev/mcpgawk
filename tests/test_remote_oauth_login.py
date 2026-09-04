@@ -65,10 +65,10 @@ def oauth_base():
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Redirect the token store. `_STORE_DIR` is read at import time, so the real ~/.gawk/oauth
+    """Redirect the token store. the store dir is read at use (env GAWK_OAUTH_STORE), so the real ~/.gawk/oauth
     would otherwise be written to by a test run."""
     path = tmp_path / "oauth"
-    monkeypatch.setattr(oauth_login, "_STORE_DIR", path)
+    monkeypatch.setenv("GAWK_OAUTH_STORE", str(path))   # read at use since 2026-09-03
     return path
 
 
@@ -223,10 +223,9 @@ def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_pat
     client registered in advance — whose redirect URI must match EXACTLY (the Claude Code
     2.1.231 bug class). store_preregistered_client pins the port; build_login_provider binds
     that exact port and matches the stored auth method."""
-    from pathlib import Path as _P
 
     from mcpgawk import oauth_login
-    monkeypatch.setattr(oauth_login, "_STORE_DIR", _P(str(tmp_path)))
+    monkeypatch.setenv("GAWK_OAUTH_STORE", str(tmp_path))   # read at use since 2026-09-03
     if True:
         uri = oauth_login.store_preregistered_client(
             "https://mcp.example.com/mcp", "client-abc", "sekret-xyz")
@@ -285,3 +284,61 @@ def test_sdk_child_cleanup_warnings_lose_their_traceback_but_keep_their_line(cap
     other = rec("urllib3.connectionpool")
     flt.filter(other)
     assert other.exc_info is not None, "non-SDK records must keep their tracebacks"
+
+
+
+def test_a_preregistered_client_can_be_stored_from_inside_a_running_loop(tmp_path, monkeypatch):
+    """The one real caller, `cli._run`, is async. `store_preregistered_client` used to call
+    `asyncio.run` and so raised "cannot be called from a running event loop" the first time the
+    shipped `--oauth-client-id` route was used for real (founder, figma, 2026-09-04) — while this
+    file's other test, calling it from outside any loop, stayed green."""
+    import asyncio
+    from mcpgawk import oauth_login, remote_login
+    monkeypatch.setenv("GAWK_OAUTH_STORE", str(tmp_path))
+
+    async def inside_a_loop():
+        return oauth_login.store_preregistered_client(
+            "https://mcp.example.com/mcp", "client-abc", "sekret-xyz",
+            "http://localhost:23948/callback")
+
+    uri = asyncio.run(inside_a_loop())
+    assert uri == "http://localhost:23948/callback"
+    doc = json.loads(remote_login._token_path("https://mcp.example.com/mcp").read_text())
+    assert doc["client_info"]["client_id"] == "client-abc" and doc["preregistered"] is True
+    assert doc["client_info"]["redirect_uris"] == ["http://localhost:23948/callback"]
+
+
+def test_the_scan_runner_stores_the_preregistered_client_before_probing(tmp_path, monkeypatch):
+    """Drives `cli._run` itself with --oauth-client-id: the store must happen inside its loop
+    and the probe must then run — the path the founder's command takes."""
+    import asyncio
+    import types
+    from mcpgawk import cli, oauth_login, probe as probe_mod, remote_login
+    monkeypatch.setenv("GAWK_OAUTH_STORE", str(tmp_path))
+    monkeypatch.setenv("SEKRET_ENV", "sekret-xyz")
+    seen = {}
+
+    async def fake_probe_url(label, url, headers, timeout, auth=None, **kw):
+        seen["auth"] = auth
+        return probe_mod.ServerSnapshot(name=label, transport="http", protocol_version="p", tools=[])
+
+    # The REAL provider builder runs: a first draft of this test faked it, and the very next line
+    # of the route (`build_login_provider`'s own `asyncio.run`) died on the founder's second try.
+    monkeypatch.setattr(cli, "probe_url", fake_probe_url)
+    real_build = oauth_login.build_login_provider
+    def _spy(url):
+        auth, server = real_build(url)
+        seen["port"] = server.server_port
+        return auth, server
+    monkeypatch.setattr(oauth_login, "build_login_provider", _spy)
+    args = types.SimpleNamespace(stdio=None, http="https://mcp.example.com/mcp", sse=None,
+                                 header=[], login=True, config=None, only=None, yes=True,
+                                 full=False, sign_in=False, oauth_client_id="client-abc",
+                                 oauth_client_secret_env="SEKRET_ENV",
+                                 oauth_redirect_uri="http://localhost:23957/callback")
+    snaps, entries, skipped = asyncio.run(cli._run(args))
+    assert len(snaps) == 1 and seen.get("auth") is not None
+    assert seen.get("port") == 23957, "the pre-registered redirect port is the one bound"
+    assert str(seen["auth"].context.client_metadata.redirect_uris[0]) == "http://localhost:23957/callback"
+    doc = json.loads(remote_login._token_path("https://mcp.example.com/mcp").read_text())
+    assert doc["preregistered"] is True and doc["client_info"]["client_id"] == "client-abc"

@@ -179,3 +179,38 @@ def test_a_capable_machine_is_not_nagged_about_degradation(monkeypatch, tmp_path
                         else real_which(name))
     out = collect_and_render()
     assert "UNAVAILABLE" not in out
+
+
+
+def test_stderr_tail_keeps_the_cause_above_the_log_path(tmp_path):
+    """mcpgawk-universe, 2026-09-04: the last line of a failed install is a log path, a closing
+    brace or a uv hint; the cause is lines above. One line kept left 5 of 25 failures
+    undiagnosable. Keep the tail, redacted line by line, and the cause survives."""
+    from mcpgawk.probe import STDERR_JOIN
+    errlog = tmp_path / "err.log"
+    errlog.write_text(
+        "npm notice New minor version of npm available\n"
+        "npm WARN EBADENGINE Unsupported engine { package: 'x', required: { node: '>=22' } }\n"
+        "npm WARN EBADENGINE }\n"
+        "npm error A complete log of this run can be found in: /work/npm/_logs/2026-09-04-debug-0.log\n",
+        encoding="utf-8")
+    with errlog.open("r+", encoding="utf-8") as fh:
+        detail = _stderr_tail(fh)
+    assert "required: { node: '>=22' }" in detail, "the cause must survive"
+    assert "debug-0.log" in detail, "and so must the log path"
+    assert "npm notice" not in detail
+    assert detail.count(STDERR_JOIN) == 2, "three real lines, two joins"
+
+
+def test_stderr_tail_is_bounded_and_redacted_per_line(tmp_path):
+    from mcpgawk.probe import STDERR_JOIN, STDERR_LINES_KEPT
+    errlog = tmp_path / "err.log"
+    lines = [f"line {i} " + "x" * 300 for i in range(50)]
+    lines.append("Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz0123456789")
+    errlog.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with errlog.open("r+", encoding="utf-8") as fh:
+        detail = _stderr_tail(fh)
+    parts = detail.split(STDERR_JOIN)
+    assert len(parts) == STDERR_LINES_KEPT, "only the tail"
+    assert all(len(p) <= 200 for p in parts), "each line capped, not only the whole"
+    assert "sk-live-abcdefghijklmnopqrstuvwxyz0123456789" not in detail, "redacted at capture"

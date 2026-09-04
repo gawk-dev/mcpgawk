@@ -42,3 +42,19 @@ def _the_suite_is_the_documented_ci_override():
             os.environ.pop("MCPGAWK_APPROVE_NONINTERACTIVE", None)
         else:
             os.environ["MCPGAWK_APPROVE_NONINTERACTIVE"] = prior
+
+
+@pytest.fixture(autouse=True)
+def _no_real_signin_child(monkeypatch):
+    """Same guard as the platform conftest: no test may launch the panel's `scan --sign-in` child
+    against a real fleet. A test that needs it patches `panel._run_signin_cli` with a fake."""
+    try:
+        from mcpgawk import panel
+    except Exception:                              # noqa: BLE001
+        return
+
+    def _refuse(name):
+        raise AssertionError(f"a test tried to launch the REAL sign-in child for {name!r} — "
+                             f"patch panel._run_signin_cli with a fake")
+
+    monkeypatch.setattr(panel, "_run_signin_cli", _refuse)

@@ -1,0 +1,15 @@
+
+======================================================================
+mcpgawk 0.1.34 — LOCAL scan (no inventory uploaded)
+======================================================================
+
+● cli-http   [http]   AUTH REQUIRED
+    ✗ could not scan — authentication required — the endpoint is live but refused this scan; `--login` ran and did not complete:
+  - http https://mcp.figma.com/mcp: OAuthRegistrationError: Registration failed: 403 Forbidden
+  mcp.figma.com: this server refuses automatic client registration (Registration failed: 403 Forbidden) — it only accepts OAuth clients it already knows about. The way through: create an OAuth app in mcp.figma.com's developer console, register the redirect URI mcpgawk prints, then run once:  mcpgawk scan --login <url> --oauth-client-id <id> [--oauth-client-secret-env VAR]. This did NOT pass; it was not measured.
+      The endpoint is real — it needs credentials, not a different URL.
+
+────────────────────────────────────────────────────────────────
+1 server · 0 tools · 0 tokens loaded into every session · 0 can change or send data.
+Scanned locally — your server inventory never left this machine.
+

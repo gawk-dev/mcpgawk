@@ -22,7 +22,7 @@ import sys
 import pytest
 
 from mcpgawk import cli, fleet, panel
-from mcpgawk.configcheck import CONFIG_KINDS, RISKY_KINDS, SHORT, check, summarize
+from mcpgawk.configcheck import CONFIG_KINDS, RISKY_KINDS, SHORT, check
 from mcpgawk.label import _SIGNAL_LEAD, _SIGNAL_LEAD_BY_KIND
 
 

@@ -18,6 +18,8 @@ DECLINED. The honest numbers were already in the same dict.
 """
 from __future__ import annotations
 
+import pathlib
+
 
 def test_the_activity_headline_never_calls_a_declined_call_checked():
     from mcpgawk.panel import _activity_headline
@@ -131,7 +133,7 @@ def test_the_blocked_banner_names_where_those_servers_are():
     assert "Changed" in text, text
 
 
-def test_a_server_with_no_oauth_is_refused_fast_not_hung(monkeypatch):
+def test_a_server_with_no_oauth_is_refused_fast_not_hung(tmp_path, monkeypatch):
     """The founder's actual complaint: "Running login · kite… " forever. Measured 2026-08-14 —
     `kite` answers `initialize` 200 with no auth challenge and 404s both OAuth discovery documents.
     Its sign-in is IN-BAND (one of its own tools returns a broker link), so there was never a
@@ -145,7 +147,14 @@ def test_a_server_with_no_oauth_is_refused_fast_not_hung(monkeypatch):
     # flow. kite-class servers (in-band login tool) are covered by the test below.
     from mcpgawk import remote_login as _rl
     monkeypatch.setattr(_rl, "inband_login", lambda url=None, **kw: None)
-    monkeypatch.setattr(_rl, "inband_login_held", lambda url=None, **kw: None)
+    # The in-band path is now the CLI's own `scan --sign-in` as a child (2026-09-04); a server
+    # with no login tool makes that child say so and exit. Faked — a test must NEVER launch the
+    # real fleet (one did, on 2026-09-04, and opened two real kite sessions).
+    monkeypatch.setattr(panel, "_run_signin_cli",
+                        lambda name: _fake_signin_child(tmp_path, "mcpgawk scan --sign-in: kite "
+                                                        "does not sign in through a login tool "
+                                                        "of its own — scanning it the ordinary "
+                                                        "way.\n", exited=True))
 
     def must_not_run(*a, **k):                       # noqa: ANN002, ANN003
         raise AssertionError("a login subprocess was started for a server with no OAuth")
@@ -186,30 +195,113 @@ def test_a_bare_403_is_not_mistaken_for_an_auth_challenge():
     assert reason, "a bare 403 was treated as an OAuth challenge"
 
 
-def test_a_server_with_an_inband_login_tool_gets_a_real_link(monkeypatch):
+class _FakeSigninChild:
+    """Stands in for the `scan --sign-in` child: a log that already holds the given text, a pipe
+    that records what the panel writes, and an exit the test controls."""
+    def __init__(self, exited: bool) -> None:
+        import io
+
+        class _Pipe(io.StringIO):
+            """Keeps its value after close(), which the panel calls once it has written."""
+            def close(self) -> None:
+                self.closed_value = self.getvalue()
+                super().close()
+            def written(self) -> str:
+                return getattr(self, "closed_value", None) if self.closed else self.getvalue()
+        self.stdin = _Pipe()
+        self._exited = exited
+        self.returncode = 1 if exited else None
+        self.killed = False
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.returncode = 1
+        return 1
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+def _fake_signin_child(tmp_path, log_text: str, exited: bool):
+    log = tmp_path / "signin.log"
+    log.write_text(log_text, encoding="utf-8")
+    return _FakeSigninChild(exited), str(log)
+
+
+def test_a_server_with_an_inband_login_tool_gets_a_real_link_and_a_done_button(tmp_path, monkeypatch):
     """[FOUNDER] 2026-08-14: "every time kite connects me to the webpage and i need to provide
     access" — and Revolut X does the same. These servers sign in through their OWN login tool,
-    which returns the authorisation URL. The panel now makes that call and puts the link on the
-    banner, instead of refusing with "look at the server's own tools"."""
+    which returns the authorisation URL. The panel makes that call — through the CLI's own
+    `scan --sign-in` child since 2026-09-04 — puts the link on the banner, and HOLDS the child for
+    the "I have signed in" click, because the link-only version let the session close having
+    measured nothing ([FOUNDER] 2026-09-04: "when i signed in to kite successfully still it shows
+    the login to kite tile")."""
     from mcpgawk import discover, panel, remote_login
 
     monkeypatch.setattr(panel, "_oauth_unsupported_reason", lambda url: "no oauth")
-    monkeypatch.setattr(remote_login, "inband_login_held",
-                        lambda url=None, **kw:
-                        ("https://mcp.kite.trade/authorize?session_id=abc", "WARNING: markets."))
+    link = "https://mcp.kite.trade/authorize?session_id=abc"
+    monkeypatch.setattr(panel, "_run_signin_cli",
+                        lambda name: _fake_signin_child(
+                            tmp_path, f"kite says:\nWARNING: markets.\nOpen this and sign in — it "
+                                      f"is bound to the session being held for you:\n\n  {link}\n"
+                                      f"  If it doesn't open, paste this into a browser:\n    {link}\n",
+                            exited=False))
+    monkeypatch.setattr(panel, "_open_login_in_browser", lambda url: None)
     monkeypatch.setattr(discover, "discover_servers",
                         lambda *a, **k: {"kite": {"url": "https://mcp.kite.trade/mcp"}})
     monkeypatch.setattr(remote_login, "login_url",
                         lambda entry, name="", path=None: "https://mcp.kite.trade/mcp")
     panel._ACTION.update(running=False, label="login · kite", message="", rows=[],
-                         notice="", login_url="", at=panel._now())
+                         notice="", login_url="", signin_pending="", at=panel._now())
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
     res = panel.run_login("kite")
     assert res["ok"] is True
     assert "sign-in link is ready" in res["message"], res["message"]
-    banner = panel._action_banner({**dict(panel._ACTION), "running": False,
-                                   "label": "login · kite", "message": res["message"],
-                                   "at": panel._now()})
-    assert "https://mcp.kite.trade/authorize?session_id=abc" in banner,         "the authorisation link must be ON the banner, not in a log"
+    assert "I have signed in" in res["message"], "the user must be told the click is the next step"
+    assert panel._ACTION.get("signin_pending") == "kite"
+    assert panel._SIGNIN_CHILD.get("name") == "kite", "the child must be HELD for the click"
+    state = {**dict(panel._ACTION), "running": False, "label": "login · kite",
+             "message": res["message"], "at": panel._now()}
+    banner = panel._action_banner(state, token="tok") if "token" in \
+        panel._action_banner.__code__.co_varnames else panel._action_banner(state)
+    assert link in banner, "the authorisation link must be ON the banner, not in a log"
+    if "token" in panel._action_banner.__code__.co_varnames:
+        assert 'value="login-done"' in banner, "the done button must be on the banner"
+
+    # The click: one newline to the child, then the child's own words come back.
+    child = panel._SIGNIN_CHILD["proc"]
+    log = pathlib.Path(panel._SIGNIN_CHILD["log_path"])
+    log.write_text(log.read_text(encoding="utf-8") +
+                   "  signed in — You are already logged in as X\n"
+                   "  measured kite through the signed-in session: 22 tools\n", encoding="utf-8")
+    done = panel.run_login_done("kite")
+    assert child.stdin.written() == "\n", "the click must be the child's Enter, nothing else"
+    assert done["ok"] is True, done
+    assert "22 tools" in done["message"] and "logged in as X" in done["message"]
+    assert not panel._SIGNIN_CHILD, "the held child is released once measured"
+
+
+def test_done_with_nothing_held_says_so(monkeypatch):
+    from mcpgawk import panel
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
+    res = panel.run_login_done("kite")
+    assert res["ok"] is False and "no sign-in is waiting" in res["message"]
+
+
+def test_a_sign_in_the_server_did_not_accept_is_reported_in_its_words(tmp_path, monkeypatch):
+    from mcpgawk import panel
+    proc, log = _fake_signin_child(
+        tmp_path, "mcpgawk scan --sign-in: kite does not consider this session signed in "
+                  "(Please log in first) — scanning it the ordinary way instead.\n", exited=False)
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
+        panel._SIGNIN_CHILD.update(name="kite", proc=proc, log_path=log,
+                                   url="https://mcp.kite.trade/mcp", started=panel._now())
+    res = panel.run_login_done("kite")
+    assert res["ok"] is False and "does not consider this session signed in" in res["message"]
+
 
 
 def test_guided_setup_runs_the_servers_own_steps(monkeypatch):
@@ -765,3 +857,76 @@ def test_an_incomplete_run_never_wears_the_clean_colour(monkeypatch):
     import re as _re
     chip = _re.search(r'<span class="chip (\w+)">incomplete</span>', html)
     assert chip and chip.group(1) == "warn", (html and chip and chip.group(0)) or "chip missing"
+
+
+def test_the_signin_child_is_the_cli_sign_in_flow_with_a_piped_person(monkeypatch, tmp_path):
+    """The exact child: `scan --only <name> --sign-in --yes`, stdin PIPED, and the env var that
+    tells the CLI a person is behind the pipe. Pinned the way test_panel_login_argv pins the OAuth
+    child: the wrong argv shipped green once because every test patched the launcher out."""
+    import subprocess
+    from mcpgawk import panel
+    seen: dict = {}
+
+    class _P:
+        stdin = None
+        def poll(self): return None
+    def _popen(argv, **kw):
+        seen["argv"], seen["kw"] = list(argv), kw
+        return _P()
+    monkeypatch.undo()                 # drop the conftest guard's patch: this test WANTS the launcher
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    proc, log = panel._run_signin_cli("kite")
+    assert seen["argv"][1:] == ["-m", "mcpgawk", "scan", "--only", "kite", "--sign-in", "--yes"], seen["argv"]
+    assert seen["kw"]["stdin"] is subprocess.PIPE, "the click has to reach the child as its Enter"
+    assert seen["kw"]["env"]["MCPGAWK_SIGNIN_WAIT"] == "stdin"
+    assert seen["kw"]["stderr"] is subprocess.STDOUT, "the CLI talks on stderr; the log must hear it"
+    assert pathlib.Path(log).name.startswith("mcpgawk-signin-")
+
+
+def test_a_pending_sign_in_keeps_the_record_open_and_never_stale(tmp_path, monkeypatch):
+    """The person leaves for the browser and comes back to a self-refreshed page: the button must
+    still be there, not folded into the collapsed record, and the banner must not be aged out
+    while the held child is alive."""
+    from mcpgawk import panel
+    proc, log = _fake_signin_child(tmp_path, "", exited=False)
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
+        panel._SIGNIN_CHILD.update(name="kite", proc=proc, log_path=log, url="u", started=panel._now())
+    state = {"running": False, "label": "login · kite", "message": "kite sign-in link is ready",
+             "rows": [], "notice": "", "login_url": "https://k/authorize?s=1",
+             "signin_pending": "kite", "at": "2000-01-01T00:00:00Z"}   # ancient: would be stale
+    assert panel._banner_is_stale(state) is False
+    html = panel._action_banner(state, token="tok", fresh=False)
+    assert 'value="login-done"' in html
+    assert "<details" in html and "<details open" in html, "the record must be OPEN on a later load"
+    proc.returncode = 0                       # child gone: ordinary staleness applies again
+    assert panel._banner_is_stale(state) is True
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
+
+
+def test_a_second_click_stops_the_first_held_child(tmp_path, monkeypatch):
+    from mcpgawk import discover, panel, remote_login
+    monkeypatch.setattr(panel, "_oauth_unsupported_reason", lambda url: "no oauth")
+    monkeypatch.setattr(panel, "_open_login_in_browser", lambda url: None)
+    monkeypatch.setattr(discover, "discover_servers", lambda *a, **k: {"kite": {"url": "https://k/mcp"}})
+    monkeypatch.setattr(remote_login, "login_url", lambda entry, name="", path=None: "https://k/mcp")
+    first, _ = _fake_signin_child(tmp_path, "", exited=False)
+    first.terminate = lambda: setattr(first, "returncode", -15)
+    first.wait = lambda timeout=None: first.returncode      # the fake's default wait() forges an exit of 1
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()
+        panel._SIGNIN_CHILD.update(name="kite", proc=first, log_path="x", url="https://k/mcp", started=panel._now())
+    link = "https://k/authorize?s=2"
+    log2 = tmp_path / "second.log"
+    log2.write_text(f"  If it doesn't open, paste this into a browser:\n    {link}\n", encoding="utf-8")
+    second = _FakeSigninChild(exited=False)
+    monkeypatch.setattr(panel, "_run_signin_cli", lambda name: (second, str(log2)))
+    panel._ACTION.update(running=False, label="login · kite", message="", rows=[], notice="",
+                         login_url="", signin_pending="", at=panel._now())
+    res = panel.run_login("kite")
+    assert res["ok"] is True
+    assert first.returncode == -15, "the first held child must be stopped, not orphaned"
+    assert panel._SIGNIN_CHILD["proc"] is second
+    with panel._SIGNIN_LOCK:
+        panel._SIGNIN_CHILD.clear()

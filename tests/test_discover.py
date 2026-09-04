@@ -614,3 +614,42 @@ def test_login_url_resolves_both_shapes(tmp_path):
     assert remote_login.login_url(remote, "api", path=store) == "", "no evidence, no offer"
     remote_login.record_auth_needed({"api": "https://r.example.com/mcp"}, path=store)
     assert remote_login.login_url(remote, "api", path=store) == "https://r.example.com/mcp"
+
+
+
+def test_claude_code_plugin_servers_are_found_under_the_name_the_agent_uses(tmp_path):
+    """A Claude Code plugin's server is addressed by the agent as `plugin_<plugin>_<server>`
+    (`mcp__plugin_figma_figma__whoami`). Discovery was blind to plugins, so the runtime spool named
+    a server the fleet had never heard of — and the same URL configured in another client sat in
+    the fleet under a different name, unjoinable (founder's figma, 2026-09-04)."""
+    from mcpgawk.guard_hook import parse_mcp_tool_name
+    inst = tmp_path / ".claude" / "plugins" / "cache" / "official" / "figma" / "2.2.107"
+    _write(inst, ".mcp.json", {"mcpServers": {"figma": {
+        "type": "http", "url": "https://mcp.figma.com/mcp",
+        "headers": {"X-Figma-Plugin-Bundle": "figma_prod@2_2_107"}}}})
+    off = tmp_path / ".claude" / "plugins" / "cache" / "official" / "swift-lsp" / "1.0.0"
+    _write(off, ".mcp.json", {"mcpServers": {"swift": {"command": "swift-lsp"}}})
+    _write(tmp_path, ".claude/plugins/installed_plugins.json", {"version": 2, "plugins": {
+        "figma@official": [{"scope": "user", "installPath": str(inst), "version": "2.2.107"}],
+        "swift-lsp@official": [{"scope": "user", "installPath": str(off), "version": "1.0.0"}]}})
+    _write(tmp_path, ".claude/settings.json", {"enabledPlugins": {"figma@official": True,
+                                                                  "swift-lsp@official": False}})
+    found = _discover(tmp_path)
+    assert "plugin_figma_figma" in found, sorted(found)
+    assert found["plugin_figma_figma"]["url"] == "https://mcp.figma.com/mcp"
+    assert found["plugin_figma_figma"]["_clients"] == ["claude-code"]
+    assert found["plugin_figma_figma"]["_names"] == {"claude-code": "plugin_figma_figma"}
+    assert not any("swift" in n for n in found), "a disabled plugin's servers are not loaded"
+    # THE JOIN: the spool's server name for a call the hook saw is this fleet name, verbatim.
+    assert parse_mcp_tool_name("mcp__plugin_figma_figma__whoami")[0] == "plugin_figma_figma"
+
+
+def test_a_plugin_and_a_client_config_with_the_same_url_but_different_headers_are_two_servers(tmp_path):
+    inst = tmp_path / ".claude" / "plugins" / "cache" / "official" / "figma" / "2.2.107"
+    _write(inst, ".mcp.json", {"mcpServers": {"figma": {"url": "https://mcp.figma.com/mcp",
+                                                       "headers": {"X-Figma-Plugin-Bundle": "b"}}}})
+    _write(tmp_path, ".claude/plugins/installed_plugins.json", {"version": 2, "plugins": {
+        "figma@official": [{"installPath": str(inst)}]}})
+    _write(tmp_path, ".claude.json", {"mcpServers": {"figma": {"url": "https://mcp.figma.com/mcp"}}})
+    found = _discover(tmp_path)
+    assert {"figma", "plugin_figma_figma"} <= set(found), sorted(found)

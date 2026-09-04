@@ -32,11 +32,11 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 from .credentials import fingerprint as credential_fingerprint
+from .servercard import fetch_card
+from .transport import Candidate as _Candidate
 
 #: Where `cli.with_stored_login` parks the sign-in mark on the entry it hands to a probe.
 LOGIN_ID_KEY = "_login_id"
-from .servercard import fetch_card
-from .transport import Candidate as _Candidate
 
 #: Servers colour their output; a colour code inside an error message is noise, not information.
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -249,7 +249,57 @@ def _kind_of(exc: BaseException, status: int | None = None) -> str:
     # the type-based rules above rather than guessed at from a number.
     if status in (401, 403):
         return "auth-required"
+    try:
+        from .oauth_login import LoginNeeded
+        if isinstance(exc, LoginNeeded):
+            return "auth-required"           # the refresh failed; the fix is a sign-in, not a URL
+    except ImportError:                                   # pragma: no cover
+        pass
+    if _connect_failed(exc):
+        return "connect-failed"
     return "unreachable"
+
+
+def _connect_failed(exc: BaseException) -> bool:
+    """Did the connection never get made — nothing accepted it? By type, as above: a
+    `ConnectionRefusedError` anywhere in the cause chain (anyio folds several into an
+    `ExceptionGroup`, httpcore wraps that, httpx wraps httpcore), or the httpx/httpx2/httpcore
+    `ConnectError` both MCP transports raise around one. The distinction matters only in aggregate
+    (see `_aggregate_failure`): on a LOOPBACK address it means nothing on this machine holds the
+    port — DNS and routing cannot fail there, so a connect failure IS a refusal."""
+    seen: set[int] = set()
+
+    def _walk(e: BaseException | None) -> bool:
+        if e is None or id(e) in seen:
+            return False
+        seen.add(id(e))
+        if isinstance(e, ConnectionRefusedError):
+            return True
+        for module in ("httpx", "httpx2", "httpcore", "httpcore2"):
+            try:
+                if isinstance(e, __import__(module).ConnectError):
+                    return True
+            except (ImportError, AttributeError):
+                continue
+        if isinstance(e, BaseExceptionGroup) and any(_walk(sub) for sub in e.exceptions):
+            return True
+        return _walk(e.__cause__) or _walk(e.__context__)
+
+    return _walk(exc)
+
+
+def is_loopback_url(url: str) -> bool:
+    """Is this URL's host this machine's own loopback? localhost, 127.0.0.0/8, ::1 — the addresses
+    where "connection refused" means "no process holds that port", not "the network is down"."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 async def probe_stdio(name: str, command: str, args: list[str] | None = None,
@@ -293,8 +343,17 @@ async def probe_stdio(name: str, command: str, args: list[str] | None = None,
         return snap
 
 
-def _stderr_tail(errlog, limit: int = 200) -> str:
-    """The last line the server printed that looks like a real message.
+#: How much of a failed server's stderr survives into the label. The LAST line is usually a log
+#: path (`npm error A complete log … debug-0.log`), a closing brace (`npm WARN EBADENGINE }`) or a
+#: uv hint; the line that names the cause sits 2–30 lines above it. Keeping one line left 5 of 25
+#: local registry failures undiagnosable (mcpgawk-universe crawl, 2026-09-04, brief §1a).
+STDERR_LINES_KEPT = 20
+STDERR_JOIN = " ⏎ "
+
+
+def _stderr_tail(errlog, limit: int = 200, lines_kept: int = STDERR_LINES_KEPT) -> str:
+    """The last `lines_kept` lines the server printed that look like real messages, each redacted
+    and capped at `limit`, joined with `STDERR_JOIN` — the cause and the log path together.
 
     Only consulted when the probe FAILED, so package-manager chatter on a healthy start is never
     shown. Trailing blank lines and ANSI are stripped so the message reads as a sentence."""
@@ -312,7 +371,8 @@ def _stderr_tail(errlog, limit: int = 200) -> str:
     # can be exported as JSON and read by an agent. Redacting here means the raw text never
     # propagates, rather than relying on every downstream consumer to remember.
     from .redact import redact
-    return (redact(lines[-1]) or "")[:limit]
+    kept = [(redact(ln) or "")[:limit] for ln in lines[-lines_kept:]]
+    return STDERR_JOIN.join(ln for ln in kept if ln)
 
 
 def _no_redirect_http_client(headers=None, timeout=None, auth=None):
@@ -433,11 +493,11 @@ async def probe_url(name: str, url: str, headers: dict[str, str] | None = None,
             skipped.extend(c.label for c in cands[i + 1:])
             break
 
-    return _aggregate_failure(name, declared, attempts, skipped)
+    return _aggregate_failure(name, declared, attempts, skipped, url=url)
 
 
 def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, ServerSnapshot]],
-                       skipped: list[str]) -> ServerSnapshot:
+                       skipped: list[str], url: str | None = None) -> ServerSnapshot:
     """One honest error for the whole ladder. Reporting only the last attempt's error would be a
     lie by omission — the user needs to see that we tried the other transport and the other paths,
     or they will chase a "server down" that is really a typo (and vice versa)."""
@@ -452,6 +512,14 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         # the connection and went quiet says more than the ones that refused outright, and sends
         # the user somewhere different.
         kind = "timed-out"
+    elif url and kinds and kinds <= {"connect-failed"} and is_loopback_url(url):
+        # EVERY attempt was refused at a loopback address: no process on this machine holds that
+        # port. This is not "the server is down" — it is a stale entry, and the worse of the two
+        # stale shapes (2026-09-02, `palmier-pro` at 127.0.0.1:19789 with the app uninstalled):
+        # any process that binds the port answers AS this server to every client that already
+        # trusts the name. No planted file, no privilege, a free port. A dangling COMMAND at least
+        # needs a file written at a known path; this needs nothing. Named so the row can say it.
+        kind = "nothing-listening"
     else:
         kind = "unreachable"
 
@@ -472,6 +540,11 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     elif kind == "timed-out":
         head = ("no answer within the time budget — the connection was accepted and the server "
                 "never replied")
+    elif kind == "nothing-listening":
+        from urllib.parse import urlsplit
+        where = urlsplit(url or "").netloc or "its loopback address"
+        head = (f"nothing is listening on {where} — every attempt was refused. The entry is still "
+                f"configured, so whatever binds that port next answers as this server")
     else:
         head = (f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
                 f"{'s' if len(attempts) != 1 else ''}")
@@ -521,8 +594,19 @@ async def probe_held(session: ClientSession, entry: dict[str, Any],
     A second, hand-rolled listing would key or pin differently and manufacture drift between two
     views of one server.
     """
-    transport = "stdio" if entry.get("command") else entry.get("transport", "http")
-    snap = await _snapshot(session, name, transport)
+    # The transport is what the held session actually SPEAKS, not what the entry declares:
+    # `remote_login.held_session` opens a stdio pipe for a command and streamable HTTP for a URL,
+    # never SSE. `probe_url` records the candidate that answered, so an entry declaring `sse`
+    # over a server that speaks streamable HTTP is recorded as `http` by an ordinary scan — and
+    # stamping the declared word here would make the held view differ from it (`transport_changed`
+    # drift, or a different legacy key: manufactured drift between two views of one server, the
+    # exact class this function's docstring promises to avoid).
+    transport = "stdio" if entry.get("command") else "http"
+    # Bounded and converted like every other measuring path: a server that hangs or errors AFTER
+    # the sign-in must become an error row, not an exception thrown across the thread boundary
+    # that kills the whole scan (`_measure_through_signin` runs this via a future).
+    snap = await _bounded(lambda: _snapshot(session, name, transport), name, transport,
+                          DEFAULT_TIMEOUT)
     return replace(snap, credential_fingerprint=credential_fingerprint(entry),
                    login_id=entry.get(LOGIN_ID_KEY))
 
@@ -560,4 +644,15 @@ async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     # the order we try things in, never what we trust. See probe_url / transport.py.
     transport = entry.get("transport", "http")
     headers = entry.get("headers")
-    return await probe_url(name, url, headers, declared=transport)
+    auth = None
+    if entry.get("_refreshable_login"):
+        # The stored login, able to REFRESH — and refusing to open a browser. With a provider the
+        # permutation ladder is off, as it is for --login: a credential is offered to the URL the
+        # config names, never to guesses.
+        from .oauth_login import refresh_only_provider
+        auth = refresh_only_provider(str(entry["_refreshable_login"]))
+    if auth is None:
+        return await probe_url(name, url, headers, declared=transport)
+    # A refresh is one extra round trip to the token endpoint before the MCP handshake.
+    return await probe_url(name, url, headers, HTTP_TIMEOUT * 2, auth, declared=transport,
+                           permute=False)

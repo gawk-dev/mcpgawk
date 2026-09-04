@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -241,3 +242,102 @@ def test_appends_stay_inside_the_hot_path_budget(tmp_path):
         f"something structural changed on the hot path (this runs on EVERY MCP tool call)."
     )
     assert len(spool.read(path=str(path))) == n, "the timed appends must actually have landed"
+
+
+# --- the path a customer takes: no MCPGAWK_SPOOL, no package ---------------------------------- #
+
+def _run_hook_as_installed(tmp_path: Path, event: str) -> subprocess.CompletedProcess:
+    """The installed command runs guard_hook.py by ABSOLUTE PATH with no `MCPGAWK_SPOOL` set, so
+    the spool must find the store's directory itself, without a parent package. Every other test
+    here supplies `MCPGAWK_SPOOL`, which is exactly the input production never supplies."""
+    env = {k: v for k, v in os.environ.items() if k != "MCPGAWK_SPOOL"}
+    env["MCPGAWK_HISTORY"] = str(tmp_path / "store" / "history.json")
+    env["HOME"] = str(tmp_path)                     # belt: never the real ~/.mcpgawk
+    (tmp_path / "store").mkdir()
+    return subprocess.run([sys.executable, str(HOOK), "--format", "claude"], input=event,
+                          capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_hook_records_beside_the_store_when_no_spool_is_set(tmp_path):
+    """2026-09-03: `spool_path` gained `from . import history` and the installed hook — which
+    loads spool.py as a sibling FILE, with no parent package — raised ImportError inside `_record`,
+    which swallows it. Every MCP call in every session went unrecorded from that commit until the
+    founder's next hand-run, and the suite stayed green because each test set `MCPGAWK_SPOOL`."""
+    r = _run_hook_as_installed(tmp_path, _event(tool="mcp__plugin_figma_figma__whoami"))
+    assert r.returncode == 0, r.stderr
+    spooled = tmp_path / "store" / "calls.jsonl"
+    assert spooled.is_file(), f"nothing recorded beside the store; stderr={r.stderr!r}"
+    row = json.loads(spooled.read_text(encoding="utf-8").splitlines()[0])
+    assert (row["server"], row["tool"]) == ("plugin_figma_figma", "whoami")
+    assert not (tmp_path / ".mcpgawk" / "calls.jsonl").exists(), "wrote to the default, not beside the store"
+
+
+def _spool_as_the_hook_loads_it():
+    """spool.py the way `guard_hook._load_sibling` gets it: by file, no parent package, so
+    `from . import history` raises and the copied rule is the branch that runs."""
+    from mcpgawk import guard_hook
+    sys.modules.pop("_mcpgawk_spool", None)
+    mod = guard_hook._load_sibling("spool")
+    assert mod is not None and mod.__name__ == "_mcpgawk_spool"
+    return mod
+
+
+def test_spool_without_a_package_is_told_the_store_and_never_guesses(monkeypatch, tmp_path):
+    """Loaded the way the hook loads it, `spool_path()` must NOT derive the store's location
+    (only history.py / guard_hook.py may — test_layer_invariants) and must not fail silently: with
+    no `store_path` it raises loudly; with one it lands beside that store. Both `MCPGAWK_HISTORY`
+    forms agree with the package's `history.default_path()`."""
+    import pytest
+    from mcpgawk import history
+    sib = _spool_as_the_hook_loads_it()
+    monkeypatch.delenv("MCPGAWK_SPOOL", raising=False)
+    with pytest.raises(RuntimeError, match="must pass store_path"):
+        sib.spool_path()
+    for env in (str(tmp_path / "elsewhere" / "history.json"), None):
+        if env is None:
+            monkeypatch.delenv("MCPGAWK_HISTORY", raising=False)
+            monkeypatch.setenv("HOME", str(tmp_path))
+        else:
+            monkeypatch.setenv("MCPGAWK_HISTORY", env)
+        expect = os.path.join(os.path.dirname(os.path.abspath(history.default_path())), "calls.jsonl")
+        assert sib.spool_path(store_path=history.default_path()) == expect
+    assert sib.spool_path(store_path=history.default_path()) == str(tmp_path / ".mcpgawk" / "calls.jsonl")
+
+
+def test_every_sibling_loaded_module_guards_its_relative_imports():
+    """Twice now a `from .x import y` inside a module the hook loads by FILE has raised ImportError
+    where the caller swallows it: `runlog` (the hook silent "in the first place", per
+    `_load_sibling`'s docstring) and `spool.spool_path` (c2c7fd8, 2026-09-03, 14h of unrecorded
+    calls). A relative import in such a module is allowed ONLY inside a `try` that catches
+    ImportError (or a superclass) and falls back. Static, so every lazy branch is covered."""
+    import ast
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "mcpgawk"
+    hook_src = (src_dir / "guard_hook.py").read_text(encoding="utf-8")
+    targets = sorted(set(re.findall(r'_load_sibling\("([a-z_]+)"\)', hook_src)))
+    assert targets, "no _load_sibling targets found — did the loader move?"
+    unguarded: list[str] = []
+    for name in targets:
+        tree = ast.parse((src_dir / f"{name}.py").read_text(encoding="utf-8"))
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level > 0):
+                continue
+            guarded = False
+            up = parents.get(node)
+            while up is not None:
+                if isinstance(up, ast.Try) and any(
+                    h.type is None or (isinstance(h.type, ast.Name)
+                                       and h.type.id in {"ImportError", "Exception", "BaseException"})
+                    or (isinstance(h.type, ast.Tuple) and any(
+                        isinstance(e, ast.Name) and e.id in {"ImportError", "Exception", "BaseException"}
+                        for e in h.type.elts))
+                    for h in up.handlers):
+                    guarded = True
+                    break
+                up = parents.get(up)
+            if not guarded:
+                unguarded.append(f"{name}.py:{node.lineno}")
+    assert not unguarded, f"relative import(s) a by-file load cannot satisfy: {unguarded}"

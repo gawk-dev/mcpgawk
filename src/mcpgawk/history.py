@@ -564,7 +564,8 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     return base
 
 
-def approve(key: str, path: str | None = None) -> dict[str, Any] | None:
+def approve(key: str, path: str | None = None, *,
+            expect_pin: str | None = None) -> dict[str, Any] | None:
     """Adopt the most recent sighting of `key` as the approved baseline. Returns it.
 
     The explicit acknowledgement ADR-0012 requires. Until this runs, drift keeps reporting — and
@@ -581,9 +582,99 @@ def approve(key: str, path: str | None = None) -> dict[str, Any] | None:
         latest = last(store, key)
         if latest is None:
             return None
-        server_entry(store, key)["approved"] = latest
+        # ADOPT WHAT WAS REVIEWED, NOT WHAT IS NEWEST. `mcpgawk monitor approve` accepts the
+        # snapshot the operator looked at; between that look and this write the daemon may have
+        # recorded a newer sighting. Refusing inside the lock is the only place the check is
+        # airtight (2026-09-04, ledger 109).
+        if expect_pin is not None and str(latest.get("pin") or "") != str(expect_pin):
+            return None
+        entry = server_entry(store, key)
+        entry["approved"] = latest
+        # PROVENANCE. `cli status` has printed `approved —` since the field it reads was never
+        # written (2026-09-03); and "approved when, by whom" is the first thing a security team
+        # asks of a baseline ("Approved May 18 · By: Security Admin"). Single operator today, so
+        # `by` is the OS user at this host — honest, and the slot RBAC fills later.
+        entry["approved_at"] = _now_iso()
+        entry["approved_by"] = _operator()
         save(store, path)
     return latest
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _operator() -> str:
+    """`user@host` for the person running this command. Never a secret, never guessed."""
+    import getpass
+    import socket
+    try:
+        user = getpass.getuser()
+    except Exception:                                  # noqa: BLE001 — no passwd entry
+        user = "unknown"
+    return f"{user}@{socket.gethostname().split('.')[0]}"
+
+
+def approval_provenance(store: dict[str, Any], key: str) -> tuple[str | None, str | None]:
+    """(approved_at, approved_by) for a server, or (None, None) — absent is stated, not invented:
+    a baseline approved before these fields existed says so rather than borrowing its
+    measurement time."""
+    e = (store.get("servers") or {}).get(key) or {}
+    at, by = e.get("approved_at"), e.get("approved_by")
+    return (at if isinstance(at, str) else None), (by if isinstance(by, str) else None)
+
+
+def changed_within(store: dict[str, Any], days: int = 7,
+                   now: "float | None" = None) -> list[tuple[str, str]]:
+    """Servers whose surface first MOVED from its approved pin within the last `days`, as
+    `(key, first_changed_at)`. The fleet change rate an operator reads at a glance ("Changes
+    (7d): 12"), computed from the sightings already in the store — no new measurement.
+
+    "First moved" is the earliest sighting after the approval whose pin differs; a server that
+    changed three weeks ago and again yesterday counts by its first move, because the question
+    is "what started needing me this week", not "what is still pending".
+
+    HONEST ABOUT RETENTION: the store keeps a bounded number of sightings. If the OLDEST kept
+    sighting after the approval already differs, the first move happened at or before it and
+    cannot be dated — such a server is left OUT rather than dated by whatever survived
+    (browserstack, scanned daily, would otherwise have read "changed this week" for a change
+    from 19 days earlier, 2026-09-03). A move counts only when a kept sighting AT the approved
+    pin precedes the first differing one.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+    horizon = (now if now is not None else _time.time()) - days * 86400
+    out: list[tuple[str, str]] = []
+    for key, e in (store.get("servers") or {}).items():
+        if not isinstance(e, dict):
+            continue
+        approved = e.get("approved")
+        if not isinstance(approved, dict) or not approved.get("pin"):
+            continue
+        since = str(approved.get("measured_at") or "")
+        seen_at_pin = False
+        for sighting in e.get("history") or []:
+            if not isinstance(sighting, dict):
+                continue
+            at = str(sighting.get("measured_at") or "")
+            if at < since:
+                continue
+            if sighting.get("pin") == approved.get("pin"):
+                seen_at_pin = True
+                continue
+            if not seen_at_pin:
+                break                               # first move predates what was kept: undatable
+            try:
+                ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                break
+            if ts.timestamp() >= horizon:
+                out.append((key, at))
+            break                                   # the FIRST move decides; later ones do not
+    return sorted(out, key=lambda kv: kv[1], reverse=True)
 
 
 def mute_finding(name: str, finding_id: str, path: str | None = None,

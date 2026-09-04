@@ -126,7 +126,7 @@ async def test_fleet_scan_does_not_launch_local_servers_by_default(server, monke
         "local": {"command": "npx", "args": ["-y", "x"]},
         "remote": {"url": "https://example.com/mcp"},
     })
-    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda: [])
+    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda **kw: [])
     monkeypatch.setattr(mcp_server, "probe", fake_probe)
 
     payload = await _call(server, "scan_mcp_fleet", {})
@@ -144,7 +144,7 @@ async def test_fleet_scan_launches_locals_only_when_explicitly_asked(server, mon
         return ServerSnapshot(name=name, transport="stdio", protocol_version="1")
 
     monkeypatch.setattr(mcp_server, "discover_servers", lambda: {"local": {"command": "npx"}})
-    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda: [])
+    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda **kw: [])
     monkeypatch.setattr(mcp_server, "probe", fake_probe)
 
     await _call(server, "scan_mcp_fleet", {"launch_local": True})

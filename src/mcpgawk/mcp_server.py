@@ -64,7 +64,9 @@ async def _scan_fleet(launch_local: bool) -> dict[str, Any]:
     skipped = [(n, e) for n, e in configured.items() if not launch_local and e.get("command")]
     snaps = await asyncio.gather(*(probe(e, n) for n, e in targets)) if targets else []
     labels = [_label_of(s) for s in snaps]
-    rows = fleet.build_rows(labels, dict(targets), skipped, detect_unscannable())
+    from .cli import _known_names
+    rows = fleet.build_rows(labels, dict(targets), skipped,
+                            detect_unscannable(exclude=_known_names(dict(targets), skipped)))
     return fleet.to_json(rows)
 
 

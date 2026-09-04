@@ -1,0 +1,14 @@
+
+======================================================================
+mcpgawk 0.1.34 — LOCAL scan (no inventory uploaded)
+======================================================================
+
+● cli-http   [http]   AUTH REQUIRED
+    ✗ could not scan — authentication required — the endpoint is live but refused this scan; retry with `--login` or `--header "Authorization: Bearer …"`:
+  - http https://mcp.figma.com/mcp: OAuthRegistrationError: Registration failed: 403 Forbidden. This did NOT pass; it was not measured.
+      The endpoint is real — it needs credentials, not a different URL.
+
+────────────────────────────────────────────────────────────────
+1 server · 0 tools · 0 tokens loaded into every session · 0 can change or send data.
+Scanned locally — your server inventory never left this machine.
+

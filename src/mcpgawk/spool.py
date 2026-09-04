@@ -52,8 +52,31 @@ _VERBATIM_FIELDS = frozenset({"ts", "decision", "basis", "adapter"})
 _REDACTOR: tuple | None = None
 
 
-def spool_path() -> str:
-    return os.environ.get(SPOOL_ENV) or DEFAULT_SPOOL
+def spool_path(store_path: str | None = None) -> str:
+    """`MCPGAWK_SPOOL`, else beside the history store, else the default. Same rule as
+    `runlog.default_path`: test fixtures (`mutable-fixture`, `healthy-notes`, `never-heard-of`)
+    are on the founder's Agents page because suites that moved the store did not move this.
+
+    `store_path` is for the ONE caller that has no package: the agent hook loads this module as a
+    sibling FILE (guard_hook._load_sibling, so `mcpgawk/__init__` never runs on the hot path) and
+    `from . import history` raises there. From c2c7fd8 (2026-09-03) until this was caught that
+    ImportError landed inside `_record`, which swallows it, and the installed hook recorded NOTHING
+    while every test set `MCPGAWK_SPOOL` and passed. The hook is the single module allowed to know
+    the store's path (`tests/test_layer_invariants.py`), so it passes it in; this module derives
+    nothing itself.
+    """
+    explicit = os.environ.get(SPOOL_ENV)
+    if explicit:
+        return explicit
+    if store_path is None:
+        try:
+            from . import history              # the ONE module that knows where the store is
+        except ImportError as exc:             # loaded by file, no package: the hook's case
+            raise RuntimeError(
+                "spool loaded without a package: the caller must pass store_path"
+            ) from exc
+        store_path = history.default_path()
+    return os.path.join(os.path.dirname(os.path.abspath(store_path)), "calls.jsonl")
 
 
 def _rotate_if_large(path: str) -> None:

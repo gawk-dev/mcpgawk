@@ -108,7 +108,17 @@ PIN_BASIS = 2
 #: Records written before `b8174a3` landed carry basis 1. Ours is the timestamp we wrote, not
 #: anything a server says, so this is a fact about our own release history rather than a guess —
 #: and it retires itself: every record written from now on states its basis outright.
-_PIN_BASIS_2_FROM = "2026-07-23"
+#: The first PUBLISHED build that minted basis-2 pins: 0.1.7, uploaded to PyPI at this instant
+#: (`b8174a3` landed at 2026-07-22T20:17Z; a source checkout could mint basis 2 from then, but no
+#: installed copy could before this). A legacy record is placed by its own `measured_at` against
+#: THIS mark, and the safe error direction is deliberate: a record from before it is treated as
+#: basis 1 (pin skipped, said out loud), never as current (a permanent false alarm — the defect).
+#: THE RESIDUAL TAIL, stated plainly: a machine that kept running <=0.1.6 after this date wrote
+#: basis-1 pins with later timestamps, and nothing in such a record says which rule minted it —
+#: those baselines report a moved pin until re-approved. Measured 2026-09-03 on the founder's
+#: store: every legacy baseline from 07-23 on either matches a later basis-2 sighting's pin or
+#: shows real item changes, so no live instance here; the inference is a date, not a proof.
+_PIN_BASIS_2_FROM = "2026-07-23T08:17:41+00:00"
 
 
 def _item_signals(snap: ServerSnapshot) -> dict[str, list[str]]:
@@ -252,6 +262,14 @@ class DriftReport:
     #: is the difference between a typo fix and an attack, and it is what stops `approve --all`
     #: being indistinguishable from having no baseline.
     hostile: list[str] = field(default_factory=list)
+    #: The two DIFFERENT reasons an item is hostile, kept apart because they call for different
+    #: words: `injected` — the text gained an injection signature ("read the inserted text");
+    #: `escalated` — a declared capability grew (destructive / open-world) with no text needed.
+    #: The CLI headline and the Decisions page said "the new text reads like an ATTACK … read the
+    #: inserted text below" for an annotation-only change (browserstack, 2026-09-03), which sent
+    #: the reader looking for text that does not exist.
+    injected: list[str] = field(default_factory=list)
+    escalated: list[str] = field(default_factory=list)
     #: Set when the stored baseline cannot be TRUSTED against this build (it was written by a newer
     #: record schema). Not a diff and never silence: `any` is True so it reaches the report, the
     #: JSON and the exit code exactly as drift does — the one thing it must not do is look clean.
@@ -401,10 +419,23 @@ def _pin_basis_of(rec: dict[str, Any]) -> int | None:
     stated = rec.get("pin_basis")
     if isinstance(stated, int):
         return stated
-    at = rec.get("measured_at")
-    if not isinstance(at, str) or len(at) < 10:
+    at = _utc(rec.get("measured_at"))
+    if at is None:
         return None
-    return PIN_BASIS if at[:10] >= _PIN_BASIS_2_FROM else 1
+    return PIN_BASIS if at >= _utc(_PIN_BASIS_2_FROM) else 1
+
+
+def _utc(stamp: Any) -> Any:
+    """An ISO timestamp as an aware UTC datetime, or None if it cannot be read. A naive stamp is
+    taken as UTC — that is what this product has always written."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _fingerprints(rec: dict[str, Any]) -> tuple[dict[str, str], bool]:
@@ -577,6 +608,8 @@ def _with_severity(r: DriftReport) -> DriftReport:
     # A declared-capability escalation is hostile on its own terms — no text needs to have changed.
     escalated = {k for k in r.annotation_changed if r.escalations(k)}
     r.hostile = sorted(injected | escalated)
+    r.injected = sorted(injected)
+    r.escalated = sorted(escalated)
     return r
 
 
@@ -600,7 +633,9 @@ def _excerpt(text: str) -> str:
     return repr(flat)
 
 
-def render_headline(names: list[str], hostile: list[str] | None = None) -> str:
+def render_headline(names: list[str], hostile: list[str] | None = None,
+                    injected: list[str] | None = None,
+                    escalated: list[str] | None = None) -> str:
     """The first thing a fleet scan says when something changed.
 
     Drift used to print AFTER the fleet list, under a wall of token counts — so the one finding a
@@ -615,10 +650,25 @@ def render_headline(names: list[str], hostile: list[str] | None = None) -> str:
     if hostile:
         # Not all change is equal, and the headline must not flatten them. A rewrite that added an
         # injection signature is the thing this product exists to catch; saying it in the same voice
-        # as a typo fix is how it gets approved away.
-        h = ", ".join(hostile)
-        return (f"  ⛔ {n} {what} CHANGED, and the new text reads like an ATTACK: {h}\n"
-                f"     Do NOT approve until you have read the inserted text below.")
+        # as a typo fix is how it gets approved away. And the two hostile kinds must not be
+        # flattened into each other either: "read the inserted text" for a server whose only
+        # change is a tool declaring itself destructive sends the reader after text that is not
+        # there. Say which it is, per server, and count the hostile ones, not the changed ones.
+        inj = [x for x in (injected or []) if x in hostile] if injected is not None else []
+        esc = [x for x in (escalated or []) if x in hostile] if escalated is not None else []
+        if injected is None and escalated is None:
+            inj = list(hostile)                       # older callers: text was the only kind
+        lines = []
+        if inj:
+            lines.append(f"  ⛔ {n} {what} CHANGED, and on {', '.join(inj)} the new text reads "
+                         f"like an ATTACK.")
+            lines.append("     Do NOT approve until you have read the inserted text below.")
+        if esc:
+            lines.append((f"  ⛔ {n} {what} CHANGED, and " if not inj else "     Also: ")
+                         + f"{', '.join(esc)} now DECLARES MORE POWER than you approved "
+                         f"(a tool marked itself destructive or open-world).")
+            lines.append("     Do NOT approve until you have read what it gained below.")
+        return "\n".join(lines)
     return (f"{head}\n"
             f"     Review the change below, then `mcpgawk approve <name>` to accept it.")
 
@@ -653,7 +703,10 @@ def render(name: str, r: DriftReport) -> str:
                 f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     if when:
-        head = f"    ⟳ DRIFT on {name} — changed {when}, after you approved it:"
+        # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
+        # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say
+        # what the timestamp is.
+        head = f"    ⟳ DRIFT on {name} — changed since you approved it {when}:"
     elif r.prev_at:
         head = f"    ⟳ DRIFT on {name} — changed since {r.prev_at}, after you approved it:"
     else:

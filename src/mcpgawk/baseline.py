@@ -142,7 +142,11 @@ def export(path: str | None = None) -> dict[str, Any]:
         out[key] = {
             "pin": rec.get("pin"),
             "tools": dict(rec.get("tools") or {}),
-            "approved_at": rec.get("measured_at"),
+            # The approval's OWN time and actor when recorded (2026-09-03 on); before that the
+            # sighting's measurement time stood in for it, and `approved_by` is honestly absent.
+            "approved_at": entry.get("approved_at"),      # None until the approval itself is dated
+            "approved_by": entry.get("approved_by"),
+            "measured_at": rec.get("measured_at"),        # the sighting's time — a different fact
             "aliases": list(entry.get("aliases") or []),
             "annotations": {
                 ident[len("tool."):]: dict(ann)
@@ -257,6 +261,22 @@ def record_observed(key: str, *, pin: str, tools: dict[str, str], measured_at: s
     if annotations is not None:
         rec["annotations"] = {f"tool.{name}": dict(ann) for name, ann in annotations.items()}
     history.record(key, rec, path=path, alias=alias)
+
+
+def last_pin(key: str, path: str | None = None) -> str | None:
+    """The pin of the newest SIGHTING under `key` (approved or not), or None. Lets a writer that
+    holds only a pin decide whether a full record for it already exists — the daemon's reduced
+    sighting must never land on top of the full one intake just wrote (ledger 109)."""
+    store = history.load(path or history.default_path())
+    latest = history.last(store, key)
+    return str(latest.get("pin")) if latest and latest.get("pin") else None
+
+
+def approve_full(key: str, *, expect_pin: str, path: str | None = None) -> dict[str, Any] | None:
+    """Adopt the newest FULL sighting as the approved baseline — but only if it is the one the
+    operator reviewed (`expect_pin`). None when there is no such record: the caller then falls back
+    to `publish`, which can only carry hashes. Gated like every approve."""
+    return history.approve(key, path=path, expect_pin=expect_pin)
 
 
 def resolve(name: str, path: str | None = None) -> str | None:

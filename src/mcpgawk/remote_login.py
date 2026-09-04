@@ -408,6 +408,25 @@ def inband_setup(command: str, args: list[str], env: dict[str, str],
         return None
 
 
+def _clip_notice(text: str, limit: int = 400) -> str:
+    """The server's own notice, bounded, cut at a LINE — never mid-URL. `text[:400]` left kite's
+    notice ending in `…session_id=kitemcp-dbb5f5a5-4bd7-4abb-bf80-fdf2a9c8` (founder's paste,
+    2026-09-03): a link that looks broken, one line above the real one."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = max(head.rfind("\n"), head.rfind(". "))
+    if cut < limit // 2:
+        cut = head.rfind(" ")
+    return head[:cut if cut > 0 else limit].rstrip() + " …"
+
+
+class HeldSessionEnded(RuntimeError):
+    """Raised by a `HeldSession` method once its session is gone. A caller falls back to the
+    ordinary probe and says so; it must never surface as a traceback in the middle of a scan."""
+
+
 class HeldSession:
     """A live MCP session, kept open, that the caller can MEASURE THROUGH.
 
@@ -435,7 +454,24 @@ class HeldSession:
 
     def _run(self, coro: Any, timeout: float) -> Any:
         import asyncio
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+        # The hold is five minutes from CONNECT, and the caller may be waiting on a person at a
+        # browser for longer than that. Once the loop has stopped, `run_coroutine_threadsafe`
+        # raises a bare `RuntimeError: Event loop is closed` (or the future never resolves) —
+        # which, uncaught, took the whole scan down with a traceback. Say what actually happened.
+        if self._loop.is_closed() or not self._thread.is_alive():
+            coro.close()
+            raise HeldSessionEnded("the held session has already ended — the hold expired "
+                                   "or the server closed it — so nothing can be measured "
+                                   "through it")
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+        except RuntimeError as e:
+            # Only claim "the session ended" when it HAS: `.result()` also re-raises whatever the
+            # coroutine itself raised, and a server-side RuntimeError must keep its own name.
+            if self._loop.is_closed() or not self._thread.is_alive():
+                raise HeldSessionEnded(f"the held session ended while it was being used: "
+                                       f"{e}") from e
+            raise
 
     def authorisation(self, timeout: float = 60.0) -> tuple[bool, str]:
         """Re-call the server's OWN login tool; report (authorised, the server's words).
@@ -482,6 +518,7 @@ class HeldSession:
 
 def held_session(url: str | None = None, *, command: str | None = None,
                  args: list[str] | None = None, env: dict[str, str] | None = None,
+                 headers: dict[str, str] | None = None,
                  hold_seconds: float = 300.0,
                  connect_timeout: float = 45.0) -> HeldSession | None:
     """Drive a server's in-band `login` tool and KEEP THE SESSION ALIVE, handing back a handle.
@@ -519,7 +556,7 @@ def held_session(url: str | None = None, *, command: str | None = None,
                 if not hit:
                     out.put(None)
                     return False
-                out.put(HeldSession(auth_url=hit.group(0).rstrip(".,)*`"), notice=text[:400],
+                out.put(HeldSession(auth_url=hit.group(0).rstrip(".,)*`"), notice=_clip_notice(text),
                                     login_tool=name, loop=loop, session=session, stop=stop,
                                     thread=threading.current_thread()))
                 return True
@@ -536,12 +573,26 @@ def held_session(url: str | None = None, *, command: str | None = None,
                 from mcp.client.stdio import StdioServerParameters, stdio_client
                 params = StdioServerParameters(command=command, args=list(args or []),
                                                env=dict(env or {}))
-                async with stdio_client(params) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await hold(session)
+                # The child's stderr is CAPTURED, as `probe_stdio` captures it: through the
+                # inherited stderr, mcp-remote's `[pid] [Local→Remote] tools/call` chatter and its
+                # shutdown `DOMException [AbortError]` stack trace landed in the middle of the
+                # founder's report (live kite walk, 2026-09-03). Noise on success; on failure the
+                # ordinary probe's own path is the one that reads it back.
+                import tempfile
+                with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
+                                            errors="replace") as errlog:
+                    async with stdio_client(params, errlog=errlog) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await hold(session)
             elif url:
                 from mcp.client.streamable_http import streamable_http_client
-                async with streamable_http_client(url) as streams:
+                from mcp.client.streamable_http import create_mcp_http_client
+                # The entry's own headers ride along, as they do on every ordinary probe: a
+                # server behind a static token would otherwise refuse the held session while
+                # accepting the scan, and the sign-in would be reported as "does not sign in
+                # through a login tool of its own" for a reason that is not the real one.
+                http_client = create_mcp_http_client(headers=dict(headers or {}))
+                async with streamable_http_client(url, http_client=http_client) as streams:
                     async with ClientSession(streams[0], streams[1]) as session:
                         await hold(session)
 

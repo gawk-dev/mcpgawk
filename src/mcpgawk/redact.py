@@ -48,7 +48,10 @@ _SECRETS = [
     # The paired username of a credential. On its own a username is not a secret, but sitting next to
     # an assignment in the same config it is half of a working login.
     re.compile(r"(?i)\b(?:[\w.-]+[_.\-])?(?:user(?:name)?|login|account)[\"']?\s*[:=]\s*[\"']?\S{8,}"),
-    re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+\S+"),
+    # `(?![<…])`: our own retry hint reads `--header "Authorization: Bearer …"`, and the alert
+    # table showed it as `--header "[REDACTED]` — advice mangled by the redactor (2026-09-03). A
+    # placeholder (`…`, `<token>`) is not a credential.
+    re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+(?![<…])\S+"),
 ]
 
 #: Personal data. Emails are the realistic leak in a description; card-shaped digit runs are rare

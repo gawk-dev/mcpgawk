@@ -272,8 +272,10 @@ def _actions(exfil_c: int, write_c: int, ac: dict[str, Any], heavy: bool,
     acts: list[str] = []
     if exfil_c or write_c:
         acts.append("If you don't need write access, connect with a read-only token instead.")
-    acts.append("Re-scan with --track before you trust it again — descriptions are the surface "
-                "that gets rewritten, and that rewrite is the attack.")
+    # No "with <the tracking flag>": tracking has been the default since drift detection shipped,
+    # and advice naming a flag the reader already has teaches them the default is off (2026-09-03).
+    acts.append("Re-scan before you trust it again — every scan is compared against this one, and "
+                "descriptions are the surface that gets rewritten; that rewrite is the attack.")
     top = _dominates(tools, cost) if heavy else None
     if top:
         acts.append(f"Disable the tools you never call — {top['name']} alone costs "
@@ -397,6 +399,13 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
                          "right, the server is not responding.")
             lines.append("      Check its own logs: a hang here is usually a missing credential it "
                          "is waiting on, a lock, or a slow first-run install.")
+        elif x.get("error_kind") == "nothing-listening":
+            # A free loopback port is a stale entry, not a down server — and "is it a live MCP
+            # endpoint?" would send the reader to check a URL that was right when the app existed.
+            lines.append("      Nothing on this machine holds that port. If the app was uninstalled, "
+                         "remove this entry:")
+            lines.append("      until then, any process that binds the port answers as this server "
+                         "to every client that trusts the name.")
         elif x.get("error_kind") == "server-failed":
             # It launched and printed a reason (already in `detail` above). Asking whether the URL
             # is really an MCP endpoint would be absurd here — there is no URL, and the server ran.
@@ -478,8 +487,15 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"    ⚠  {lead} {s.get('tool', '?')} ({kind}){detail}")
     if live_signals:
         # Design-contract item 4: the false-positive affordance is discoverable at the moment of
-        # the false positive, not buried in --help.
-        lines.append(f"       wrong? keep it visible but muted:  mcpgawk wrong {label['name']} <tool>/<kind>")
+        # the false positive, not buried in --help. THE EXACT COMMAND, not a placeholder: the
+        # report printed `<tool>/<kind>` verbatim under a config finding (2026-09-03), leaving
+        # the reader to reverse-engineer the id from the line above it.
+        ids = [f"{s.get('tool', '?')}/{s.get('kind', '?')}"
+               for s in (x.get("bounded_signals") or []) if not s.get("muted")]
+        first = ids[0] if ids else "<tool>/<kind>"
+        more = f"   (or: {', '.join(ids[1:3])}{'…' if len(ids) > 3 else ''})" if len(ids) > 1 else ""
+        lines.append(f"       wrong? keep it visible but muted:  mcpgawk wrong {label['name']} "
+                     f"{first}{more}")
 
     if verbose:
         lines.append(f"    coverage: {x['tool_count']} tools, {x['prompt_count']} prompts, {x['resource_count']} resources")
