@@ -338,9 +338,29 @@ async def probe_stdio(name: str, command: str, args: list[str] | None = None,
                 # something on startup, so this hit the common case. Keep what it managed to say
                 # either way: the words are useful, the CLASSIFICATION is what must not change.
                 kind = "timed-out" if snap.error_kind == "timed-out" else "server-failed"
-                snap = replace(snap, error=f"{snap.error} — the server said: {detail}",
+                hint = _cause_hint(detail)
+                snap = replace(snap, error=f"{snap.error} — the server said: {detail}"
+                                     + (f" — hint: {hint}" if hint else ""),
                                error_kind=kind)
         return snap
+
+
+def _cause_hint(detail: str) -> str | None:
+    """A next step for the two failure causes the registry crawl saw most (ledger 114, from
+    mcpgawk-universe's 52-server run): six packages ship no console script named after
+    themselves — uv prints the fix itself, so quote uv verbatim; and two servers die on
+    `mcp.server.fastmcp`, which mcp 2.x renamed. Additive text only: `error_kind` and the
+    "the server said:" prefix the crawl parses are untouched. None for everything else."""
+    if not detail:
+        return None
+    for line in detail.split(" ⏎ "):
+        stripped = line.strip()
+        if stripped.startswith("Use `uvx --from ") and stripped.endswith("instead."):
+            return stripped                       # uv's own sentence is the fix; do not paraphrase
+    if "No module named 'mcp.server.fastmcp'" in detail:
+        return ("the server imports FastMCP from mcp<2, which mcp 2.x renamed to "
+                "`mcp.server.mcpserver`; run it with `mcp<2` pinned, or ask its publisher to migrate")
+    return None
 
 
 #: How much of a failed server's stderr survives into the label. The LAST line is usually a log

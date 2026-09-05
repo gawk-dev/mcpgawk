@@ -69,6 +69,37 @@ def test_stderr_tail_is_empty_when_the_server_said_nothing():
         assert _stderr_tail(fh) == ""
 
 
+# --- ledger 114: the two failure causes the registry crawl saw most get a next step ------------- #
+
+def test_uvs_own_from_line_is_quoted_verbatim_as_the_hint():
+    from mcpgawk.probe import _cause_hint
+    detail = ("error: Failed to spawn: `truesignal` ⏎   Caused by: No such file or directory ⏎ "
+              "Use `uvx --from truesignal-cli truesignal-mcp` instead.")
+    assert _cause_hint(detail) == "Use `uvx --from truesignal-cli truesignal-mcp` instead."
+
+
+def test_the_fastmcp_rename_gets_the_pin_or_migrate_hint():
+    from mcpgawk.probe import _cause_hint
+    hint = _cause_hint("Traceback ⏎ ModuleNotFoundError: No module named 'mcp.server.fastmcp'")
+    assert hint and "mcp<2" in hint and "mcp.server.mcpserver" in hint
+
+
+def test_an_unrecognised_cause_gets_no_invented_hint():
+    from mcpgawk.probe import _cause_hint
+    assert _cause_hint("Error: Cannot find module '/srv/dist/index.js'") is None
+    assert _cause_hint("") is None
+
+
+def test_the_hint_rides_on_the_real_probe_error_after_what_the_server_said():
+    snap = asyncio.run(probe_stdio(
+        "nosuchscript", "sh",
+        ["-c", "echo 'Use `uvx --from demo-cli demo-mcp` instead.' >&2; exit 1"], timeout=10))
+    assert snap.error and snap.error_kind == "server-failed"
+    said, _, hint = snap.error.partition(" — hint: ")
+    assert "the server said:" in said                       # the crawl's prefix, untouched
+    assert hint == "Use `uvx --from demo-cli demo-mcp` instead."
+
+
 # --- asked once means asked once ---------------------------------------------------------------- #
 
 def test_the_scan_does_not_re_ask_after_the_front_door_asked(monkeypatch):
