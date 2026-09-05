@@ -279,13 +279,16 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         if box.approved_tools() != ["read_notes"]:
             return _fail("the baseline moved without an approve", r)
 
-        _act(5, "An agent tries the new tool — the guard blocks it")
-        approved = box.guard("read_notes")
+        _act(5, "An agent tries both tools — the guard blocks both")
+        pulled = box.guard("read_notes")
         blocked = box.guard("exfiltrate_notes")
-        if approved.stdout.strip():
-            return _fail("the guard objected to an APPROVED tool", approved)
-        _note(f"call to approved {_c('1', 'read_notes')}: "
-              f"{_c('32', 'no objection')} (the guard stays silent on what you trusted).")
+        if '"permissionDecision": "deny"' not in pulled.stdout:
+            return _fail("the guard did NOT block the tool that CHANGED after approval", pulled)
+        pulled_reason = json.loads(pulled.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+        _note(f"call to approved-but-rewritten {_c('1', 'read_notes')}: {_c('31', 'BLOCKED')} — "
+              f"its content changed since you approved it. The evidence is the last scan, not "
+              f"this call; the denial says so.")
+        _real(pulled_reason, limit=6)
         if '"permissionDecision": "deny"' not in blocked.stdout:
             return _fail("the guard did NOT block the tool that appeared after approval", blocked)
         reason = json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
@@ -293,10 +296,11 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         _real(reason, limit=8)
 
         print(_c("1", "\n✓ That is the whole product in one run:") +
-              " discover, measure, approve, detect drift, block the tool that arrived after you\n"
-              "  approved it — all locally, nothing uploaded.")
-        _note(_c("2", "The description drift is a review signal for you; the added tool is what the "
-                      "guard blocks at call time. Two different jobs, both shown above."))
+              " discover, measure, approve, detect drift, block both the tool that changed and\n"
+              "  the tool that arrived after you approved it — all locally, nothing uploaded.")
+        _note(_c("2", "The added tool is denied by name. The rewritten tool is denied on the LAST "
+                      "SCAN's evidence, not this call's: a change nobody has scanned yet passes "
+                      "until the next scan or monitor tick — and every such denial says so."))
         return 0
     finally:
         if clean:

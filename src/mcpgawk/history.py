@@ -381,6 +381,20 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             # (so the hook can deny loudly rather than infer from absence) — see HANDOFF.
             row = {"tools": dict(rec["tools"]),
                    "aliases": list(entry.get("aliases") or [])}
+            # THE LAST SIGHTING, so the hook can deny the rug-pull it could never see: the hook
+            # cannot list a server per call, but every scan and every monitor tick already writes
+            # a full record into `history[]`. Its `{tool: hash}` and `measured_at` ride along as
+            # `seen`/`seen_at`; the decision core compares `seen[tool]` against the approved hash
+            # and the reason names the sighting time — a deny on the last sighting, not on this
+            # call (2026-09-05, slice 1 of docs/plan-mcpgawk-fit-readiness-friction-2026-09-05.md).
+            # Absent when the server has no sighting at all: an older projection reads the same.
+            sightings = entry.get("history")
+            last = sightings[-1] if isinstance(sightings, list) and sightings else None
+            if isinstance(last, dict) and isinstance(last.get("tools"), dict):
+                row["seen"] = dict(last["tools"])
+                measured = last.get("measured_at")
+                if isinstance(measured, str):
+                    row["seen_at"] = measured
             # The APPROVED parameter names per tool, so the hook can catch the smuggled-field
             # rug-pull at call time: a schema widened after approval breaks nothing by itself,
             # but an agent FILLING a parameter the human never approved — and one shaped like a

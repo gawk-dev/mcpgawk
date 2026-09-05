@@ -240,7 +240,8 @@ def recorder_health(path: str | None = None) -> dict | None:
 
 def record_decision(*, server: str, tool: str, decision: str, adapter: str,
                     session: str | None = None, reason: str | None = None,
-                    basis: str = "declared", path: str | None = None) -> bool:
+                    basis: str = "declared", path: str | None = None,
+                    reason_code: str | None = None) -> bool:
     """The one record shape every enforcement adapter writes, so the hook, the proxy and anything
     added later cannot describe the same event differently.
 
@@ -258,6 +259,7 @@ def record_decision(*, server: str, tool: str, decision: str, adapter: str,
         "basis": basis,
         "adapter": adapter,
         **({"reason": reason} if reason else {}),
+        **({"reason_code": reason_code} if reason_code else {}),
     }, path=path)
 
 

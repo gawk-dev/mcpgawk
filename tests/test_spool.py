@@ -59,7 +59,8 @@ def test_tool_arguments_never_reach_the_spool(tmp_path):
     assert written.strip(), "the call was not recorded at all"
     assert "TOP-SECRET-VALUE" not in written
     row = json.loads(written.splitlines()[0])
-    assert set(row) <= {"ts", "session", "server", "tool", "decision", "basis", "adapter", "reason"}
+    assert set(row) <= {"ts", "session", "server", "tool", "decision", "basis", "adapter", "reason",
+                        "reason_code"}
 
 
 # --- the availability property --------------------------------------------------------------- #

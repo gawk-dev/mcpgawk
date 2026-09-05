@@ -46,15 +46,22 @@ def test_demo_baseline_holds_across_the_rug_pull(tmp_path, capsys):
     assert box.projection.is_file(), "the guard projection was never generated"
 
 
-def test_demo_guard_blocks_the_new_tool_and_clears_the_approved_one(tmp_path, capsys):
+def test_demo_guard_blocks_both_the_rewritten_tool_and_the_new_tool(tmp_path, capsys):
     """Re-run the two hook calls against the finished sandbox and assert the verdicts directly,
-    rather than trusting the demo's own printed summary."""
+    rather than trusting the demo's own printed summary. Since 2026-09-05 (slice 1) the approved
+    tool whose description was rewritten is denied too — on the last scan's evidence, and the
+    denial says so."""
     rc = _run(tmp_path)
     assert rc == 0, capsys.readouterr().out
     box = _Sandbox(tmp_path / "box")
-    approved = box.guard("read_notes")
+    pulled = box.guard("read_notes")
     blocked = box.guard("exfiltrate_notes")
-    assert approved.stdout.strip() == "", "the guard objected to an APPROVED tool"
+    assert '"permissionDecision": "deny"' in pulled.stdout, \
+        "the guard did not block the approved tool whose content changed"
+    pulled_reason = json.loads(pulled.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "CHANGED since you approved it" in pulled_reason
+    assert "last seen" in pulled_reason and "not this call" in pulled_reason
+    assert "mcpgawk approve" not in pulled_reason
     assert '"permissionDecision": "deny"' in blocked.stdout, \
         "the guard did not block the tool that appeared after approval"
     reason = json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
@@ -84,4 +91,4 @@ def test_demo_runs_from_the_shipped_entry_point(tmp_path):
         [sys.executable, "-m", "mcpgawk.cli", "demo", "--sandbox", str(box), "--clean"],
         capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
-    assert "BLOCKED" in r.stdout and "no objection" in r.stdout
+    assert "BLOCKED" in r.stdout and "CHANGED since you approved" in r.stdout

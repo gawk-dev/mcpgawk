@@ -28,6 +28,9 @@ def _fixture_state() -> dict:
         "denied_servers": {"github"}, "session_calls": [], "fleet_calls": [],
         "hooks": {}, "hook_health": {}, "adapters": {}, "no_hook": {}, "runs": [],
         "observed": {}, "verified_runs": {}, "findings": [], "verify_at": "", "verify_blocked": None,
+        "verified": {"notion": {"at": "2026-09-03T10:00:00Z", "backend": "proxy", "status": "clean",
+                                "transport": "http", "checks_planned": 4, "checks_completed": 4,
+                                "complete": True}},
         "monitor": {}, "gateway": {"installed": False},
         "entries": {
             "notion": {"url": "https://mcp.notion.com/mcp",
@@ -43,7 +46,14 @@ def _fixture_state() -> dict:
                                                           "tools": {"search": {"description": "d"}}},
                                              "history": [{"pin": "abc", "measured_at": "t",
                                                           "tools": {"search": {}},
-                                                          "headers": {"Authorization": PLANTED_HEADER}}]}}},
+                                                          "headers": {"Authorization": PLANTED_HEADER}}]},
+                            "mcp:local": {"aliases": ["local"],
+                                          "approved": {"pin": "l1", "measured_at": "t0",
+                                                       "tools": {"run": {}}, "transport": "stdio"},
+                                          "approved_at": "2026-09-02T09:00:00+00:00",
+                                          "approved_by": "someone@host",
+                                          "history": [{"pin": "l2", "measured_at": "t1",
+                                                       "tools": {"run": {}}}]}}},
     }
 
 
@@ -123,3 +133,47 @@ def test_an_unknown_object_never_leaks_its_repr():
     body = json.dumps(panel.api_state(d), sort_keys=True)
     assert PLANTED_ENV not in body and "PLANTED" not in body
     assert json.loads(body)["monitor"]["client"] == "Holder"
+
+
+def test_each_server_carries_what_a_confidence_line_needs():
+    """Slice 3 (2026-09-05): approval provenance, the last sighting, the tier, pending, calls seen
+    and the verify facts — joined in one request, and absent stated as null, never invented."""
+    doc = panel.api_state(_fixture_state())
+    notion = doc["store"]["servers"]["mcp:notion"]
+    local = doc["store"]["servers"]["mcp:local"]
+    # provenance: absent is null (approved before the fields existed), present is verbatim
+    assert notion["approved"]["at"] is None and notion["approved"]["by"] is None
+    assert local["approved"]["at"] == "2026-09-02T09:00:00+00:00"
+    assert local["approved"]["by"] == "someone@host"
+    # the last sighting, by time and pin
+    assert local["seen_at"] == "t1" and local["seen_pin"] == "l2"
+    # tier is one of the panel's own, and computed for THIS server
+    assert notion["tier"] in {t for t, _, _ in panel.TIERS}
+    assert notion["pending"] is False and local["pending"] is False
+    assert notion["calls_seen"] == 1 and local["calls_seen"] == 0
+    # verify facts joined by config name; the sandbox says what it could do
+    assert notion["verified"]["at"] == "2026-09-03T10:00:00Z"
+    assert notion["sandbox"] == "proxy"
+    assert local["verified"] is None and local["sandbox"] == "not verified"
+    assert "verified" in doc and doc["verified"]["notion"]["checks_completed"] == 4
+
+
+def test_a_cli_scanned_server_is_joined_by_its_bare_identity():
+    """No config name, no alias a client uses: the hook still records `bare` for `mcp:bare`."""
+    d = _fixture_state()
+    d["store"]["servers"]["mcp:bare"] = {"aliases": [], "approved": {"pin": "b", "tools": {"t": {}}},
+                                        "history": []}
+    d["recent_calls"].append({"ts": "2026-09-05T07:00:00Z", "session": None, "server": "bare",
+                              "tool": "t", "decision": "deny", "basis": "declared",
+                              "adapter": "claude-code"})
+    row = panel.api_state(d)["store"]["servers"]["mcp:bare"]
+    assert row["calls_seen"] == 1 and row["tier"] == "blocked"
+
+
+def test_a_remote_server_without_a_verify_says_not_exercised():
+    d = _fixture_state()
+    d["verified"] = {}
+    d["store"]["servers"]["mcp:notion"]["approved"]["transport"] = "http"
+    doc = panel.api_state(d)
+    assert doc["store"]["servers"]["mcp:notion"]["sandbox"] == "not exercised (remote)"
+    assert doc["store"]["servers"]["mcp:notion"]["verified"] is None

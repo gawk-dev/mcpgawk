@@ -43,6 +43,16 @@ def _approved(tools: dict[str, str], aliases: list[str] | None = None) -> dict:
     return rec
 
 
+def _approved_then_seen(approved: dict[str, str], seen: dict[str, str],
+                        seen_at: str = "2026-09-05T06:00:00+00:00") -> dict:
+    """An approved record plus a LATER sighting (what every scan and the monitor daemon append to
+    `history[]`) — the shape the projection turns into `seen`/`seen_at`."""
+    rec = _approved(approved)
+    rec["history"] = [dict(rec["approved"]),
+                      {"pin": "def456", "tools": seen, "measured_at": seen_at}]
+    return rec
+
+
 # --------------------------------------------------------------------------- name parsing
 
 
@@ -617,3 +627,104 @@ def test_a_smuggled_credential_fill_is_denied_through_the_real_hook(tmp_path):
                    "tool_input": {"city": "London", "units": "metric"}}, Path(store))[0] is None
     assert decide({"tool_name": "mcp__figma__get_weather",
                    "tool_input": {"city": "London", "sort_order": "asc"}}, Path(store))[0] is None
+
+
+# --------------------------------------------------------------------------- the rug-pull, in the free path
+# Slice 1 (2026-09-05): the hook cannot list a server per call, so it denies on the LAST SIGHTING
+# the projection carries. The reason must say so — evidence, not reassurance.
+
+def test_a_rewritten_approved_tool_is_denied_from_the_last_sighting(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1"}, {"search": "h2"})})
+    out, _note = decide({"tool_name": "mcp__notes__search", "tool_input": {}}, store)
+    assert out is not None
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "CHANGED since you approved it" in reason
+    assert "last seen 2026-09-05T06:00:00+00:00" in reason      # the sighting, not "now"
+    assert "not this call" in reason                            # the honesty limit, in every deny
+    assert "mcpgawk approve" not in reason                      # no remedy the agent could run
+    assert "Tell the user" in reason
+
+
+def test_a_sighting_equal_to_the_approval_still_passes(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1"}, {"search": "h1"})})
+    assert decide({"tool_name": "mcp__notes__search", "tool_input": {}}, store)[0] is None
+
+
+def test_a_sighting_without_the_tool_does_not_deny_on_missing_evidence(tmp_path):
+    # The last sighting lacks the tool (removed server-side, or a partial scan): no hash to
+    # compare, so the name-membership verdict stands — missing evidence is never a deny.
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1"}, {"other": "h9"})})
+    assert decide({"tool_name": "mcp__notes__search", "tool_input": {}}, store)[0] is None
+
+
+def test_a_never_approved_server_with_sightings_still_defers(tmp_path):
+    from mcpgawk import history
+    p = tmp_path / "history.json"
+    history.save({"servers": {"notes": {"history": [
+        {"pin": "x", "tools": {"search": "h2"}, "measured_at": "2026-09-05T06:00:00+00:00"}]}}},
+        str(p))
+    assert decide({"tool_name": "mcp__notes__search", "tool_input": {}}, p)[0] is None
+
+
+def test_an_older_projection_without_seen_keeps_the_name_only_verdict(tmp_path):
+    """A projection written by a build before `seen` existed must read exactly as before —
+    the hook never crashes on, and never invents evidence from, an absent field."""
+    from mcpgawk import history
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1"}, {"search": "h2"})})
+    proj = Path(history.projection_path(str(store)))
+    raw = json.loads(proj.read_text())
+    for row in raw["servers"].values():
+        row.pop("seen", None)
+        row.pop("seen_at", None)
+    proj.write_text(json.dumps(raw))            # source stamp untouched: still "fresh"
+    assert decide({"tool_name": "mcp__notes__search", "tool_input": {}}, store)[0] is None
+
+
+# --------------------------------------------------------------------------- slice 2: the person is told, the record says why
+
+def _calls(store: Path) -> list[dict]:
+    hits = list(store.parent.rglob("calls.jsonl"))
+    assert hits, "no calls.jsonl beside the redirected store"
+    return [json.loads(l) for l in hits[0].read_text().splitlines() if l.strip()]
+
+
+def test_a_deny_tells_the_person_in_one_line_and_records_why(tmp_path):
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    proc = _run_hook({"tool_name": "mcp__figma__evil", "tool_input": {}}, store)
+    payload = json.loads(proc.stdout)
+    line = payload["systemMessage"]
+    assert "\n" not in line and "figma.evil" in line
+    assert "mcpgawk approve" not in line and "MCPGAWK_APPROVE" not in line
+    assert "was not there when you approved" in line
+    row = _calls(store)[-1]
+    assert row["decision"] == "deny" and row["reason_code"] == "tool-added"
+    assert "SECURITY BLOCK" in row["reason"]
+
+
+def test_a_rewritten_tool_deny_is_coded_as_changed(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1"}, {"search": "h2"})})
+    proc = _run_hook({"tool_name": "mcp__notes__search", "tool_input": {}}, store)
+    payload = json.loads(proc.stdout)
+    assert "content changed since you approved it" in payload["systemMessage"]
+    assert _calls(store)[-1]["reason_code"] == "tool-changed"
+
+
+def test_a_pass_records_no_reason_and_no_line(tmp_path):
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    proc = _run_hook({"tool_name": "mcp__figma__get_file", "tool_input": {}}, store)
+    assert proc.stdout.strip() == ""
+    row = _calls(store)[-1]
+    assert row["decision"] == "allow" and "reason" not in row and "reason_code" not in row
+
+
+def test_the_person_line_is_claude_code_only(tmp_path):
+    """Cursor treats an unknown top-level key as a malformed hook — and a malformed hook ALLOWS."""
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_SCRIPT), "--format", "cursor"],
+        input=json.dumps({"tool_name": "mcp__figma__evil", "tool_input": {}}), text=True,
+        capture_output=True, env={"MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
+                                 "HOME": str(store.parent)}, timeout=60)
+    payload = json.loads(proc.stdout)
+    assert payload["permission"] == "deny" and "systemMessage" not in payload

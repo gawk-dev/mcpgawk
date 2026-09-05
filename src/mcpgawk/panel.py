@@ -201,12 +201,29 @@ def collect() -> dict[str, Any]:
     #: the subprocess's stdout and vanished on restart.
     data["findings"] = []
     data["verify_at"] = ""
+    # EVERY verified server, not only those with findings (slice 3, 2026-09-05): a clean server's
+    # `verifiedAt` and sandbox backend never left the report file, so the API could not say
+    # "verified in a sandbox on <date>" for exactly the servers that earned it.
+    data["verified"] = {}
     try:
         rep = behaviour_profile_path().parent / "last-verify.json"
         if rep.is_file():
             _r = json.loads(rep.read_text(encoding="utf-8"))
             data["verify_at"] = _r.get("generatedAt") or _r.get("at") or ""
             for s in (_r.get("servers") or []):
+                if isinstance(s, dict) and s.get("server"):
+                    data["verified"][str(s["server"])] = {
+                        "at": s.get("verifiedAt") or data["verify_at"] or None,
+                        "backend": s.get("sandboxBackend"),
+                        "degraded": s.get("sandboxDegradedReason"),
+                        "status": s.get("status"),
+                        "transport": s.get("transport"),
+                        "tools_checked": s.get("toolsChecked"),
+                        "checks_planned": s.get("checksPlanned"),
+                        "checks_completed": s.get("checksCompleted"),
+                        "complete": s.get("complete"),
+                        "incomplete_reasons": [str(x) for x in (s.get("incompleteReasons") or [])][:4],
+                    }
                 for f in (s.get("findings") or []):
                     # The written report is FLAT (code/class/severity/tool at top level). The first
                     # version of this read f["candidate"]["toolName"] — the shape of the in-memory
@@ -1987,7 +2004,7 @@ API_SCHEMA = 1
 API_ALLOWED = ("errors", "discovery_problems", "unscannable", "pending", "activity",
                "denied_servers", "hooks", "hook_health", "adapters", "no_hook", "runs",
                "observed", "verified_runs", "findings", "verify_at", "verify_blocked",
-               "monitor", "gateway", "recent_calls")
+               "monitor", "gateway", "recent_calls", "verified")
 #: Present in `collect()`, deliberately NOT in the API as-is: the two wide call windows are
 #: thousands of rows (a consumer wants the agent→server tree, served as `tree` instead); `entries`
 #: and `store` are PROJECTED below rather than copied.
@@ -2006,9 +2023,21 @@ def _api_entry(entry: dict) -> dict:
     return out
 
 
-def _api_store(store: dict) -> dict:
-    """The approved surface per server: names, pin, when, tool NAMES. Never the raw record."""
+def _api_store(store: dict, d: dict | None = None) -> dict:
+    """The approved surface per server: names, pin, when, tool NAMES. Never the raw record.
+
+    With `d` (the whole `collect()` dict) each server also carries what a machine consumer needs to
+    compose a confidence line without a second request: WHO approved and WHEN (absent is `null`,
+    never the measurement time), the last sighting, the tier, whether a decision is pending, the
+    calls seen, and the verify facts joined from the report by config name. `sandbox` says in
+    words what the sandbox could and could not do — "not exercised (remote)" is a statement, not a
+    gap to paper over."""
+    from . import history as _history
     servers = {}
+    entries = (d or {}).get("entries") or {}
+    verified_by_name = (d or {}).get("verified") or {}
+    pending = set((d or {}).get("pending") or [])
+    calls = (d or {}).get("fleet_calls") or (d or {}).get("recent_calls") or []
     for key, se in ((store or {}).get("servers") or {}).items():
         if not isinstance(se, dict):
             continue
@@ -2023,9 +2052,36 @@ def _api_store(store: dict) -> dict:
                 sorted(str(t.get("name")) for t in tools if isinstance(t, dict)) if isinstance(tools, list) else []
             return {"pin": rec.get("pin"), "measured_at": rec.get("measured_at"),
                     "login_id": rec.get("login_id"), "tools": names}
-        servers[str(key)] = {"aliases": list(se.get("aliases") or []),
-                             "approved": _surface(approved), "last": _surface(last),
-                             "history_len": len(hist), "retired": se.get("retired")}
+        row = {"aliases": list(se.get("aliases") or []),
+               "approved": _surface(approved), "last": _surface(last),
+               "history_len": len(hist), "retired": se.get("retired")}
+        at, by = _history.approval_provenance(store or {}, str(key))
+        if row["approved"] is not None:
+            row["approved"]["at"] = at            # null for a baseline approved before the field
+            row["approved"]["by"] = by
+        row["seen_at"] = last.get("measured_at") if last else None
+        row["seen_pin"] = last.get("pin") if last else None
+        if d is not None:
+            aliases = [str(a) for a in (se.get("aliases") or [])]
+            # The hook records the name the agent CALLED: the config name for a configured server,
+            # the bare identity (`fixture` for `mcp:fixture`) for one scanned from the CLI.
+            bare = str(key).split(":", 1)[-1]
+            names = [n for n in entries if n in aliases] or [bare]
+            row["tier"] = _classify(names[0], str(key), d)
+            row["pending"] = str(key) in pending
+            seen_by = set(names) | set(aliases) | {str(key), bare}
+            row["calls_seen"] = sum(1 for c in calls if isinstance(c, dict)
+                                    and str(c.get("server")) in seen_by)
+            ver = next((verified_by_name[n] for n in names if n in verified_by_name), None)
+            row["verified"] = ver
+            transport = ((approved or last or {}).get("transport")) or (ver or {}).get("transport")
+            if ver and ver.get("backend"):
+                row["sandbox"] = str(ver["backend"])
+            elif transport in ("http", "sse"):
+                row["sandbox"] = "not exercised (remote)"
+            else:
+                row["sandbox"] = "not verified"
+        servers[str(key)] = row
     return {"servers": servers}
 
 
@@ -2057,7 +2113,7 @@ def api_state(d: dict[str, Any]) -> dict[str, Any]:
             out[k] = _api_jsonable(d[k])
     out["entries"] = {str(n): _api_entry(e) for n, e in (d.get("entries") or {}).items()
                       if isinstance(e, dict)}
-    out["store"] = _api_jsonable(_api_store(d.get("store") or {}))
+    out["store"] = _api_jsonable(_api_store(d.get("store") or {}, d))
     try:
         out["tree"] = _api_jsonable(agent_server_tree(d))
     except Exception as exc:                       # noqa: BLE001 — the rest of the state still ships

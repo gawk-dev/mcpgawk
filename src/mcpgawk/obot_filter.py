@@ -55,7 +55,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import guard_hook, spool
+from . import decision as decision_core, guard_hook, spool
 
 #: The adapter name in the shared decision record. One name, so the panel, `status` and any
 #: export can tell a gateway-side ruling from the client-side hook without inspecting anything.
@@ -159,7 +159,7 @@ def _evaluate(hook_input: dict[str, Any], server: str | None,
 
     event = {"tool_name": tool_name,
              "tool_input": arguments if isinstance(arguments, dict) else {}}
-    output, note, basis, checked = guard_hook._decide(
+    output, note, basis, checked, _reason = guard_hook._decide(
         event, Path(store_path) if store_path is not None else None, "claude")
 
     if output is not None:
@@ -266,5 +266,6 @@ def _record(verdict: dict[str, Any], server: str, tool: str, decision: str, basi
     not, because a gateway sees every method and burying the rulings would defeat the trail."""
     if record:
         spool.record_decision(server=server, tool=tool, decision=decision, adapter=ADAPTER,
-                              reason=reason, basis=basis, path=spool_path)
+                              reason=reason, basis=basis, path=spool_path,
+                              reason_code=decision_core.reason_code(reason) if decision == "deny" else None)
     return verdict
