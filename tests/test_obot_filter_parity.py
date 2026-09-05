@@ -46,7 +46,7 @@ def _hook_sequence(store: Path) -> bool:
     denied = False
     for tool in ("read_secrets", "send_out"):
         event = {"tool_name": f"mcp__toybox__{tool}", "tool_input": {}, "session_id": "sess-1"}
-        out, _note, basis, _checked, _reason = guard_hook._decide(event, store, "claude")
+        out, _note, basis, _checked, _reason, _context = guard_hook._decide(event, store, "claude")
         denied = out is not None
         spool.record_decision(server="toybox", tool=tool, adapter="guard", session="sess-1",
                               decision="deny" if out else "defer", basis=basis)
@@ -123,7 +123,7 @@ def test_the_declared_tier_denies_identically_on_both_paths(flow):
     """Where the two paths DO agree, they must agree exactly — a tool outside the approved surface
     is refused by hook and filter alike, with the same sentence."""
     event = {"tool_name": "mcp__toybox__brand_new_tool", "tool_input": {}, "session_id": "s"}
-    hook_out, _n, _b, _c, _r = guard_hook._decide(event, flow, "claude")
+    hook_out, _n, _b, _c, _r, _ctx = guard_hook._decide(event, flow, "claude")
     assert hook_out is not None
 
     verdict = obot_filter.evaluate(

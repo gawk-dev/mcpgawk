@@ -159,7 +159,7 @@ def _evaluate(hook_input: dict[str, Any], server: str | None,
 
     event = {"tool_name": tool_name,
              "tool_input": arguments if isinstance(arguments, dict) else {}}
-    output, note, basis, checked, _reason = guard_hook._decide(
+    output, note, basis, checked, _reason, _context = guard_hook._decide(
         event, Path(store_path) if store_path is not None else None, "claude")
 
     if output is not None:

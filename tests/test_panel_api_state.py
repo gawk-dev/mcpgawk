@@ -177,3 +177,42 @@ def test_a_remote_server_without_a_verify_says_not_exercised():
     doc = panel.api_state(d)
     assert doc["store"]["servers"]["mcp:notion"]["sandbox"] == "not exercised (remote)"
     assert doc["store"]["servers"]["mcp:notion"]["verified"] is None
+
+
+def test_a_sub_agents_call_survives_projection_to_the_api():
+    d = _fixture_state()
+    d["recent_calls"].append({"ts": "2026-09-05T08:00:00Z", "session": "s", "server": "notion",
+                              "tool": "search", "decision": "allow", "basis": "declared",
+                              "adapter": "claude-code", "agent_id": "agent-7", "agent_type": "Explore"})
+    calls = panel.api_state(d)["recent_calls"]
+    assert calls[-1]["agent_id"] == "agent-7" and calls[-1]["agent_type"] == "Explore"
+
+
+def test_observed_hosts_come_from_the_newest_run_that_contains_the_server(tmp_path, monkeypatch):
+    """Slice 7: a single-server verify must not blank the rest of the fleet's evidence."""
+    runs = tmp_path / "verify-runs"
+    older = runs / "2026-09-01T00-00-00Z"; newer = runs / "2026-09-02T00-00-00Z"
+    older.mkdir(parents=True); newer.mkdir()
+    (older / "audit.jsonl").write_text("\n".join([
+        json.dumps({"type": "raw-observation", "server": "alpha", "tool": "fetch", "attempt": 1,
+                    "egress": [{"host": "api.alpha.io:443", "hostname": "api.alpha.io", "allowed": True},
+                               {"host": "evil.example:443", "hostname": "evil.example", "allowed": False}]}),
+        json.dumps({"type": "raw-observation", "server": "alpha", "tool": "fetch", "attempt": 2,
+                    "egress": [{"hostname": "api.alpha.io", "allowed": True}]}),
+        json.dumps({"type": "check", "server": "alpha"}),
+        "not json at all",
+    ]) + "\n")
+    (newer / "audit.jsonl").write_text(json.dumps(
+        {"type": "raw-observation", "server": "beta", "tool": "list", "attempt": 1, "egress": []}) + "\n")
+    monkeypatch.setattr(panel, "verify_runs_dir", lambda: runs)
+    index = panel.observed_hosts_index()
+    assert index["alpha"]["fetch"] == [{"host": "api.alpha.io", "allowed": True},
+                                       {"host": "evil.example", "allowed": False}]
+    assert index["beta"] == {"list": []}
+    d = _fixture_state()
+    d["entries"]["alpha"] = {"command": "node", "_clients": ["claude-code"], "_aliases": ["alpha"]}
+    d["store"]["servers"]["mcp:alpha"] = {"aliases": ["alpha"],
+                                          "approved": {"pin": "a", "tools": {"fetch": {}}}, "history": []}
+    row = panel.api_state(d)["store"]["servers"]["mcp:alpha"]
+    assert row["hosts_seen"]["fetch"][0]["host"] == "api.alpha.io"
+    assert panel.api_state(d)["store"]["servers"]["mcp:notion"]["hosts_seen"] is None

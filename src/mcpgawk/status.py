@@ -251,7 +251,7 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
     return "\n".join(out)
 
 
-def collect_and_render() -> str:
+def collect() -> dict:
     """Gather from every store and render. Each probe is independently guarded: one unreadable
     store must degrade THAT LINE, never blank the whole answer — a status command that dies is a
     status command that gets replaced by guessing."""
@@ -375,7 +375,7 @@ def collect_and_render() -> str:
     except Exception:                              # noqa: BLE001
         behavioural_unavailable = None
 
-    return render(hook_health=hook_health, guard_path=guard_path, agents=agents,
+    return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   agents_error=agents_error,
                   baseline_total=baseline_total, pending=pending,
                   baseline_error=baseline_error,
@@ -383,3 +383,70 @@ def collect_and_render() -> str:
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
                   behavioural_unavailable=behavioural_unavailable,
                   monitor_open=monitor_open, unprotected=unprotected)
+
+
+def collect_and_render() -> str:
+    """Gather from every store and render — the text face of `collect()`."""
+    return render(**collect())
+
+
+STATUS_SCHEMA = "gawk.status/1"
+
+
+def to_json(collected: dict, panel_data: dict | None = None) -> dict:
+    """The machine face of `mcpgawk status` (slice 4, 2026-09-05): the same facts the text renders,
+    plus the per-server rows a supervising agent — or a client with no hook (VS Code, Claude
+    Desktop) — needs to compose a confidence line. Server rows are `panel.state()`'s (its first
+    caller: ledger 117) merged with `/api/state`'s per-key provenance, last sighting and verify
+    facts, from ONE `panel.collect()`. Absent is `null`; a store that could not be read is an
+    `errors` entry, never a calm empty list."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    hook_health = collected.get("hook_health") or {}
+    capable = _hook_capable()
+    agents_rows = []
+    for client, n in sorted((collected.get("agents") or {}).items()):
+        hook = hook_health.get(client)
+        if hook is None:
+            hook = "off" if client in capable else "unsupported"
+        agents_rows.append({"client": client, "label": _label(client), "servers": int(n),
+                            "hook": hook})
+
+    out: dict = {
+        "schema": STATUS_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "agents": agents_rows,
+        "servers": None,
+        "activity": collected.get("activity"),
+        "pending": list(collected.get("pending") or []),
+        "baseline_total": collected.get("baseline_total"),
+        "muted_total": collected.get("muted_total"),
+        "behaviour_tools": collected.get("behaviour_tools"),
+        "behavioural_unavailable": collected.get("behavioural_unavailable"),
+        "enforce_available": bool(collected.get("enforce_available")),
+        "unprotected": collected.get("unprotected"),
+        "monitor_open": collected.get("monitor_open"),
+        "last_activity": collected.get("last_activity"),
+        "errors": {k: v for k, v in (("agents", collected.get("agents_error")),
+                                     ("baseline", collected.get("baseline_error"))) if v},
+    }
+    try:
+        from . import panel
+        d = panel_data if panel_data is not None else panel.collect()
+        rows = panel.state(d)["servers"]
+        by_key = panel._api_store(d.get("store") or {}, d)["servers"]
+        for row in rows:
+            extra = by_key.get(row.get("key") or "") or {}
+            row["approved"] = extra.get("approved")
+            row["seen_at"] = extra.get("seen_at")
+            row["seen_pin"] = extra.get("seen_pin")
+            row["pending"] = extra.get("pending", False)
+            row["verified"] = extra.get("verified")
+            row["sandbox"] = extra.get("sandbox")
+            row["hosts_seen"] = extra.get("hosts_seen")
+        out["servers"] = panel._api_jsonable(rows)
+    except Exception as exc:                       # noqa: BLE001 — status never dies; it says so
+        out["errors"]["servers"] = f"{type(exc).__name__}: {exc}"
+    _json.dumps(out)                               # serialisable, or raise HERE not at the printer
+    return out

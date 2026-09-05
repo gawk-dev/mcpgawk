@@ -241,7 +241,8 @@ def recorder_health(path: str | None = None) -> dict | None:
 def record_decision(*, server: str, tool: str, decision: str, adapter: str,
                     session: str | None = None, reason: str | None = None,
                     basis: str = "declared", path: str | None = None,
-                    reason_code: str | None = None) -> bool:
+                    reason_code: str | None = None, agent_id: str | None = None,
+                    agent_type: str | None = None) -> bool:
     """The one record shape every enforcement adapter writes, so the hook, the proxy and anything
     added later cannot describe the same event differently.
 
@@ -260,6 +261,11 @@ def record_decision(*, server: str, tool: str, decision: str, adapter: str,
         "adapter": adapter,
         **({"reason": reason} if reason else {}),
         **({"reason_code": reason_code} if reason_code else {}),
+        # Inside a Claude Code sub-agent the event carries who is calling (hooks docs: common input
+        # fields `agent_id`/`agent_type`), so a supervising agent can attribute a call to the
+        # sub-agent that made it. Absent in the main conversation and on other clients.
+        **({"agent_id": agent_id} if agent_id else {}),
+        **({"agent_type": agent_type} if agent_type else {}),
     }, path=path)
 
 

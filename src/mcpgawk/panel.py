@@ -1336,6 +1336,53 @@ def verify_runs_dir() -> Path:
     return behaviour_profile_path().parent / "verify-runs"
 
 
+def observed_hosts_index(max_runs: int = 20) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """`{server: {tool: [{"host", "allowed"}]}}` from the verify evidence archive — every host each
+    tool was OBSERVED contacting, including on attempts that found nothing (slice 7, 2026-09-05).
+    Per server the NEWEST run that contains that server wins, not `dirs[-1]`: a single-server
+    verify no longer speaks for the rest of the fleet. Bounded to the newest `max_runs` runs.
+    Empty on any failure: absent evidence is stated by the caller, never invented here."""
+    index: dict[str, dict[str, dict[str, bool]]] = {}
+    runs = verify_runs_dir()
+    try:
+        dirs = sorted((p for p in runs.iterdir() if p.is_dir()), key=lambda p: p.name,
+                      reverse=True)[:max_runs]
+    except OSError:
+        return {}
+    for run in dirs:
+        seen_here: dict[str, dict[str, dict[str, bool]]] = {}
+        try:
+            with (run / "audit.jsonl").open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if ev.get("type") != "raw-observation":
+                        continue
+                    server, tool = str(ev.get("server")), str(ev.get("tool"))
+                    hosts = seen_here.setdefault(server, {}).setdefault(tool, {})
+                    for item in (ev.get("egress") or []):
+                        if isinstance(item, dict):
+                            host = item.get("hostname") or item.get("host")
+                            allowed = bool(item.get("allowed"))
+                        else:
+                            host, allowed = str(item), False
+                        if host:
+                            hosts[str(host)] = hosts.get(str(host), False) or allowed
+        except OSError:
+            continue
+        for server, tools in seen_here.items():
+            if server not in index:            # newest run containing THIS server wins
+                index[server] = tools
+    return {s: {t: [{"host": h, "allowed": a} for h, a in sorted(hs.items())]
+                for t, hs in sorted(tools.items())}
+            for s, tools in index.items()}
+
+
 def finding_timeline(server: str, tool: str, code: str = "") -> dict[str, Any]:
     """Every reproduction ATTEMPT behind one finding, newest run, in order.
 
@@ -2036,6 +2083,12 @@ def _api_store(store: dict, d: dict | None = None) -> dict:
     servers = {}
     entries = (d or {}).get("entries") or {}
     verified_by_name = (d or {}).get("verified") or {}
+    hosts_index: dict = {}
+    if d is not None:
+        try:
+            hosts_index = observed_hosts_index()
+        except Exception:                          # noqa: BLE001 — evidence absent, not invented
+            hosts_index = {}
     pending = set((d or {}).get("pending") or [])
     calls = (d or {}).get("fleet_calls") or (d or {}).get("recent_calls") or []
     for key, se in ((store or {}).get("servers") or {}).items():
@@ -2074,6 +2127,9 @@ def _api_store(store: dict, d: dict | None = None) -> dict:
                                     and str(c.get("server")) in seen_by)
             ver = next((verified_by_name[n] for n in names if n in verified_by_name), None)
             row["verified"] = ver
+            # What each tool was OBSERVED contacting, from the evidence archive; None when this
+            # server was never in a run (a remote server: "not exercised" lives in `sandbox`).
+            row["hosts_seen"] = next((hosts_index[n] for n in names if n in hosts_index), None)
             transport = ((approved or last or {}).get("transport")) or (ver or {}).get("transport")
             if ver and ver.get("backend"):
                 row["sandbox"] = str(ver["backend"])
@@ -4110,10 +4166,11 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
 # derivation of its own; `state()` is `collect()` made transportable.
 # --------------------------------------------------------------------------------------------- #
 
-def state() -> dict[str, Any]:
+def state(d: dict[str, Any] | None = None) -> dict[str, Any]:
     """The whole panel payload, JSON-safe. One request, because the panel has one view of the
-    machine and splitting it into six endpoints would let them disagree mid-refresh."""
-    d = collect()
+    machine and splitting it into six endpoints would let them disagree mid-refresh.
+    `d` lets a caller that already ran `collect()` (status --json) reuse it."""
+    d = d if d is not None else collect()
     store = d.get("store") or {}
     servers = store.get("servers") or {}
     entries = d.get("entries") or {}

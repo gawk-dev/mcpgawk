@@ -713,7 +713,7 @@ def test_a_rewritten_tool_deny_is_coded_as_changed(tmp_path):
 def test_a_pass_records_no_reason_and_no_line(tmp_path):
     store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
     proc = _run_hook({"tool_name": "mcp__figma__get_file", "tool_input": {}}, store)
-    assert proc.stdout.strip() == ""
+    assert "permissionDecision" not in proc.stdout and "additionalContext" in proc.stdout
     row = _calls(store)[-1]
     assert row["decision"] == "allow" and "reason" not in row and "reason_code" not in row
 
@@ -728,3 +728,92 @@ def test_the_person_line_is_claude_code_only(tmp_path):
                                  "HOME": str(store.parent)}, timeout=60)
     payload = json.loads(proc.stdout)
     assert payload["permission"] == "deny" and "systemMessage" not in payload
+
+
+# --------------------------------------------------------------------------- slice 5: the confidence line
+
+def _hook(event: dict, store: Path, fmt: str = "claude") -> subprocess.CompletedProcess:
+    argv = [sys.executable, str(HOOK_SCRIPT)] + (["--format", fmt] if fmt != "claude" else [])
+    return subprocess.run(argv, input=json.dumps(event), text=True, capture_output=True, timeout=60,
+                          env={"MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
+                               "HOME": str(store.parent)})
+
+
+def _approved_with_provenance() -> dict:
+    rec = _approved_then_seen({"search": "h1"}, {"search": "h1"}, seen_at="2026-09-05T06:00:00+00:00")
+    rec["approved_at"] = "2026-09-02T09:00:00+00:00"
+    return rec
+
+
+def test_a_checked_pass_gives_the_agent_one_line_of_context_and_no_permission_decision(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_with_provenance()})
+    proc = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "permissionDecision" not in json.dumps(payload)     # context is not a verdict
+    assert ctx.startswith("mcpgawk: notes · search — at your baseline")
+    assert "approved 2026-09-02T09:00:00+00:00" in ctx and "last seen 2026-09-05T06:00:00+00:00" in ctx
+    assert "not verified" in ctx                               # no profile beside this store
+    assert "mcpgawk approve" not in ctx
+    row = _calls(store)[-1]
+    assert row["decision"] == "allow"                          # recorded as a pass, not a deny
+
+
+def test_the_line_fires_once_per_session_per_tool_and_again_for_another_tool(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_then_seen({"search": "h1", "list": "h2"},
+                                                            {"search": "h1", "list": "h2"})})
+    first = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    second = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    other = _hook({"tool_name": "mcp__notes__list", "tool_input": {}, "session_id": "s1"}, store)
+    fresh = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s2"}, store)
+    assert first.stdout.strip() and second.stdout.strip() == ""
+    assert other.stdout.strip() and fresh.stdout.strip()
+
+
+def test_a_never_approved_server_is_told_every_time(tmp_path):
+    store = _store(tmp_path, {"other": _approved({"x": "h"})})
+    a = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    b = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    for proc in (a, b):
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "not approved on this machine" in ctx and "person at the keyboard" in ctx
+        assert "permissionDecision" not in proc.stdout
+
+
+def test_a_degraded_hook_says_not_checked_in_context_too(tmp_path):
+    from mcpgawk import history
+    store = _store(tmp_path, {"notes": _approved({"search": "h1"})})
+    Path(history.projection_path(str(store))).write_text("{not json")
+    proc = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"}, store)
+    ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("mcpgawk: notes · search — NOT checked:") and "deferring" in ctx
+
+
+def test_the_context_line_is_claude_code_only(tmp_path):
+    store = _store(tmp_path, {"notes": _approved_with_provenance()})
+    for fmt in ("codex", "cursor", "gemini"):
+        proc = _hook({"tool_name": "mcp__notes__search", "tool_input": {}, "session_id": "s1"},
+                     store, fmt=fmt)
+        assert proc.stdout.strip() == "" and proc.returncode == 0, fmt
+
+
+def test_a_deny_carries_no_context_line(tmp_path):
+    store = _store(tmp_path, {"notes": _approved({"search": "h1"})})
+    proc = _hook({"tool_name": "mcp__notes__evil", "tool_input": {}, "session_id": "s1"}, store)
+    payload = json.loads(proc.stdout)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "additionalContext" not in payload["hookSpecificOutput"]
+
+
+# --------------------------------------------------------------------------- slice 6: sub-agent attribution
+
+def test_a_sub_agents_call_is_attributed_on_the_record(tmp_path):
+    store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
+    _run_hook({"tool_name": "mcp__figma__get_file", "tool_input": {}, "session_id": "s1",
+               "agent_id": "agent-7", "agent_type": "Explore"}, store)
+    row = _calls(store)[-1]
+    assert row["agent_id"] == "agent-7" and row["agent_type"] == "Explore"
+    _run_hook({"tool_name": "mcp__figma__get_file", "tool_input": {}, "session_id": "s1"}, store)
+    row = _calls(store)[-1]
+    assert "agent_id" not in row and "agent_type" not in row       # main conversation: absent

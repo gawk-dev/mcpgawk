@@ -388,6 +388,9 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             # and the reason names the sighting time — a deny on the last sighting, not on this
             # call (2026-09-05, slice 1 of docs/plan-mcpgawk-fit-readiness-friction-2026-09-05.md).
             # Absent when the server has no sighting at all: an older projection reads the same.
+            approved_at = entry.get("approved_at")
+            if isinstance(approved_at, str):
+                row["approved_at"] = approved_at      # for the confidence line; absent = not recorded
             sightings = entry.get("history")
             last = sightings[-1] if isinstance(sightings, list) and sightings else None
             if isinstance(last, dict) and isinstance(last.get("tools"), dict):

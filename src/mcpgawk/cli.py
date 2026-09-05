@@ -653,13 +653,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--port", type=int, default=7717, help="local port (default: 7717)")
     d.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
-    sub.add_parser(
+    st = sub.add_parser(
         "status",
         help="is anything watching, against what, and when did it last see something",
         description="One answer to 'am I protected'. Read-only — opens nothing, starts nothing. "
                     "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
                     "Claude Code only, so a single cheerful tick would tell a Cursor user they "
                     "are covered when they are not.")
+    st.add_argument("--json", action="store_true",
+                    help="the same facts as JSON (schema gawk.status/1), plus one row per server "
+                         "with approval provenance, last sighting, tier and verify facts — for "
+                         "a supervising agent or a client with no hook")
     cu = sub.add_parser(
         "checkup",
         help="run the WHOLE product on this machine and capture what happened — start here",
@@ -1778,8 +1782,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return serve(port=args.port, open_browser=not args.no_open)
 
     if args.cmd == "status":
-        from .status import collect_and_render
-        print(collect_and_render())
+        from .status import collect, collect_and_render, to_json
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps(to_json(collect()), indent=2, sort_keys=True))
+        else:
+            print(collect_and_render())
         return 0
 
     if args.cmd == "checkup":

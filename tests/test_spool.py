@@ -60,7 +60,7 @@ def test_tool_arguments_never_reach_the_spool(tmp_path):
     assert "TOP-SECRET-VALUE" not in written
     row = json.loads(written.splitlines()[0])
     assert set(row) <= {"ts", "session", "server", "tool", "decision", "basis", "adapter", "reason",
-                        "reason_code"}
+                        "reason_code", "agent_id", "agent_type"}
 
 
 # --- the availability property --------------------------------------------------------------- #

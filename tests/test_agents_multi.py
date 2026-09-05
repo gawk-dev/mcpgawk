@@ -29,6 +29,17 @@ APPROVED = {"servers": {"mcp:notes": {"aliases": ["notes"],
                                       "approved": {"tools": {"read_note": "h1"}}}}}
 
 
+
+def _no_verdict(out: str) -> bool:
+    """A pass may carry CONTEXT for the agent (Claude Code only, slice 5, 2026-09-05) — never a
+    verdict: no permissionDecision, no Cursor `permission`, no Gemini `decision`."""
+    if not out.strip():
+        return True
+    payload = json.loads(out)
+    return ("permissionDecision" not in out and "permission" not in payload
+            and "decision" not in payload
+            and "additionalContext" in (payload.get("hookSpecificOutput") or {}))
+
 def _store(tmp_path: Path) -> Path:
     # Through the canonical writer, so the hot-path projection the hook enforces from exists.
     from mcpgawk import history
@@ -64,7 +75,7 @@ def test_an_approved_tool_passes_in_every_dialect(tmp_path, fmt):
     args = json.dumps({}) if fmt == "cursor" else {}
     r = _run(fmt, {"tool_name": "mcp__notes__read_note", "tool_input": args}, store)
     assert r.returncode == 0
-    assert not r.stdout.strip(), "an approved call must produce no verdict at all"
+    assert _no_verdict(r.stdout), "an approved call must produce no verdict at all"
 
 
 def test_cursor_gets_cursors_shape_not_claudes(tmp_path):
@@ -537,7 +548,7 @@ def test_the_free_hook_blocks_an_observed_sink_after_an_observed_source(tmp_path
     the observed basis — no paid engine anywhere in this test."""
     src = {"tool_name": "mcp__mail__read_inbox", "tool_input": {}, "session_id": "sess-b4"}
     r1 = _run_behavioural(tmp_path, src, _PROFILE)
-    assert r1.returncode == 0 and not r1.stdout.strip(), "the source call itself defers"
+    assert r1.returncode == 0 and _no_verdict(r1.stdout), "the source call itself defers"
 
     sink = {"tool_name": "mcp__notes__read_note", "tool_input": {}, "session_id": "sess-b4"}
     r2 = _run_behavioural(tmp_path, sink, _PROFILE)
@@ -560,7 +571,7 @@ def test_a_different_session_does_not_inherit_the_source(tmp_path):
     _run_behavioural(tmp_path, src, _PROFILE)
     sink = {"tool_name": "mcp__notes__read_note", "tool_input": {}, "session_id": "sess-two"}
     r = _run_behavioural(tmp_path, sink, _PROFILE)
-    assert r.returncode == 0 and not r.stdout.strip()
+    assert r.returncode == 0 and _no_verdict(r.stdout)
 
 
 def test_the_profile_never_clears_a_declared_deny_in_the_hook(tmp_path):
@@ -589,4 +600,4 @@ def test_no_profile_leaves_the_hook_exactly_as_before(tmp_path):
         env={"MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(tmp_path / "c.jsonl"),
              "GAWK_BEHAVIOUR": str(tmp_path / "absent.json"),
              "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
-    assert r.returncode == 0 and not r.stdout.strip()
+    assert r.returncode == 0 and _no_verdict(r.stdout)
