@@ -4,6 +4,26 @@ import type { Observation, VulnCheck } from "./checks.js";
 import type { ToolAnnotations } from "./classify.js";
 import { type ExecutorEnvelope } from "./dispatch.js";
 import { type ServerConfig } from "./model.js";
+/**
+ * Bound `initialize` too. `client.connect()` used the SDK's 60 s default at every connect site,
+ * and under `--isolate` every probe is a fresh container + spawn + connect — so a server that
+ * never starts cost 60 s per probe, tools × checks times over (mcpgawk-universe, 2026-09-04:
+ * 14 × 4 × 60 s for one server that never answered once). NOT the probe timeout: under isolate a
+ * cold `npx -y pkg` / `uvx pkg` installs on first launch, and 10 s would turn every cold start on a
+ * fresh runner into a false "failed to start". 45 s covers a cold install; the per-server bound
+ * that actually saves the run is startup-failure abandonment in verify.ts.
+ */
+export declare function connectTimeoutMs(): number;
+/**
+ * A connect that failed because the SERVER PROCESS did not come up (exited, crashed, or never
+ * spoke) — as opposed to a tool call that timed out on a live server. Tagged at the source so the
+ * check loop can stop probing a dead server without pattern-matching SDK text: a silent-exit
+ * child throws the bare "Connection closed" (-32000) with no stderr cause, and "-32001" also
+ * fires for a hung TOOL on a healthy server (hang.mjs), which must NOT abandon the server.
+ */
+export declare class StartupFailure extends Error {
+    readonly startup: true;
+}
 export interface ToolInfo {
     readonly name: string;
     readonly description: string;
@@ -49,12 +69,13 @@ export declare function listTools(server: ServerConfig): Promise<ToolInfo[]>;
  * rather than throwing. NOT a behavioural probe (no sandbox/egress observation) — only used to read
  * a discover tool's listing. */
 export declare function callToolText(server: ServerConfig, toolName: string, args: Record<string, unknown>): Promise<string>;
-type ProbeResult = {
+export type ProbeResult = {
     ok: true;
     obs: Observation;
 } | {
     ok: false;
     detail: string;
+    startup?: boolean;
 };
 /** Invoke a tool once and observe (egress + output). Implementations differ by transport.
  * `dispose`, when present, MUST be called once the caller is done making calls through this probe
@@ -131,5 +152,4 @@ export declare class CheckRunner implements ReproRunner {
     constructor(tool: ToolInfo, check: VulnCheck, probe: Probe);
     attempt(_candidate: Candidate): Promise<ReproResult>;
 }
-export {};
 //# sourceMappingURL=runner.d.ts.map

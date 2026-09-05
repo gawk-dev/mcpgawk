@@ -138,5 +138,13 @@ export interface VerifyOptions {
      * if Docker is unavailable or the command can't be containerized.
      */
     readonly isolate?: boolean;
+    /**
+     * Wall-clock budget for ONE server, in ms. Once it is spent, no further check on that server is
+     * started: each remaining check is recorded as an error ("not attempted — server budget of N s
+     * exhausted"), one `server-timeout` audit event fires, and the server's status can only be
+     * `incomplete` (planned > completed) — never `clean`. Checks already in flight finish on their
+     * own probe timeout. Nothing is raced or cancelled: a race cannot reclaim a container.
+     */
+    readonly serverTimeoutMs?: number;
 }
 //# sourceMappingURL=model.d.ts.map

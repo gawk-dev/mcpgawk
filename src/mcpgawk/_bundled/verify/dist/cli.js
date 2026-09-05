@@ -18,7 +18,7 @@ import { verifyServer } from "./verify.js";
 const USAGE = `usage: mcpgawk verify <config.json> [--unsafe] [--isolate] [--json] [--html <file>] [--csv <file>]
                           [--sarif <file>] [--junit <file>] [--behaviour-profile <file>] [--suppress <file>]
                           [--baseline <file>] [--webhook <url>] [--audit-log <file>] [--out <file>]
-                          [--audit-source] [--source-dir <path>]
+                          [--audit-source] [--source-dir <path>] [--server-timeout <seconds>]
        mcpgawk verify serve [--port <n>] [--host <addr>]   # local web UI
        mcpgawk verify suppress <findingId> --file <file> --reason "<why>" [--approved-by "<who>"]
 
@@ -42,6 +42,11 @@ mcpgawk verify resolves it; a config that references an unset variable fails lou
                    contained too, observed against an explicit registry allowlist. Requires Docker;
                    degrades to the default proxy sandbox with a warning otherwise. Slower per probe
                    (a container network per call) — the default remains the everyday path.
+--server-timeout <seconds>: wall-clock budget PER SERVER. Once spent, no further check on that
+                   server is started: the rest are recorded as not attempted, the server is reported
+                   INCOMPLETE (never clean), the run moves on. Nothing is cancelled mid-flight — a
+                   check in progress finishes on its own probe timeout. A server whose process never
+                   starts is abandoned after two such tools regardless (see errors[]).
 --baseline <file>: first run records a fingerprint of each server's tools; later runs flag DRIFT
                    (added / removed / changed tools) — i.e. a rug-pull.
 --behaviour-profile <file>: write a gawk.behaviour/1 profile (per-tool observed source/sink) — feed
@@ -152,6 +157,13 @@ licenseOpts = {}) {
     const webhookUrl = flagValue("--webhook");
     const auditLogPath = flagValue("--audit-log");
     const outPath = flagValue("--out");
+    const serverTimeoutRaw = flagValue("--server-timeout");
+    const serverTimeoutMs = serverTimeoutRaw === undefined ? undefined : Number(serverTimeoutRaw) * 1000;
+    if (serverTimeoutMs !== undefined && !(Number.isFinite(serverTimeoutMs) && serverTimeoutMs > 0)) {
+        err(`--server-timeout wants a positive number of seconds, got '${serverTimeoutRaw}'`);
+        err(USAGE);
+        return 2;
+    }
     const valueFlags = new Set([
         "--html",
         "--csv",
@@ -162,6 +174,7 @@ licenseOpts = {}) {
         "--webhook",
         "--audit-log",
         "--out",
+        "--server-timeout",
     ]);
     const configPath = argv.find((a, i) => !a.startsWith("--") && !valueFlags.has(argv[i - 1] ?? ""));
     if (!configPath) {
@@ -232,6 +245,7 @@ licenseOpts = {}) {
             reports.push(await verifyServer(toConfig(name, raw), {
                 mode: unsafe ? "unsafe" : "safe",
                 isolate,
+                serverTimeoutMs,
                 onEvent: (e) => {
                     if (e.type === "sandbox-degraded") {
                         err(`⚠  ${e.server}: ${e.reason}`);
@@ -248,8 +262,18 @@ licenseOpts = {}) {
                         err(`  ${e.server}: sign-in was not completed in 5 minutes — proceeding; ` +
                             `auth-needing checks will fail honestly.`);
                     }
+                    if (e.type === "server-abandoned") {
+                        err(`  ${e.server}: ${e.reason} — abandoned after ${e.failedToStart} tools ` +
+                            `(${e.toolsRemaining} not attempted).`);
+                    }
+                    if (e.type === "server-timeout") {
+                        err(`  ${e.server}: server budget of ${Math.round(e.budgetMs / 1000)} s exhausted ` +
+                            `after ${Math.round(e.elapsedMs / 1000)} s at '${e.tool}' — the remaining checks ` +
+                            `are recorded as not attempted; this server is INCOMPLETE, not clean.`);
+                    }
                     if ((e.type === "auth-needed" || e.type === "auth-ok" ||
-                        e.type === "auth-timeout") && auditLogPath) {
+                        e.type === "auth-timeout" || e.type === "server-abandoned" ||
+                        e.type === "server-timeout") && auditLogPath) {
                         // The panel tails this file to lift the sign-in URL onto the banner mid-run.
                         // Written as-is: the URL is exactly what the human is shown, the file is 0600.
                         appendFileSync(auditLogPath, `${JSON.stringify(e)}\n`);

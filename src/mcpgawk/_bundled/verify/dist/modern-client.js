@@ -18,6 +18,9 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 export const MODERN_REVISION = "2026-07-28";
 const HEADER = "MCP-Protocol-Version";
+/** Default bound on one request. `timeoutMs` overrides it per call: the discover handshake is
+ * bounded by the engine's connect timeout (see `connectTimeoutMs` in runner.ts), not by this. */
+const REQUEST_TIMEOUT_MS = 30_000;
 /** stdio: newline-delimited JSON-RPC to a child process, one in-flight request at a time —
  * verify's checks are sequential, so a queue is complexity without a customer. */
 class StdioRpc {
@@ -70,7 +73,7 @@ class StdioRpc {
         this.child.on("exit", () => die(`server process exited${this.stderrTail.length ? `: ${this.stderrTail.join(" | ").slice(0, 300)}` : ""}`));
     }
     dead = null;
-    request(method, params) {
+    request(method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
         if (this.dead)
             return Promise.reject(this.dead);
         const id = this.nextId++;
@@ -78,9 +81,10 @@ class StdioRpc {
             this.pending.set(id, { resolve, reject });
             // A hung server must be a diagnosis, not a hang: verify's whole posture.
             setTimeout(() => {
-                if (this.pending.delete(id))
-                    reject(new Error(`timeout waiting for ${method} (30s)`));
-            }, 30_000).unref();
+                if (this.pending.delete(id)) {
+                    reject(new Error(`timeout waiting for ${method} (${Math.round(timeoutMs / 1000)}s)`));
+                }
+            }, timeoutMs).unref();
         });
         this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} })}\n`);
         return p;
@@ -100,7 +104,7 @@ class HttpRpc {
         this.url = url;
         this.headers = headers;
     }
-    async request(method, params) {
+    async request(method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
         const res = await fetch(this.url, {
             method: "POST",
             headers: {
@@ -110,7 +114,7 @@ class HttpRpc {
                 ...this.headers,
             },
             body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method, params: params ?? {} }),
-            signal: AbortSignal.timeout(30_000),
+            signal: AbortSignal.timeout(timeoutMs),
         });
         if (!res.ok)
             throw new Error(`HTTP ${res.status} from ${method}`);
@@ -139,7 +143,7 @@ export class ModernClient {
     }
     /** Connect by probing `server/discover`. Throws if the server does not speak the modern
      * revision — the caller's legacy path owns that case, mirroring the Python probe's policy. */
-    static async connect(rpc) {
+    static async connect(rpc, opts = {}) {
         // The spec-faithful envelope: the version travels in params._meta under the
         // io.modelcontextprotocol keys — the server-side era router classifies the request by THAT,
         // not by the method name. A bare {protocolVersion} probe gets "Method not found" from real
@@ -150,7 +154,7 @@ export class ModernClient {
                 "io.modelcontextprotocol/clientInfo": { name: "gawk-verify", version: "1.0.0" },
                 "io.modelcontextprotocol/clientCapabilities": {},
             },
-        });
+        }, opts.timeoutMs);
         const versions = disc.supportedVersions ?? [];
         if (!versions.includes(MODERN_REVISION)) {
             await rpc.close();
@@ -158,11 +162,11 @@ export class ModernClient {
         }
         return new ModernClient(rpc, MODERN_REVISION);
     }
-    static stdio(command, args, env = {}) {
-        return ModernClient.connect(new StdioRpc(command, args, env));
+    static stdio(command, args, env = {}, opts = {}) {
+        return ModernClient.connect(new StdioRpc(command, args, env), opts);
     }
-    static http(url, headers = {}) {
-        return ModernClient.connect(new HttpRpc(url, headers));
+    static http(url, headers = {}, opts = {}) {
+        return ModernClient.connect(new HttpRpc(url, headers), opts);
     }
     async listTools() {
         const r = await this.rpc.request("tools/list");

@@ -10,6 +10,35 @@ function probeTimeoutMs() {
     const parsed = Number(process.env.GAWK_PROBE_TIMEOUT_MS);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
 }
+/**
+ * Bound `initialize` too. `client.connect()` used the SDK's 60 s default at every connect site,
+ * and under `--isolate` every probe is a fresh container + spawn + connect — so a server that
+ * never starts cost 60 s per probe, tools × checks times over (mcpgawk-universe, 2026-09-04:
+ * 14 × 4 × 60 s for one server that never answered once). NOT the probe timeout: under isolate a
+ * cold `npx -y pkg` / `uvx pkg` installs on first launch, and 10 s would turn every cold start on a
+ * fresh runner into a false "failed to start". 45 s covers a cold install; the per-server bound
+ * that actually saves the run is startup-failure abandonment in verify.ts.
+ */
+export function connectTimeoutMs() {
+    const parsed = Number(process.env.GAWK_CONNECT_TIMEOUT_MS);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 45_000;
+}
+/**
+ * A connect that failed because the SERVER PROCESS did not come up (exited, crashed, or never
+ * spoke) — as opposed to a tool call that timed out on a live server. Tagged at the source so the
+ * check loop can stop probing a dead server without pattern-matching SDK text: a silent-exit
+ * child throws the bare "Connection closed" (-32000) with no stderr cause, and "-32001" also
+ * fires for a hung TOOL on a healthy server (hang.mjs), which must NOT abandon the server.
+ */
+export class StartupFailure extends Error {
+    startup = true;
+}
+/** The message the audit log and the crawl match on — keep the literal `the server failed to start`. */
+function startupMessage(base, cause) {
+    return cause
+        ? `${base} — the server failed to start: ${cause}`
+        : `${base} — the server failed to start (the process exited or never answered; it printed nothing)`;
+}
 /** Delay before a reused-session probe retries a connection, in ms. Configurable for tests. */
 function reconnectBackoffMs() {
     const parsed = Number(process.env.GAWK_RECONNECT_BACKOFF_MS);
@@ -115,7 +144,7 @@ function adaptModern(m) {
  * as stdioTransport — a modern fallback that escaped the container would be a sandbox bypass. */
 async function modernFor(server, extraEnv = {}, spawnOverride) {
     if (isRemote(server)) {
-        return adaptModern(await ModernClient.http(server.url ?? "", server.headers ?? {}));
+        return adaptModern(await ModernClient.http(server.url ?? "", server.headers ?? {}, { timeoutMs: connectTimeoutMs() }));
     }
     const env = {
         ...process.env,
@@ -123,7 +152,9 @@ async function modernFor(server, extraEnv = {}, spawnOverride) {
         ...extraEnv,
         ...(spawnOverride?.env ?? {}),
     };
-    return adaptModern(await ModernClient.stdio(spawnOverride?.command ?? server.command ?? "", spawnOverride?.args ?? [...(server.args ?? [])], env));
+    // The modern door is the SECOND spawn after a legacy `initialize` failed: bound its discover
+    // handshake by the same connect timeout, or a server that never answers costs 45 s + 30 s.
+    return adaptModern(await ModernClient.stdio(spawnOverride?.command ?? server.command ?? "", spawnOverride?.args ?? [...(server.args ?? [])], env, { timeoutMs: connectTimeoutMs() }));
 }
 /** Legacy connect with modern fallback. On a legacy failure the modern door is tried; if BOTH
  * refuse, the error names both refusals — "unreachable" with no reason is the answer this
@@ -149,7 +180,7 @@ export async function listTools(server) {
     const transport = connectTransport(server);
     try {
         return await listToolsWith(await connectEither(async () => {
-            await client.connect(transport);
+            await client.connect(transport, { timeout: connectTimeoutMs() });
             return client;
         }, () => modernFor(server)), server.backendPrefix);
     }
@@ -157,10 +188,11 @@ export async function listTools(server) {
         // A server that cannot start produces a useless protocol-level message ("MCP error -32000:
         // Connection closed"). The reason is in the child's stderr — attach it, so the user is told
         // "Cannot find module ..." instead of being left to find a stack trace in a terminal they may
-        // not even be looking at.
-        const cause = explainChildFailure(stderrTailOf(transport));
+        // not even be looking at. A remote server has no child: its message stands as it is.
         const base = e?.message ?? String(e);
-        throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
+        if (isRemote(server))
+            throw new Error(base);
+        throw new StartupFailure(startupMessage(base, explainChildFailure(stderrTailOf(transport))));
     }
 }
 async function listToolsWith(client, backendPrefix) {
@@ -194,7 +226,7 @@ export async function callToolText(server, toolName, args) {
     let active = client;
     try {
         active = await connectEither(async () => {
-            await client.connect(connectTransport(server));
+            await client.connect(connectTransport(server), { timeout: connectTimeoutMs() });
             return client;
         }, () => modernFor(server));
         const res = await active.callTool({ name: toolName, arguments: args }, undefined, {
@@ -258,19 +290,29 @@ function sandboxedProbeFresh(server, sandbox) {
             // cause exists. `listTools` has always attached it; this path did not, so every
             // containerized probe failure was reported as the bare protocol message.
             const transport = stdioTransport(server, session.envOverrides, spawnOverride);
-            active = await connectEither(async () => {
-                try {
-                    await client.connect(transport);
-                }
-                catch (e) {
-                    const cause = explainChildFailure(stderrTailOf(transport));
-                    const base = e?.message ?? String(e);
-                    throw new Error(cause ? `${base} — the server failed to start: ${cause}` : base);
-                }
-                return client;
-            }, 
-            // The modern fallback runs INSIDE the same sandbox: same spawn override, same env merge.
-            () => modernFor(server, session.envOverrides, spawnOverride));
+            // `connectEither` folds both refusals into one Error and loses the class; remember here
+            // that the LEGACY door failed at startup so the probe result can carry the marker.
+            let startupFailed = false;
+            try {
+                active = await connectEither(async () => {
+                    try {
+                        await client.connect(transport, { timeout: connectTimeoutMs() });
+                    }
+                    catch (e) {
+                        startupFailed = true;
+                        const base = e?.message ?? String(e);
+                        throw new StartupFailure(startupMessage(base, explainChildFailure(stderrTailOf(transport))));
+                    }
+                    return client;
+                }, 
+                // The modern fallback runs INSIDE the same sandbox: same spawn override, same env merge.
+                () => modernFor(server, session.envOverrides, spawnOverride));
+            }
+            catch (e) {
+                if (startupFailed)
+                    throw new StartupFailure(e?.message ?? String(e));
+                throw e;
+            }
             try {
                 text = resultText(await active.callTool({ name: toolName, arguments: args }, undefined, {
                     timeout: probeTimeoutMs(),
@@ -286,7 +328,10 @@ function sandboxedProbeFresh(server, sandbox) {
         }
         catch (e) {
             await session.dispose();
-            return { ok: false, detail: e?.message ?? String(e) };
+            const detail = e?.message ?? String(e);
+            return e instanceof StartupFailure
+                ? { ok: false, detail, startup: true }
+                : { ok: false, detail };
         }
     };
 }
@@ -324,7 +369,9 @@ export function sandboxedProbeReused(server, sandbox) {
         const spawnOverride = sess.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
         return await connectEither(async () => {
             const c = new Client({ name: "gawk-verify", version: "1.0.0" });
-            await c.connect(stdioTransport(server, sess.envOverrides, spawnOverride));
+            await c.connect(stdioTransport(server, sess.envOverrides, spawnOverride), {
+                timeout: connectTimeoutMs(),
+            });
             return c;
         }, 
         // Same sandbox, same override — a modern fallback outside the container would be a bypass.

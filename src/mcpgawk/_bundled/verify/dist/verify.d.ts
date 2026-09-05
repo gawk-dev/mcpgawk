@@ -59,6 +59,32 @@ export type AuditEvent = {
     server: string;
     reason: string;
 } | {
+    /**
+     * The server's process failed to come up for the second tool in a row and no check on
+     * this server has completed: it is not going to start, and every further probe would be
+     * another fresh container, spawn and 45 s wait (mcpgawk-universe, 2026-09-04: 14 tools ×
+     * 4 checks × 60 s for a server that never answered once). The run stops HERE for this
+     * server and moves on; `verifyServer` throws so the CLI lists it under `errors[]`.
+     * `reason` keeps the literal "the server failed to start" the crawl matches on.
+     */
+    type: "server-abandoned";
+    server: string;
+    tool: string;
+    failedToStart: number;
+    toolsRemaining: number;
+    reason: string;
+} | {
+    /**
+     * The server's wall-clock budget (`--server-timeout`) ran out before every check was
+     * started. Emitted ONCE, at the first check not attempted; the rest are recorded as check
+     * errors, the server stays under `servers[]` as `incomplete`, and nothing is cancelled.
+     */
+    type: "server-timeout";
+    server: string;
+    tool: string;
+    budgetMs: number;
+    elapsedMs: number;
+} | {
     type: "check";
     server: string;
     tool: string;

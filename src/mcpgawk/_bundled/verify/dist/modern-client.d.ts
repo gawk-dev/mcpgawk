@@ -16,7 +16,7 @@ export interface ModernCallResult {
     isError?: boolean;
 }
 interface Rpc {
-    request(method: string, params?: Json): Promise<Json>;
+    request(method: string, params?: Json, timeoutMs?: number): Promise<Json>;
     close(): Promise<void>;
 }
 export declare class ModernClient {
@@ -25,9 +25,15 @@ export declare class ModernClient {
     private constructor();
     /** Connect by probing `server/discover`. Throws if the server does not speak the modern
      * revision — the caller's legacy path owns that case, mirroring the Python probe's policy. */
-    static connect(rpc: Rpc): Promise<ModernClient>;
-    static stdio(command: string, args: string[], env?: Record<string, string>): Promise<ModernClient>;
-    static http(url: string, headers?: Record<string, string>): Promise<ModernClient>;
+    static connect(rpc: Rpc, opts?: {
+        timeoutMs?: number;
+    }): Promise<ModernClient>;
+    static stdio(command: string, args: string[], env?: Record<string, string>, opts?: {
+        timeoutMs?: number;
+    }): Promise<ModernClient>;
+    static http(url: string, headers?: Record<string, string>, opts?: {
+        timeoutMs?: number;
+    }): Promise<ModernClient>;
     listTools(): Promise<ModernToolsResult>;
     callTool(params: {
         name: string;

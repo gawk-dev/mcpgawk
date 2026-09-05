@@ -67,21 +67,64 @@ async function selectIsolatedSandbox(server) {
     }
     return { sandbox: new ProxiedContainerSandbox(), backend: "proxied-container" };
 }
-/**
- * Run every applicable check against one tool via `probe`, reproduction-verifying (N/N) and
- * emitting the live audit events. Extracted so a HIDDEN tool reached through a dispatcher
- * (`attributionName` = "tool via executor", probe = a {@link dispatchedProbe}) is verified by the
- * exact same path as a visible one — no second, drifting copy of the check loop.
- */
 async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.name) {
     const findings = [];
     const checkErrors = [];
+    let startupFailed = false;
+    let startupDetail;
     // 1A: count what was PLANNED and what actually reached a verdict, at the only place that knows.
     // Everything downstream (status, exit code, coverage claim, every renderer) derives from these.
     let checksPlanned = 0;
     let checksCompleted = 0;
     for (const check of checks) {
         checksPlanned += 1;
+        if (ctx.budget && Date.now() >= ctx.budget.deadlineAt) {
+            // The server's wall clock is spent. Start nothing more: planned, not completed, and said so.
+            if (!ctx.budget.announced) {
+                ctx.budget.announced = true;
+                ctx.emit({
+                    type: "server-timeout",
+                    server: ctx.serverName,
+                    tool: attributionName,
+                    budgetMs: ctx.budget.budgetMs,
+                    elapsedMs: Date.now() - ctx.budget.startedAt,
+                });
+            }
+            const detail = `not attempted — server budget of ${Math.round(ctx.budget.budgetMs / 1000)} s exhausted`;
+            checkErrors.push({ tool: attributionName, code: check.code, detail });
+            ctx.emit({
+                type: "check",
+                server: ctx.serverName,
+                tool: attributionName,
+                code: check.code,
+                label: check.label.trim(),
+                severity: check.severity,
+                outcome: "error",
+                attemptsOk: 0,
+                attemptsRun: 0,
+                detail,
+            });
+            continue;
+        }
+        if (startupFailed) {
+            // The process did not come up for the previous check of THIS tool. Probing again would be
+            // another spawn and another 45 s for the same answer. Every remaining check is an error,
+            // not a skip and not a pass: planned, not completed.
+            checkErrors.push({ tool: attributionName, code: check.code, detail: startupDetail ?? "" });
+            ctx.emit({
+                type: "check",
+                server: ctx.serverName,
+                tool: attributionName,
+                code: check.code,
+                label: check.label.trim(),
+                severity: check.severity,
+                outcome: "error",
+                attemptsOk: 0,
+                attemptsRun: 0,
+                detail: `not attempted — ${startupDetail ?? "the server failed to start"}`,
+            });
+            continue;
+        }
         const candidate = {
             code: check.code,
             findingClass: check.findingClass,
@@ -95,6 +138,10 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
         const auditingProbe = async (toolName, args) => {
             attemptNum += 1;
             const result = await probe(toolName, args);
+            if (!result.ok && result.startup) {
+                startupFailed = true;
+                startupDetail = result.detail;
+            }
             ctx.emit({
                 type: "raw-observation",
                 server: ctx.serverName,
@@ -135,7 +182,7 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
             evidence: outcome.kind === "verdict" ? outcome.verdict.evidence : undefined,
         });
     }
-    return { findings, checkErrors, checksPlanned, checksCompleted };
+    return { findings, checkErrors, checksPlanned, checksCompleted, startupFailed, startupDetail };
 }
 /**
  * Verify one MCP server behaviourally: enumerate its tools, then for each callable one run every
@@ -150,6 +197,14 @@ export async function verifyServer(server, opts = {}) {
     const attempts = opts.attempts ?? 3;
     const mode = opts.mode ?? "safe";
     const emit = opts.onEvent ?? (() => { });
+    const budget = opts.serverTimeoutMs !== undefined && opts.serverTimeoutMs > 0
+        ? {
+            startedAt: Date.now(),
+            deadlineAt: Date.now() + opts.serverTimeoutMs,
+            budgetMs: opts.serverTimeoutMs,
+            announced: false,
+        }
+        : undefined;
     const remote = isRemote(server);
     const transport = remote ? (server.transport ?? "http") : "stdio";
     let sandboxBackend = "none";
@@ -343,7 +398,10 @@ export async function verifyServer(server, opts = {}) {
             `name-read tools were exercised, name-mutating tools stayed skipped`
         : undefined;
     try {
-        for (const tool of tools) {
+        // Consecutive tools whose PROCESS failed to start. Two in a row with nothing on this server
+        // completed means the server is not going to come up; stop spending a container per check.
+        let startupFailures = 0;
+        for (const [toolIndex, tool] of tools.entries()) {
             // Safe mode (default): NEVER invoke a tool that could mutate state or move money.
             if (mode === "safe") {
                 const { klass, callable } = classifyTool(tool, labelSignal);
@@ -357,11 +415,31 @@ export async function verifyServer(server, opts = {}) {
                 serverName: server.name,
                 attempts,
                 emit,
+                budget,
             });
             findings.push(...res.findings);
             checkErrors.push(...res.checkErrors);
             checksPlanned += res.checksPlanned;
             checksCompleted += res.checksCompleted;
+            if (res.startupFailed) {
+                startupFailures += 1;
+                if (startupFailures >= 2 && checksCompleted === 0) {
+                    const reason = res.startupDetail ?? "the server failed to start";
+                    emit({
+                        type: "server-abandoned",
+                        server: server.name,
+                        tool: tool.name,
+                        failedToStart: startupFailures,
+                        toolsRemaining: tools.length - toolIndex - 1,
+                        reason,
+                    });
+                    throw new Error(`abandoned after ${startupFailures} tools in a row could not start the server and ` +
+                        `no check completed — ${reason}`);
+                }
+            }
+            else if (res.checksCompleted > 0) {
+                startupFailures = 0;
+            }
         }
         // F4: drive the executor to probe each hidden tool the same way — synthesise args against the
         // HIDDEN tool's own schema, wrapped into the executor envelope by `dispatchedProbe`, so the
@@ -394,7 +472,7 @@ export async function verifyServer(server, opts = {}) {
                         }
                     }
                     const attribution = `${hidden.name} via ${executor.name}`;
-                    const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit }, attribution);
+                    const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit, budget }, attribution);
                     findings.push(...res.findings);
                     checkErrors.push(...res.checkErrors);
                     checksPlanned += res.checksPlanned;
