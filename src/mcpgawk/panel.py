@@ -9217,6 +9217,23 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
 # Every figure below is read from the store that owns it — this adds no derivation of its own.
 # --------------------------------------------------------------------------------------------- #
 
+def _is_tool_key(item_key: str) -> bool:
+    """Is this store `items` key a TOOL, given both key shapes the store legitimately holds?
+
+    Keys are `{kind}.{name}` since the rug-pull work (`drift._iter_items`), but records written
+    before it key their tools BARE — `"read"`, not `"tool.read"` — and those records are still in
+    real stores, still approved, still rendered. So the rule is an EXCLUDE-list over the non-tool
+    kinds, never an include-list on the `tool.` prefix: a bare key is a tool.
+
+    `drift.ITEM_KINDS` is the one place the kinds are named, so a fourth kind added there is
+    excluded here without anyone remembering to come back — the alternative is a second literal
+    list that silently disagrees the day the first one grows.
+    """
+    from .drift import ITEM_KINDS
+    kind, _, rest = item_key.partition(".")
+    return not (rest and kind in ITEM_KINDS and kind != "tool")
+
+
 def server_detail(store: dict[str, Any], key: str, calls: list[dict] | None = None) -> dict[str, Any]:
     """Everything known about ONE server: its approved surface, how it has moved over time, and
     what the runtime guard has actually seen it do.
@@ -9244,8 +9261,34 @@ def server_detail(store: dict[str, Any], key: str, calls: list[dict] | None = No
         "key": key,
         "name": _h.display_name(store, key),
         "aliases": aliases,
-        "approved_tools": sorted((approved.get("items") or {}).keys()),
-        "current_tools": sorted((latest.get("items") or {}).keys()),
+        # TOOLS ONLY — the store's `items` map is keyed `{kind}.{name}` and holds every kind
+        # (tool./prompt./resource.), so `sorted(items)` handed every consumer of these two lists a
+        # count of CAPABILITIES under a name that says tools. Every one of them then said "tools"
+        # out loud: the Servers table, the coverage bars, the "Tools now"/"Approved" stats, the
+        # CSV `tools` column and the JSON `tools` field. On a live 70-tool server carrying one
+        # resource the panel read "71 exposed tools" while the same scan's own footer said
+        # "70 tools, 0 prompts, 1 resources" — two surfaces of one product disagreeing about one
+        # server, in front of a reviewer (found by the browser walk, 2026-09-10).
+        #
+        # Filtering here and not at each render is deliberate: there were TWELVE call sites and
+        # one of them, `declared_vs_observed`, is not a count at all — it joins these keys against
+        # the behaviour profile's wire names, so a resource arrived as a phantom row in a per-TOOL
+        # table. A list named `*_tools` should contain tools; that is the fix.
+        #
+        # Nothing here is the drift path, so no alarm is narrowed by this. `history.pending` and
+        # `drift.compare` both read the store's `items` maps directly and apply `comparable_kinds`
+        # to every kind — a resource that appears or disappears is still caught and still queues a
+        # decision. These two lists are display only. `cost_index` above stays all-kinds on
+        # purpose: a resource really does cost tokens in the session.
+        #
+        # EXCLUDE the non-tool kinds; do NOT require a `tool.` prefix. Records written before the
+        # rug-pull work key their tools BARE ("read"), not typed ("tool.read") — the store still
+        # holds them, and `declared_vs_observed.bare()` exists precisely because both shapes are
+        # live. An include-list on `tool.` therefore reads every legacy server as having ZERO
+        # tools, which is a worse lie than the one being fixed here and is exactly what
+        # `test_a_tool_added_since_approval_is_named_on_the_row` caught. Bare means tool.
+        "approved_tools": sorted(k for k in (approved.get("items") or {}) if _is_tool_key(k)),
+        "current_tools": sorted(k for k in (latest.get("items") or {}) if _is_tool_key(k)),
         "texts": latest.get("texts") or {},
         "annotations": latest.get("annotations") or {},
         "transport": latest.get("transport") or "",
