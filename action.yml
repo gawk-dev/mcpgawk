@@ -11,7 +11,7 @@ inputs:
     required: false
     default: 'mcp.json'
   stdio:
-    description: 'A single stdio server command to scan instead of a config (e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp").'
+    description: 'A single stdio server command to scan instead of a config (e.g. "npx -y @modelcontextprotocol/server-filesystem@2026.8.31 /tmp" — pin the version, an unpinned npx installs whatever upstream publishes next and mcpgawk flags it).'
     required: false
     default: ''
   http:

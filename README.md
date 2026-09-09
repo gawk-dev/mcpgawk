@@ -115,7 +115,7 @@ Scanning on its own, if that is all you want:
 
 ```bash
 mcpgawk scan mcp.json                                              # a whole config
-mcpgawk scan --stdio "npx -y @modelcontextprotocol/server-filesystem /tmp"
+mcpgawk scan --stdio "npx -y @modelcontextprotocol/server-filesystem@2026.8.31 /tmp"
 mcpgawk scan --http https://host/mcp --header "Authorization: Bearer $TOKEN"
 mcpgawk scan --sse  https://host/sse
 mcpgawk scan mcp.json --track                                     # record + detect rug-pulls over time
