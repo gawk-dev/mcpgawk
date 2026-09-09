@@ -1087,14 +1087,17 @@ def _wrong(args) -> int:
 # They are listed in `--help` even when unavailable: a free user should be able to SEE what the
 # subscription adds without installing anything, and get one honest line if they try it.
 def _installed_version() -> str:
-    """The version of the DISTRIBUTION actually installed — read from package metadata, never a
-    hand-maintained constant. A literal here drifted from pyproject before and reported 0.1.0 on a
-    0.1.3 install; metadata cannot disagree with what pip resolved."""
-    try:
-        from importlib.metadata import version
-        return version("mcpgawk")
-    except Exception:                              # noqa: BLE001 - a source checkout, not an error
-        return "0+unknown (not installed as a distribution)"
+    """The version of the code that is RUNNING. One definition, imported — see `mcpgawk.__init__`.
+
+    This used to read package metadata itself, which answers a DIFFERENT question: what
+    distribution is installed, not which copy got imported. With this repo's `src/` ahead of an
+    older install, `--version` printed "0.1.34 — OUT OF DATE" while executing 0.1.40 (2026-09-09).
+    That was the fourth separate answer to "what version am I" in this codebase; there is now one,
+    and every surface asks it rather than re-deriving it. A version banner that lies erodes trust
+    in a measurement tool faster than any missing feature.
+    """
+    from . import __version__
+    return __version__ if __version__ != "0+unknown" else "0+unknown (not installed as a distribution)"
 
 
 #: ACCOUNT commands — about the subscription, not about a server. Separate from the capabilities

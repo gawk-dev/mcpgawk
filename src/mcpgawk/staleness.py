@@ -24,7 +24,11 @@ import json
 import os
 import re
 import time
-from importlib.metadata import PackageNotFoundError, version
+# `version` is NOT imported: this module defines its own below, deliberately shadowing the
+# metadata one, because metadata answers 'what is installed' and every caller here needs
+# 'what is running'. Importing it too would be a second, wrong answer sitting in the same
+# namespace — and ruff F811 rightly refuses to let both exist.
+from importlib.metadata import PackageNotFoundError
 
 from . import history, supplychain
 
@@ -85,6 +89,27 @@ def _latest(fetch) -> str | None:
     if age is not None and age < CACHE_TTL_S:
         return latest
     return _fetch_and_cache(fetch)
+
+
+def version(_name: str = "mcpgawk") -> str:
+    """SHADOWS `importlib.metadata.version` ON PURPOSE, module-wide, and answers a better question.
+
+    Metadata says what DISTRIBUTION is installed. This module needs to know what CODE IS RUNNING,
+    and the two part company the moment a source tree sits ahead of an older install on sys.path:
+    on 2026-09-09 `--version` announced "0.1.34 — OUT OF DATE" while executing 0.1.40, and offered
+    an upgrade command that would have done nothing. An editable install goes wrong the same way as
+    soon as pyproject is bumped, since its recorded version is fixed at install time.
+
+    Shadowing rather than adding a new seam is deliberate: every caller and every existing test in
+    this module already routes through this name, so the correction reaches all of them at once
+    instead of leaving some readers on the old answer. The resolution itself has ONE definition, in
+    `mcpgawk.__init__`. Raises PackageNotFoundError for an uninstalled source tree so the callers'
+    existing handling is unchanged.
+    """
+    from . import __version__
+    if __version__ == "0+unknown":
+        raise PackageNotFoundError(_name)
+    return __version__
 
 
 def currency_line(fetch=supplychain._get_json) -> str:
