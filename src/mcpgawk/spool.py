@@ -330,7 +330,7 @@ def read_session(session: str, limit: int = 500, scan: int = 8000,
     return out
 
 
-def summarise(limit: int = 5000, path: str | None = None) -> dict:
+def summarise(limit: int = 5000, path: str | None = None, window_days: int = 7) -> dict:
     """Counts a human actually wants: how many calls were checked, how many denied, over how many
     sessions, and when we last saw anything. Used by `mcpgawk status` so 'is anything watching'
     can be answered with observed activity rather than with configuration."""
@@ -341,12 +341,36 @@ def summarise(limit: int = 5000, path: str | None = None) -> dict:
     # seen — the two answer different questions and both have to be available to say either.
     deferred = sum(1 for r in rows if r.get("decision") == "defer")
     checked = sum(1 for r in rows if r.get("decision") in ("allow", "deny"))
+    # THE WINDOW. `calls`/`checked` are lifetime counters over everything the spool still holds —
+    # on the founder's machine that is six weeks, and the ratio read "113 of 2206 checked" while
+    # every kite deferral in it happened in July and kite has been checked since 9 August. A
+    # lifetime ratio presented as protection is 20x wrong in the reassuring direction one way and
+    # the alarming direction the other; both hide what is true NOW (2026-09-08).
+    from datetime import datetime, timedelta, timezone
+    cut = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+    recent = [r for r in rows if str(r.get("ts") or "") >= cut]
+    w_deferred = [r for r in recent if r.get("decision") == "defer"]
+    w_servers: dict[str, int] = {}
+    for r in w_deferred:
+        n = str(r.get("server") or "")
+        if n:
+            w_servers[n] = w_servers.get(n, 0) + 1
     sessions = {r.get("session") for r in rows if r.get("session")}
     servers = {r.get("server") for r in rows if r.get("server")}
     return {
         "calls": len(rows),
         "checked": checked,
         "deferred": deferred,
+        # what is true NOW, alongside the lifetime counters — never instead of them
+        "window_days": window_days,
+        "window_calls": len(recent),
+        "window_checked": sum(1 for r in recent if r.get("decision") in ("allow", "deny")),
+        "window_deferred": len(w_deferred),
+        "window_deferred_servers": sorted(w_servers, key=lambda k: -w_servers[k]),
+        # per-server counts, because "161 unchecked" across two servers uncovered for DIFFERENT
+        # reasons is one number hiding two problems (founder, 2026-09-08: "split them")
+        "window_deferred_by_server": dict(sorted(w_servers.items(), key=lambda kv: -kv[1])),
+        "first_seen": rows[-1].get("ts") if rows else None,
         "denied": denied,
         "sessions": len(sessions),
         "servers": len(servers),

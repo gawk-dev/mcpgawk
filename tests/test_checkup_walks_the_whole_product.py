@@ -69,21 +69,93 @@ def test_a_step_that_fails_does_not_end_the_walk(tmp_path, monkeypatch):
     assert all(s["exit_code"] == 7 for s in walk["steps"] if s["command"])
 
 
-def test_a_nonzero_exit_is_a_failure_not_a_false_ok(tmp_path, monkeypatch):
-    """A step exiting nonzero is a finding to surface, recorded as FAILED — never a false OK.
+def _cfg_stub(tmp_path):
+    """Stand in for the fleet resolver: a config path, so the verify step runs the fake binary."""
+    cfg = tmp_path / "fleet.json"
+    cfg.write_text('{"mcpServers": {"fixture": {"command": "true"}}}')
+    return lambda: (str(cfg), "")
 
-    The mapping used to record exit 1 as OK for EVERY step, on the theory that `scan` exits 1 on
-    findings. But `scan --yes` (no --fail-on-findings, which checkup does not pass) exits 0 even
-    WITH findings — they live in its output — and a nonzero `verify` means servers FAILED.
-    Recording that as OK made the walk read all-green off a run whose flagship step failed.
+
+def test_a_nonzero_exit_is_a_failure_not_a_false_ok(tmp_path, monkeypatch):
+    """A step exiting nonzero is a finding to surface, recorded as FAILED — never a false OK —
+    EXCEPT where the command itself speaks through its exit code: `scan` and `verify` exit 1 to
+    say "something to review" (a live signal, a "needs credentials" caveat, drift, a conviction)
+    and 4 to say "could not finish". Measured 2026-09-05: a scan that measured 8 servers and
+    recorded their baselines exited 1 and the bundle read "!! scan failed" — a false failure is
+    the same false reassurance as a false OK, pointed the other way.
     """
     monkeypatch.setattr(checkup, "_binary", _fake_binary("import sys; sys.exit(1)"))
+    monkeypatch.setattr(checkup, "_fleet_config", _cfg_stub(tmp_path))
     dest = tmp_path / "nonzero.zip"
     assert checkup.run(output=str(dest), assume_yes=True) == 0   # the walk still completes
     walk = _walkthrough(dest)
-    cmd_steps = [s for s in walk["steps"] if s["command"]]
-    assert cmd_steps and all(s["outcome"] == checkup.FAILED for s in cmd_steps), (
-        "a nonzero exit must be FAILED, not a false OK")
+    by_name = {s["name"]: s for s in walk["steps"] if s["command"]}
+    for name in ("version", "status-before", "status-after", "runs"):
+        assert by_name[name]["outcome"] == checkup.FAILED, f"{name}: exit 1 is a failure to run"
+    for name in ("scan", "verify"):
+        assert by_name[name]["outcome"] == checkup.FINDINGS, f"{name}: exit 1 means findings"
+        assert "ran" in by_name[name]["detail"] and "review" in by_name[name]["detail"]
+
+
+def test_exit_4_is_incomplete_and_a_usage_exit_is_a_failure(tmp_path, monkeypatch):
+    """4 is the engine's own "ran but could not finish" — never clean, never "failed to run"; 2 is
+    usage, which is exactly the failure the bare `mcpgawk verify` used to hide as "verify failed"."""
+    monkeypatch.setattr(checkup, "_fleet_config", _cfg_stub(tmp_path))
+    monkeypatch.setattr(checkup, "_binary", _fake_binary("import sys; sys.exit(4)"))
+    walk = (checkup.run(output=str(tmp_path / "four.zip"), assume_yes=True),
+            _walkthrough(tmp_path / "four.zip"))[1]
+    outcomes = {s["name"]: s["outcome"] for s in walk["steps"]}
+    assert outcomes["scan"] == checkup.INCOMPLETE and outcomes["verify"] == checkup.INCOMPLETE
+    assert outcomes["version"] == checkup.FAILED
+    monkeypatch.setattr(checkup, "_binary", _fake_binary("import sys; sys.exit(2)"))
+    walk = (checkup.run(output=str(tmp_path / "two.zip"), assume_yes=True),
+            _walkthrough(tmp_path / "two.zip"))[1]
+    assert all(s["outcome"] == checkup.FAILED for s in walk["steps"] if s["command"])
+
+
+def test_verify_step_hands_the_engine_a_fleet_config(tmp_path, monkeypatch):
+    """`mcpgawk verify` takes a config. Up to 0.1.39 the step ran it bare — usage, exit 2 — so every
+    tester bundle carried a "verify failed" that was never a verify. The step now passes the fleet
+    config the panel's resolver builds, bounded per server like the front door."""
+    monkeypatch.setattr(checkup, "_binary", _fake_binary("print('ok')"))
+    stub = _cfg_stub(tmp_path)
+    monkeypatch.setattr(checkup, "_fleet_config", stub)
+    dest = tmp_path / "argv.zip"
+    assert checkup.run(output=str(dest), assume_yes=True) == 0
+    walk = _walkthrough(dest)
+    verify = next(s for s in walk["steps"] if s["name"] == "verify")
+    assert verify["outcome"] == checkup.OK
+    cmd = verify["command"]                       # recorded paths are pseudonymised (<user>)
+    assert cmd[-4] == "verify" and cmd[-3].endswith("/fleet.json"), cmd
+    assert cmd[-2:] == ["--server-timeout", "60"], cmd
+
+
+def test_nothing_verifiable_is_skipped_with_the_reason_not_failed(tmp_path, monkeypatch):
+    """A machine with no launchable local server has nothing for verify to do: recorded as
+    skipped WITH the reason, never as a failure and never as a silent OK."""
+    from mcpgawk import panel
+    monkeypatch.setattr(checkup, "_binary", _fake_binary("print('ok')"))
+    monkeypatch.setattr(panel, "fleet_verify_targets", lambda: ({}, {}))
+    dest = tmp_path / "skipped.zip"
+    assert checkup.run(output=str(dest), assume_yes=True) == 0
+    verify = next(s for s in _walkthrough(dest)["steps"] if s["name"] == "verify")
+    assert verify["outcome"] == checkup.SKIPPED
+    assert "no local server" in verify["detail"] and verify["command"] == []
+
+
+def test_fleet_verify_targets_is_the_panel_resolver(monkeypatch):
+    """The checkup verifies what the Verify-fleet button would: command servers resolved through
+    dxt, url servers left out (per-server auth, no code on this machine)."""
+    from mcpgawk import discover, panel
+    monkeypatch.setattr(discover, "discover_servers", lambda: {
+        "local-one": {"command": "node", "args": ["srv.js"], "env": {"A": "1"}, "extra": "x"},
+        "remote-one": {"url": "https://mcp.example.test/mcp"},
+        "junk": "not a dict",
+    })
+    monkeypatch.setattr(panel, "gateway_status", lambda: {"live": {}})
+    local, gatewayed = panel.fleet_verify_targets()
+    assert local == {"local-one": {"command": "node", "args": ["srv.js"], "env": {"A": "1"}}}
+    assert gatewayed == {}
 
 
 def test_a_non_utf8_byte_does_not_abort_the_walk(tmp_path, monkeypatch):

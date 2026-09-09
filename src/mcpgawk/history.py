@@ -393,11 +393,22 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
                 row["approved_at"] = approved_at      # for the confidence line; absent = not recorded
             sightings = entry.get("history")
             last = sightings[-1] if isinstance(sightings, list) and sightings else None
-            if isinstance(last, dict) and isinstance(last.get("tools"), dict):
-                row["seen"] = dict(last["tools"])
-                measured = last.get("measured_at")
-                if isinstance(measured, str):
-                    row["seen_at"] = measured
+            # ONLY when the two maps were minted by the SAME RULE. `baseline.publish` (monitor
+            # approval) writes this field under `fingerprint.surface_hashes` while every sighting
+            # writes it under `drift._tool_hashes`; comparing across them denied all 22 tools of a
+            # server whose pin proved it had not changed (kite, measured 2026-09-08). Withholding
+            # `seen` is the precise stand-down: `declared_verdict` skips the content check when it
+            # has no live hash, and tool NAMES — which need no hash — keep enforcing exactly.
+            if not drift.tools_comparable(rec):
+                row["seen_not_compared"] = drift.TOOLS_NOT_COMPARED.format(server=key)
+            elif isinstance(last, dict) and isinstance(last.get("tools"), dict):
+                if drift.tools_comparable(last):
+                    row["seen"] = dict(last["tools"])
+                    measured = last.get("measured_at")
+                    if isinstance(measured, str):
+                        row["seen_at"] = measured
+                else:
+                    row["seen_not_compared"] = drift.TOOLS_NOT_COMPARED.format(server=key)
             # The APPROVED parameter names per tool, so the hook can catch the smuggled-field
             # rug-pull at call time: a schema widened after approval breaks nothing by itself,
             # but an agent FILLING a parameter the human never approved — and one shaped like a
@@ -847,8 +858,20 @@ def pending(store: dict[str, Any]) -> list[str]:
         base, latest = approved(store, key), last(store, key)
         if not (base and latest):
             continue
-        if base.get("items") != latest.get("items") or any(
-                ax in base and ax in latest and base[ax] != latest[ax]
+        # ONE rule, imported — not a second opinion. This function compared the whole `items`
+        # maps, so a kind the baseline never enumerated queued a decision that `drift.compare`
+        # then correctly found nothing in: a blocked server with an empty diff. Same import, same
+        # answer, both surfaces (dadan, 2026-09-09).
+        from . import drift as _drift
+        kinds = _drift.comparable_kinds(base, latest)
+        def _cmp(rec, ax="items"):
+            return {k: v for k, v in (rec.get(ax) or {}).items()
+                    if "." not in str(k) or str(k).split(".", 1)[0] in kinds}
+        # EVERY axis, not just `items`. The C1 maps are keyed the same `{kind}.{name}` way, so an
+        # un-enumerated kind put a key in `annotations`/`props`/`schemas` too — and filtering only
+        # `items` left the server queued on those instead, with a diff that showed nothing.
+        if _cmp(base) != _cmp(latest) or any(
+                ax in base and ax in latest and _cmp(base, ax) != _cmp(latest, ax)
                 for ax in ("schemas", "props", "annotations")):
             out.append(key)
     return sorted(out)

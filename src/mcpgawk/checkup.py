@@ -39,6 +39,20 @@ DECLINED = "declined"
 TIMED_OUT = "timed out"
 INTERRUPTED = "interrupted"
 CRASHED = "crashed"
+FINDINGS = "findings"        # the step RAN and has something to review in its output
+INCOMPLETE = "incomplete"    # the step ran but could not finish — never clean, never "failed to run"
+SKIPPED = "skipped"          # nothing for the step to do on this machine — recorded, not a failure
+
+#: What a nonzero exit MEANS, per command. `scan` exits 1 on anything a person should look at
+#: (a live signal, a probe caveat such as "needs credentials", drift) and 4 when it could not
+#: finish; the verify engine exits 1 on convictions, 3 when it cannot start, 4 on timeout. Every
+#: other nonzero — and every nonzero from version/status/runs — is the step failing to run.
+#: Measured 2026-09-05 on the founder's fleet: a scan that measured 8 servers and recorded their
+#: baselines exited 1 ("4 need credentials") and the bundle said "!! scan failed".
+_EXIT_MEANING: dict[str, dict[int, str]] = {
+    "scan": {1: FINDINGS, 4: INCOMPLETE},
+    "verify": {1: FINDINGS, 4: INCOMPLETE},
+}
 
 
 @dataclass
@@ -111,15 +125,44 @@ def _run(step: Step, args: list[str], timeout: float, outputs: dict[str, str],
         return step
     step.seconds = time.monotonic() - started
     step.exit_code = proc.returncode
-    # Exit 0 is the step running cleanly; ANY nonzero is a finding to surface, not a false OK.
-    # This used to be `in (0, 1)` for every step, on the theory that `scan` exits 1 on findings —
-    # but `scan --yes` (no --fail-on-findings, which checkup does not pass) exits 0 even WITH
-    # findings; they live in its output. A nonzero `verify` means servers FAILED, and recording
-    # that as OK produced a walk that read all-green off a run whose flagship step failed.
-    step.outcome = OK if proc.returncode == 0 else FAILED
+    # Exit 0 is the step running cleanly. A nonzero exit is read per command (_EXIT_MEANING):
+    # scan/verify say "findings" (1) and "incomplete" (4) through their exit code, and neither is
+    # the step failing to run. Everything else nonzero is FAILED — never a false OK (the rule was
+    # once `in (0, 1)` for every step, which read all-green off a run whose flagship step failed),
+    # and never a false "failed" (the rule was then `== 0` for every step, which told every
+    # tester whose scan found something that the scan had failed).
+    rc = proc.returncode
+    step.outcome = OK if rc == 0 else _EXIT_MEANING.get(step.name, {}).get(rc, FAILED)
     outputs[f"steps/{step.name}.txt"] = _step_body(step.command, proc.stdout, proc.stderr, strict)
-    step.detail = f"exit {proc.returncode}"
+    step.detail = {
+        FINDINGS: f"exit {rc} — ran; something to review is in its output",
+        INCOMPLETE: f"exit {rc} — ran but could not finish: INCOMPLETE, not clean",
+    }.get(step.outcome, f"exit {rc}")
     return step
+
+
+def _fleet_config() -> tuple[str | None, str]:
+    """A config file naming every server a fleet verify can run here, or (None, why not).
+
+    `mcpgawk verify` takes a config; run bare it prints usage and exits 2, which is what this
+    step did in every bundle up to 0.1.39 — the tester's "verify failed" was never a verify.
+    The list comes from the panel's resolver (dxt placeholders filled, gateway routing honoured),
+    so the checkup verifies exactly what the Verify-fleet button would.
+    """
+    import tempfile
+
+    try:
+        from .panel import fleet_verify_targets
+        local, gatewayed = fleet_verify_targets()
+    except Exception as exc:                                      # noqa: BLE001
+        return None, clean_text(f"could not enumerate the fleet ({type(exc).__name__}: {exc})")
+    targets = {**local, **gatewayed}
+    if not targets:
+        return None, "no local server to verify on this machine — nothing was launched"
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                     prefix="mcpgawk-checkup-verify-") as fh:
+        json.dump({"mcpServers": targets}, fh)
+        return fh.name, ""
 
 
 _PANEL_WITHHELD = (
@@ -208,6 +251,7 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
         ("version", "which build is installed, and is it current", ["--version"], 120, False),
         ("status-before", "what is watching, before anything runs", ["status"], 180, False),
         ("scan", "measure every server this machine can see", ["scan", "--yes"], 900, True),
+        # `verify` needs the fleet config; it is built just before the step runs (below).
         ("verify", "run each server and watch what it actually does", ["verify"], 1800, True),
         ("status-after", "what changed once the tools had run", ["status"], 180, False),
         ("runs", "the run history this walk just added to", ["runs", "--limit", "50"], 120, False),
@@ -221,6 +265,16 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
             steps.append(step)
             print(f"  -- {name:<14} declined")
             continue
+        if name == "verify":
+            cfg, why = _fleet_config()
+            if cfg is None:
+                step.outcome, step.detail = SKIPPED, why
+                steps.append(step)
+                print(f"  -- {name:<14} skipped — {why}")
+                continue
+            # Bounded per server like the front door: a fleet that cannot answer in a minute is
+            # reported INCOMPLETE by the engine, not left as a ten-minute silence in a checkup.
+            args = ["verify", cfg, "--server-timeout", "60"]
         print(f"  .. {name:<14} {what}")
         try:
             steps.append(_run(step, args, timeout, outputs, strict))
@@ -231,7 +285,7 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
             interrupted = True
             print(f"\n  ^C at {name} — writing what we have so far.\n")
             break
-        print(f"  {'ok' if steps[-1].outcome == OK else '!!'} {name:<14} "
+        print(f"  {'ok' if steps[-1].outcome in (OK, FINDINGS) else '!!'} {name:<14} "
               f"{steps[-1].outcome} ({steps[-1].seconds:.0f}s) {steps[-1].detail}")
 
     # The Ctrl-C guarantee ("the bundle is still written") used to cover ONLY the step loop above.
@@ -276,7 +330,7 @@ def run(output: str | None = None, note: str | None = None, assume_yes: bool = F
     print("\n  WHAT HAPPENED\n")
     width = max(len(s.name) for s in steps)
     for s in steps:
-        mark = {OK: "ok ", DECLINED: "-- "}.get(s.outcome, "!! ")
+        mark = {OK: "ok ", FINDINGS: "ok ", DECLINED: "-- ", SKIPPED: "-- "}.get(s.outcome, "!! ")
         print(f"    {mark}{s.name:<{width}}  {s.outcome:<12} {s.detail}")
     if interrupted:
         print("\n    You stopped part-way. That is recorded and the bundle is still complete")

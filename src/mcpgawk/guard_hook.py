@@ -270,6 +270,25 @@ def _approved_from_projection(server: str,
     return (dict(tools) if isinstance(tools, dict) else None), note
 
 
+def tools_comparable(server: str, store_path: Path) -> bool:
+    """Whether this server's approved per-tool hashes may be compared with hashes WE compute.
+
+    False when the canonical writer marked the row incomparable — its map was minted under
+    another rule (see `drift.TOOLS_BASIS_CONTENT`). Callers holding a live surface must then pass
+    `live_hash=None`: the content check stands down while name membership keeps enforcing exactly.
+    The free hook needs no call here — the projection simply withholds `seen` — but the paid
+    gateway computes its own hashes in-process and would otherwise deny every call on such a
+    server, which is the defect this exists to stop (kite, 2026-09-08).
+
+    True when nothing is approved: the content check never runs in that case anyway, and inventing
+    a stand-down for a server with no baseline would be a claim about a decision nobody made.
+    """
+    record, _note = _record_from_projection(server, store_path)
+    if not isinstance(record, dict):
+        return True
+    return "seen_not_compared" not in record
+
+
 def _record_from_projection(server: str,
                             store_path: Path) -> tuple[dict | None, str | None]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from

@@ -121,6 +121,28 @@ PIN_BASIS = 2
 _PIN_BASIS_2_FROM = "2026-07-23T08:17:41+00:00"
 
 
+#: WHICH RULE minted a record's `{tool: hash}` map. The same argument as `PIN_BASIS`, one field
+#: down, and it is NOT theoretical: measured on the founder's store 2026-09-08, `mcp:Kite MCP
+#: Server` held an approved map under basis 2 against sightings under basis 1, on a surface whose
+#: pin proved it had not changed a byte — so the guard denied every one of its 22 tools with
+#: `tool-changed`. `decision.content_hash` had ALREADY written the invariant down ("MUST stay
+#: byte-identical to `drift._hash` ... comparing against a differently-computed hash would deny
+#: every call on every server"); a rule in one file is not a rule, so it is stamped on the record
+#: here and enforced by every reader.
+#:
+#: 1 = `_tool_hashes`: hash(description) alone. What `build_record` writes and what every reader
+#:     of `approved["tools"]` computes — the guard projection's `seen`, the paid gateway's
+#:     `set_live_tools`, and the legacy fallback in `_fingerprints`.
+#: 2 = `fingerprint.surface_hashes`: hash(name + description + inputSchema + annotations). What
+#:     `monitor.Snapshot.tool_hashes` carries and what `baseline.publish` used to write into the
+#:     very same field, unstamped and therefore indistinguishable from basis 1.
+TOOLS_BASIS_CONTENT = 1
+TOOLS_BASIS_SURFACE = 2
+
+#: The basis THIS build writes from `build_record`, and the only one its readers can compare.
+TOOLS_BASIS = TOOLS_BASIS_CONTENT
+
+
 def _item_signals(snap: ServerSnapshot) -> dict[str, list[str]]:
     """Which injection detectors each description trips, judged on the LIVE text.
 
@@ -224,8 +246,15 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
 
         "tools": _tool_hashes(snap),      # legacy shape, kept for older readers (see _tool_hashes)
         "items": _item_hashes(snap),      # the real fingerprint: tools + prompts + resources
+        # WHICH KINDS THIS RECORD CAN SPEAK FOR. An empty `resource.*` slice means "asked,
+        # none there" only when "resource" appears here; otherwise it means nobody asked, and
+        # `comparable_kinds` keeps the diff off that surface instead of calling a first
+        # sighting an addition. Absent on records written before this field: handled there.
+        "enumerated": list(getattr(snap, "enumerated", None) or ()),
+        "capabilities": dict(getattr(snap, "capabilities", None) or {}),
         "schema_version": RECORD_SCHEMA,  # what wrote this, so a future reader can refuse it
         "pin_basis": PIN_BASIS,           # which RULE minted `pin` — see PIN_BASIS
+        "tools_basis": TOOLS_BASIS,       # which RULE minted `tools` — see TOOLS_BASIS_CONTENT
         "login_id": snap.login_id,        # WHICH sign-in this was measured through (may be None)
         "texts": _item_texts(snap),       # redacted prose, so a diff can be SHOWN (ADR-0012)
         # Verdicts from the LIVE text, before redaction removes the evidence (see _item_signals).
@@ -425,6 +454,60 @@ def _pin_basis_of(rec: dict[str, Any]) -> int | None:
     return PIN_BASIS if at >= _utc(_PIN_BASIS_2_FROM) else 1
 
 
+def tools_basis_of(rec: dict[str, Any]) -> int | None:
+    """Which rule minted this record's `tools` map. None = cannot tell, which is NOT "current".
+
+    An explicit `tools_basis` wins. Without one the record predates the field, and unlike the pin
+    there is NO date that separates the two rules: `baseline.publish` has always written basis 2
+    into this field and `build_record` has always written basis 1, concurrently, on the same store.
+    So the fallback is a DEDUCTION from the record's own contents rather than a guess from its age:
+
+        `items["tool.X"]` and `tools["X"]` are both written by `build_record`, in one call, as
+        `_hash` of the SAME description. If they disagree for any tool, `tools` was not written by
+        `build_record` — no timing, no server behaviour and no rug-pull can produce that, because a
+        rewritten description moves BOTH maps together.
+
+    A record with no `items` map to deduce from predates item fingerprinting entirely; those are
+    `build_record`'s own output from before `5959449`, hence basis 1 — the same answer the legacy
+    fallback in `_fingerprints` already assumes when it promotes `tools` to `tool.` keys.
+    """
+    stated = rec.get("tools_basis")
+    if isinstance(stated, int):
+        return stated
+    tools, items = rec.get("tools"), rec.get("items")
+    if not isinstance(tools, dict) or not isinstance(items, dict) or not items:
+        return TOOLS_BASIS_CONTENT
+    for name, digest in tools.items():
+        seen = items.get(f"tool.{name}")
+        if seen is not None and seen != digest:
+            return TOOLS_BASIS_SURFACE
+    return TOOLS_BASIS_CONTENT
+
+
+def tools_comparable(rec: dict[str, Any]) -> bool:
+    """Whether this record's `tools` map may be compared against a hash THIS build computes.
+
+    False means: enforce name membership (which needs no hash and stays exact), never the content
+    check. The safe direction is deliberate and matches `pin_not_compared` — an alarm about a
+    change that never happened denies real work on a lie, and a lie the operator cannot act on is
+    worse than a control that says out loud it is standing down.
+    """
+    return tools_basis_of(rec) == TOOLS_BASIS
+
+
+#: What a reader should TELL the operator when it stands down, naming the remedy that works.
+#: `mcpgawk decide` does NOT: a basis mismatch leaves the pin equal, so `history.pending` excludes
+#: the server and that screen is empty for exactly the servers this affects (measured on kite,
+#: 2026-09-08). Re-approving is what rewrites the map under this build's rule.
+TOOLS_NOT_COMPARED = (
+    "its approved per-tool hashes were written by a different mcpgawk component "
+    "(monitor approval) under another rule, so they cannot be compared with the hashes this "
+    "build computes and the content check was NOT run. Tool names are still enforced. Run "
+    "`mcpgawk scan --only {server}` and then `mcpgawk approve {server}` to restore the exact "
+    "anchor."
+)
+
+
 def _utc(stamp: Any) -> Any:
     """An ISO timestamp as an aware UTC datetime, or None if it cannot be read. A naive stamp is
     taken as UTC — that is what this product has always written."""
@@ -448,6 +531,55 @@ def _fingerprints(rec: dict[str, Any]) -> tuple[dict[str, str], bool]:
     return {f"tool.{n}": h for n, h in (rec.get("tools") or {}).items()}, True
 
 
+def comparable_kinds(prev: dict[str, Any], curr: dict[str, Any]) -> set[str]:
+    """Which item kinds these two records may honestly be diffed on.
+
+    THE RULE LIVES HERE because it had to live somewhere. A baseline written by a client that only
+    called `tools/list` carries a modern `items` map with no `resource.*` keys — indistinguishable,
+    to every earlier version of this code, from a server that genuinely exposes no resources. On
+    2026-09-09 that turned a first-ever sighting of `resource.dadan-video-card` into "did not exist
+    when you approved this server": a rug-pull accusation against a server that had not changed.
+
+    An absent kind is UNKNOWN, and the whole product argues an unknown must never be rendered as a
+    fact. So a kind is comparable only when the APPROVED record can speak for it:
+
+    * `enumerated` present  -> trust it; it is a recorded fact, not an inference. A server that
+      declared and enumerated `resources` and had none genuinely gains one later, and that IS
+      drift, reported as such.
+    * `enumerated` absent (every record written before this field) -> fall back to the evidence:
+      the kind is comparable if the approved map already carries at least one item of it. Errs
+      toward silence on a kind nobody can vouch for, which is the same direction the legacy
+      tools-only branch in `compare` already took.
+
+    `tool` is always comparable: `tools/list` is load-bearing in `probe`, so a record exists only
+    if it succeeded.
+    """
+    def _speaks_for(rec: dict[str, Any]) -> set[str]:
+        en = rec.get("enumerated")
+        if isinstance(en, list) and en:
+            return {str(k) for k in en}
+        # NO RECORDED ENUMERATION -> NO RESTRICTION, deliberately. `probe` always asks for prompts
+        # and resources; a kind is missing from a scan-written record only when the call actually
+        # raised. So inferring "never asked" from "no items of that kind" would be wrong for the
+        # overwhelming majority of existing records, and would silently stop reporting a prompt or
+        # resource that genuinely appeared after approval — the exact two surfaces `ITEM_KINDS` was
+        # widened to cover. A false negative on an injection surface is worse than the false
+        # positive this fix exists to remove.
+        #
+        # The asymmetry is `wrap`, not `scan`: wrap sees only the calls the agent actually made, so
+        # its baselines are partial BY CONSTRUCTION. That is why the fix is a recorded fact on the
+        # write side rather than a guess here — and why a legacy record heals as soon as one
+        # post-fix measurement exists on the other side of the comparison.
+        return set(ITEM_KINDS)
+
+    # BOTH records, intersected. Consulting only the baseline still let the CURRENT record's
+    # ignorance become an accusation: a scan that stopped asking for resources would report every
+    # resource in the baseline as REMOVED. A diff needs two witnesses, not one.
+    kinds = _speaks_for(prev) & _speaks_for(curr)
+    kinds.add("tool")
+    return kinds
+
+
 def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | None:
     """None if there's no prior record (first sighting — nothing to drift from)."""
     if not prev:
@@ -469,6 +601,20 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
             f"build reads {RECORD_SCHEMA}). Refusing to compare: any difference shown would be this "
             f"version misreading the record, not the server changing. Upgrade mcpgawk, or re-approve "
             f"this server on this version."))
+    # THE SAME REFUSAL, ONE FIELD DOWN. With no `items` map the only fingerprints a record has are
+    # its `tools` — and if those were minted under the other rule (a `baseline.publish` approval
+    # onto an entry scan had never recorded), diffing them against this build's item hashes reports
+    # EVERY tool as changed on a server that never moved. `_fingerprints` cannot see this; it only
+    # knows the map is tools-shaped, not which rule shaped it. A record that HAS `items` is
+    # unaffected: `_fingerprints` prefers that map, which is always basis 1.
+    if not isinstance(prev.get("items"), dict) and not tools_comparable(prev):
+        return DriftReport(pin_changed=False, added=[], removed=[], changed=[], token_delta=0,
+                           prev_at=prev.get("measured_at"), unreadable=(
+            "the approved baseline's per-tool hashes were written by another mcpgawk component "
+            "(monitor approval) under a different rule, and it carries no item map to compare "
+            "instead. Refusing to compare: any difference shown would be this build misreading "
+            "the record, not the server changing. Run `mcpgawk scan` and re-approve this server "
+            "to restore the anchor."))
     pa, legacy = _fingerprints(prev)
     ca, _ = _fingerprints(curr)
     if legacy:
@@ -477,6 +623,15 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
         # rug-pull alarm the first time a user upgrades. Compare the surface both records actually
         # cover, and flag that the rest starts its baseline now.
         ca = {k: v for k, v in ca.items() if k.startswith("tool.")}
+    # A kind the approved record cannot speak for is not a kind we may accuse the server over.
+    # Applied to BOTH sides so a kind is neither "added" (curr-only) nor "removed" (prev-only).
+    kinds = comparable_kinds(prev, curr)
+    incomparable = {k for k in (set(pa) | set(ca))
+                    if "." in k and k.split(".", 1)[0] not in kinds}
+    if incomparable:
+        pa = {k: v for k, v in pa.items() if k not in incomparable}
+        ca = {k: v for k, v in ca.items() if k not in incomparable}
+        legacy = True          # drives `baseline_extended`: "their baseline starts with this scan"
     added = sorted(set(ca) - set(pa))
     removed = sorted(set(pa) - set(ca))
     changed = sorted(n for n in (set(pa) & set(ca)) if pa[n] != ca[n])

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,21 @@ def stored_access_token(url: str) -> str:
     return str(tokens.get("access_token") or "")
 
 
+def local_signin_key(name: str) -> str:
+    """The token-store key for a LOCAL server's completed in-band sign-in. A local server has no
+    URL, so the store — keyed by URL hash — had no place for the evidence that a person finished
+    its own key flow; Revolut X's configure step said "Authentication is configured and the
+    connection is working" and the Today card still asked for a sign-in (founder, 2026-09-08)."""
+    return f"stdio:{name}"
+
+
+def mark_local_signin(name: str) -> str:
+    """Record a LOCAL server's completed in-band sign-in — same document and writer as kite's
+    `mark_inband_login`, under `local_signin_key`. Returns the minted login_id."""
+    from .oauth_login import mark_inband_login
+    return mark_inband_login(local_signin_key(name))
+
+
 def stored_login_id(url: str) -> str | None:
     """Which completed sign-in the stored tokens for `url` belong to, or None.
 
@@ -99,6 +115,25 @@ def stored_login_id(url: str) -> str | None:
     return got if isinstance(got, str) and got else None
 
 
+def stored_inband_at(url: str) -> str | None:
+    """When a human completed this server's OWN in-band sign-in, or None if the mark is not in-band.
+
+    An in-band sign-in is not a credential: kite binds its session to the one MCP connection that
+    asked, so a completed flow says what happened on a date, never what is true now (measured
+    2026-09-08 — a fresh `initialize` against mcp.kite.trade answers "Please log in first using the
+    login tool", and no kite entry exists anywhere in ~/.mcp-auth). The panel must be able to tell
+    the two kinds apart before it says the word "signed in".
+    """
+    try:
+        doc = json.loads(_token_path(url).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not doc.get("inband_login"):
+        return None
+    got = doc.get("logged_in_at")
+    return got if isinstance(got, str) and got else ""
+
+
 def _auth_needed_path() -> Path:
     """Servers a scan found to be REFUSING us for lack of credentials, so the panel can offer
     sign-in on evidence instead of on a launcher's name. Written by scan, read by any surface.
@@ -112,6 +147,59 @@ def _auth_needed_path() -> Path:
     """
     override = os.environ.get("MCPGAWK_AUTH_NEEDED")
     return Path(override) if override else Path.home() / ".mcpgawk" / "auth-needed.json"
+
+
+def _signin_aside_path() -> Path:
+    """Servers the PERSON recorded as "not available to me", and when.
+
+    WHY A FILE OF ITS OWN. robinhood-trading's MCP is not live for the founder's account. No store
+    on this machine can know that: it sits in `auth-needed.json` with a URL and no vendor limit —
+    indistinguishable from a working OAuth server until a callback that never comes. So it is a
+    decision the person records, not a state we detect. It cannot live beside a muted finding in
+    the trust store, because a muted finding is keyed by a TRACKED server and every server this
+    exists for is untracked by definition: measured 2026-09-08, `history.resolve` answers None for
+    all three of robinhood-trading, figma and plugin_figma_figma. Keying it there would have
+    shipped a button that silently does nothing — which is the exact class of dead end this whole
+    week was spent removing.
+
+    Resolved at CALL time from `MCPGAWK_SIGNIN_ASIDE`. Every store in this package that bound its
+    path at import has been caught rewriting the operator's own state (behaviour.json,
+    config.json, auth-needed.json); this one is redirectable from the line it was written.
+    """
+    override = os.environ.get("MCPGAWK_SIGNIN_ASIDE")
+    return Path(override) if override else Path.home() / ".mcpgawk" / "signin-aside.json"
+
+
+def signin_aside(path: Path | None = None) -> dict[str, str]:
+    """`{server name: ISO stamp}` the person has set aside. Never raises: an unreadable file means
+    "nothing set aside", which is the safe answer — it can only ever ASK more, never less."""
+    try:
+        doc = json.loads((path or _signin_aside_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in doc.items()} if isinstance(doc, dict) else {}
+
+
+def set_signin_aside(name: str, aside: bool = True, path: Path | None = None) -> bool:
+    """Record (or withdraw) "this server is not available to me". Returns whether the file now
+    says what was asked — False means nothing was written and the caller must say so, never
+    report a success it did not get."""
+    if not name:
+        return False
+    target = path or _signin_aside_path()
+    doc = signin_aside(target)
+    if aside:
+        doc[name] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    else:
+        doc.pop(name, None)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+        tmp.replace(target)
+    except OSError:
+        return False
+    return (name in signin_aside(target)) is bool(aside)
 
 
 def record_auth_needed(found: dict[str, str], path: Path | None = None,
@@ -346,9 +434,50 @@ _KEYGEN_NAMES = ("generate_keypair", "create_keypair", "generate_key", "keygen")
 _CONFIGURE_NAMES = ("configure_api_key", "set_api_key", "configure_key")
 
 
+def _tool_input_schema(tool) -> dict:
+    """The tool's input schema, whichever name the SDK gives the attribute. mcp 2.x renamed the
+    model field to `input_schema` (the wire name `inputSchema` survives only as an alias for
+    construction); reading `.inputSchema` raised AttributeError inside a swallow-all, and the
+    founder's pasted Revolut X API key answered "configure tool did not answer; run mcpgawk
+    verify" (2026-09-08) — advice that could never have shown the real error, because verify
+    never calls configure."""
+    schema = getattr(tool, "input_schema", None)
+    if schema is None:
+        schema = getattr(tool, "inputSchema", None)
+    return schema if isinstance(schema, dict) else {}
+
+
+def configure_arg_name(tool) -> str:
+    """The name the configure tool wants its secret under — from the tool's OWN schema (first
+    required string, else the first property, else `api_key`), so the next server's
+    configure(secret=...) works without a special case."""
+    schema = _tool_input_schema(tool)
+    props = schema.get("properties") or {}
+    required = schema.get("required") or list(props)
+    return next((r for r in required if (props.get(r) or {}).get("type", "string") == "string"),
+                next(iter(props), "api_key"))
+
+
+def _leaf_error(exc: BaseException) -> str:
+    """The innermost message. anyio wraps a task's failure in ExceptionGroups whose own text is
+    "unhandled errors in a TaskGroup (1 sub-exception)" — no better than "did not answer"."""
+    import builtins
+    group_type = getattr(builtins, "BaseExceptionGroup", None) or ()   # 3.11+; the floor is 3.10
+    seen = 0
+    while isinstance(exc, group_type) and exc.exceptions and seen < 8:
+        exc = exc.exceptions[0]
+        seen += 1
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return f"{type(exc).__name__}: {text}"[:300]
+
+
 def inband_setup(command: str, args: list[str], env: dict[str, str],
                  step: str, value: str | None = None, timeout: float = 40.0) -> tuple[str, str] | None:
     """Execute ONE step of a server's own setup flow. Returns (kind, text) or None.
+
+    kind="error": the step stopped before the server's verdict — the text is the innermost
+    exception, ours or the server's. Callers MUST check the kind: an error is never the keypair
+    steps and never a status. None means the server has no tool of that shape.
 
     step="start": run the server's key-generation tool; text is its verbatim output (the public
     key the user must register — PUBLIC by construction, so the caller may display it unscrubbed
@@ -387,14 +516,7 @@ def inband_setup(command: str, args: list[str], env: dict[str, str],
                     tool = pick(_CONFIGURE_NAMES)
                     if tool is None:
                         return None
-                    # The argument name comes from the tool's OWN schema — first required string —
-                    # so the next server's configure(secret=...) works without a special case.
-                    schema = tool.inputSchema or {}
-                    props = schema.get("properties") or {}
-                    required = schema.get("required") or list(props)
-                    arg = next((r for r in required
-                                if (props.get(r) or {}).get("type", "string") == "string"),
-                               next(iter(props), "api_key"))
+                    arg = configure_arg_name(tool)
                     out = text_of(await session.call_tool(tool.name, {arg: value}))
                     status = pick(_INBAND_STATUS_NAMES)
                     if status is not None:
@@ -404,8 +526,10 @@ def inband_setup(command: str, args: list[str], env: dict[str, str],
 
     try:
         return asyncio.run(asyncio.wait_for(_go(), timeout))
-    except Exception:                              # noqa: BLE001 — the caller reports, never hangs
-        return None
+    except asyncio.TimeoutError:
+        return ("error", f"no answer within {int(timeout)}s")
+    except Exception as exc:                       # noqa: BLE001 — the caller reports, never hangs
+        return ("error", _leaf_error(exc))
 
 
 def _clip_notice(text: str, limit: int = 400) -> str:

@@ -167,7 +167,8 @@ validated_server_key = history.validated_server_key
 def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             alias: str | None = None, path: str | None = None,
             annotations: dict[str, dict[str, Any]] | None = None,
-            signals: dict[str, list[str]] | None = None) -> None:
+            signals: dict[str, list[str]] | None = None,
+            tools_basis: int | None = None) -> None:
     """Write an approval INTO the spine from another pillar.
 
     The read path (`export`) alone makes the spine a one-way mirror: verify and monitor could see
@@ -191,11 +192,21 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         # Not `setdefault(key, {})`: this was the writer that minted the junk `s`/`srv` rows in the
         # real store from a bare monitor server_id. `server_entry` validates on creation.
         entry = history.server_entry(store, key)
+        # SAY WHICH RULE MINTED THE MAP WE ARE WRITING. The spread carries the previous record's
+        # fields forward, so without this line an approval here inherited the `tools_basis` stamp
+        # of the `build_record` it replaced — the record then claimed basis 1 over a basis-2 map,
+        # which is worse than no stamp at all because every reader believes it. Callers that hold
+        # description-only hashes say so; the default is what this function's historical callers
+        # (the monitor spine, via `Snapshot.tool_hashes` = `fingerprint.surface_hashes`) actually
+        # pass, so an un-updated caller is described correctly rather than flattered.
+        from . import drift   # local, like history's: keeps the module graph acyclic
+        basis = drift.TOOLS_BASIS_SURFACE if tools_basis is None else int(tools_basis)
         record = {
             **(entry.get("approved") or {}),
             "measured_at": approved_at,
             "pin": pin,
             "tools": dict(tools),
+            "tools_basis": basis,
         }
         # NOTE: `signals` is deliberately CARRIED FORWARD by the spread above, not dropped.
         # Dropping it was tried and reverted the same day: `compare` gates the whole verdict path on
@@ -235,7 +246,8 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
 
 def record_observed(key: str, *, pin: str, tools: dict[str, str], measured_at: str,
                     alias: str | None = None, path: str | None = None,
-                    annotations: dict[str, dict[str, Any]] | None = None) -> None:
+                    annotations: dict[str, dict[str, Any]] | None = None,
+                    tools_basis: int | None = None) -> None:
     """Record a server we MEASURED, without claiming anybody approved it.
 
     UNGATED, deliberately, and the distinction from `publish` is the whole point of having two
@@ -257,7 +269,14 @@ def record_observed(key: str, *, pin: str, tools: dict[str, str], measured_at: s
     """
     from . import drift  # noqa: F401  — kept out of module import time; history is the writer
 
-    rec: dict[str, Any] = {"pin": pin, "tools": dict(tools), "measured_at": measured_at}
+    # STAMPED FOR THE SAME REASON `publish` IS, and this path needs it MORE. A reduced record
+    # carries no `items` map, so `drift.tools_basis_of` has nothing to deduce from and must assume
+    # basis 1 — and a first sighting here becomes the approved baseline by trust-on-first-use. An
+    # unstamped surface-basis map adopted that way would deny every tool on the next scan, which is
+    # exactly the kite failure by a second route.
+    rec: dict[str, Any] = {"pin": pin, "tools": dict(tools), "measured_at": measured_at,
+                           "tools_basis": (drift.TOOLS_BASIS_SURFACE if tools_basis is None
+                                           else int(tools_basis))}
     if annotations is not None:
         rec["annotations"] = {f"tool.{name}": dict(ann) for name, ann in annotations.items()}
     history.record(key, rec, path=path, alias=alias)

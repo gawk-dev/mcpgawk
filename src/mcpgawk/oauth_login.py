@@ -370,6 +370,8 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
     async def _redirect(auth_url: str) -> None:
         print(f"\n  Opening your browser to sign in…\n"
               f"  If it doesn't open, paste this into a browser:\n    {auth_url}\n", flush=True)
+        if os.environ.get("MCPGAWK_NO_BROWSER"):
+            return                                  # the panel's/tests' guard; the printed URL stands
         try:
             webbrowser.open(auth_url)
         except Exception:  # noqa: BLE001 — headless/no-browser: the printed URL is the fallback

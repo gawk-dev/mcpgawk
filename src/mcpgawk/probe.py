@@ -53,6 +53,14 @@ class ServerSnapshot:
     prompts: list[dict[str, Any]] = field(default_factory=list)
     resources: list[dict[str, Any]] = field(default_factory=list)
     server_info: dict[str, Any] = field(default_factory=dict)
+    #: Which item kinds we ACTUALLY enumerated, not which came back non-empty. `resources: []`
+    #: means "asked, got none"; a kind ABSENT here means "never asked / the call failed", and the
+    #: two must never be conflated — that is what made a resource nobody had ever listed look like
+    #: a tool that appeared after approval (dadan, 2026-09-09).
+    enumerated: list[str] = field(default_factory=list)
+    #: The server's own `initialize` capabilities. Previously discarded, which left no way to tell
+    #: a server that declares `resources` from one that does not.
+    capabilities: dict[str, Any] = field(default_factory=dict)
     server_card: dict[str, Any] | None = None   # self-declared .well-known card (http/sse only)
     error: str | None = None
     # Typed failure classification (closed set) — for messaging and so tests/canaries can assert on
@@ -130,24 +138,40 @@ async def _snapshot(session: ClientSession, name: str, transport: str) -> Server
         protocol_version = init.protocol_version
         server_info = (init.server_info.model_dump(by_alias=True, mode="json")
                        if init.server_info else {})
+        caps = getattr(init, "capabilities", None)
+        try:
+            capabilities = (caps.model_dump(by_alias=True, mode="json", exclude_none=True)
+                            if hasattr(caps, "model_dump") else dict(caps or {}))
+        except Exception:         # noqa: BLE001 — capabilities are evidence, never load-bearing
+            capabilities = {}
     except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
         disc = await session.discover()
         protocol_version = (disc.supported_versions[0] if disc.supported_versions else None)
         server_info = {}          # server/discover carries capabilities, not serverInfo
+        capabilities = {}
     snap = ServerSnapshot(
         name=name,
         transport=transport,
         protocol_version=protocol_version,
         server_info=server_info,
+        capabilities=capabilities,
     )
     # tools/list is the load-bearing surface; prompts/resources are optional per server.
     snap.tools = _dump((await session.list_tools()).tools)
-    for attr, method in (("prompts", "list_prompts"), ("resources", "list_resources")):
+    snap.enumerated.append("tool")
+    for attr, kind, method in (("prompts", "prompt", "list_prompts"),
+                               ("resources", "resource", "list_resources")):
         try:
             res = await getattr(session, method)()
             setattr(snap, attr, _dump(getattr(res, attr)))
         except Exception:
-            pass  # server doesn't advertise that capability — not an error for us
+            # Still degrades — an optional surface must never fail a scan. What changed is that
+            # the failure is now RECORDED instead of swallowed: the kind stays out of
+            # `enumerated`, so a later diff knows this record cannot speak for it. Swallowing it
+            # made "we never asked" look identical to "the server has none", and a diff then
+            # reported a first-ever sighting as a tool that arrived after approval.
+            continue
+        snap.enumerated.append(kind)
     return snap
 
 
@@ -214,10 +238,10 @@ async def _bounded(coro_factory, name: str, transport: str, timeout: float,
         status = status_hint() if status_hint is not None else None
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
                               error=f"{type(real).__name__}: {real}",
-                              error_kind=_kind_of(real, status))
+                              error_kind=_kind_of(real, status, transport))
 
 
-def _kind_of(exc: BaseException, status: int | None = None) -> str:
+def _kind_of(exc: BaseException, status: int | None = None, transport: str | None = None) -> str:
     """Classify a probe failure by EXCEPTION TYPE, never by message text (F2's lesson). An
     HTTPStatusError means the host answered HTTP and then refused to speak MCP — that is a live URL
     that isn't an MCP endpoint (a docs page, a 404, a 405 on the wrong path), which is a different
@@ -255,6 +279,14 @@ def _kind_of(exc: BaseException, status: int | None = None) -> str:
             return "auth-required"           # the refresh failed; the fix is a sign-in, not a URL
     except ImportError:                                   # pragma: no cover
         pass
+    if transport == "stdio":
+        # A LOCAL process — nothing here is an address. The child either could not be spawned
+        # (the command is missing or not executable) or it spawned and died before answering
+        # `initialize`, even with nothing on stderr. "unreachable" sent the user to check a URL
+        # that does not exist ([FOUNDER 2026-09-05] ledger 113, brief §1c: three registry servers).
+        if isinstance(exc, (FileNotFoundError, PermissionError)):
+            return "command-missing"
+        return "server-failed"
     if _connect_failed(exc):
         return "connect-failed"
     return "unreachable"
@@ -342,6 +374,11 @@ async def probe_stdio(name: str, command: str, args: list[str] | None = None,
                 snap = replace(snap, error=f"{snap.error} — the server said: {detail}"
                                      + (f" — hint: {hint}" if hint else ""),
                                error_kind=kind)
+            elif snap.error_kind == "server-failed":
+                # It spawned and died without a word. Say that, rather than leaving the bare
+                # protocol message ("Connection closed") to be read as a network fault.
+                snap = replace(snap, error=f"{snap.error} — the process exited before answering "
+                                           f"initialize; it printed nothing")
         return snap
 
 

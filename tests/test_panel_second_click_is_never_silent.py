@@ -17,7 +17,7 @@ def test_a_second_click_is_acknowledged_and_cleared(monkeypatch):
 
     gate = threading.Event()
     monkeypatch.setattr(panel, "run_scan",
-                        lambda: (gate.wait(5), {"ok": True, "message": "done"})[1])
+                        lambda *a, **k: (gate.wait(5), {"ok": True, "message": "done"})[1])
     panel._ACTION.update(running=False, label="", message="", rows=[], notice="", at="")
 
     panel._run_action_bg("scan")
@@ -25,10 +25,10 @@ def test_a_second_click_is_acknowledged_and_cleared(monkeypatch):
     panel._run_action_bg("verify", "srv")          # the click that used to vanish
 
     banner = panel._action_banner(dict(panel._ACTION))
-    # Copy re-pinned to slice 1 (2026-08-24): a refused action reads as QUEUED with the running
-    # action named, not the old "not started". The invariant — the second click is never silent —
-    # is unchanged and still asserted.
-    assert "verify · srv" in banner and "queued" in banner.lower(), \
+    # Copy re-pinned (2026-09-07): a press during a run is KEPT — a queue of one that starts when
+    # the running action ends — and the banner says so, naming both. The invariant — the second
+    # click is never silent — is unchanged and still asserted.
+    assert "verify · srv" in banner and "will start as soon as scan finishes" in banner, \
         "a second click while an action runs left no visible trace"
     assert "Running" in banner, "the running state itself must still be shown"
 

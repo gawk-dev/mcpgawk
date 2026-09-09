@@ -90,7 +90,11 @@ def test_the_post_action_redirect_anchors_at_the_result():
     # Both POST redirects go through the one _back URL, which carries the anchor AND the tab
     # the human acted from (tab state dies with a page load — founder, 2026-08-15).
     # done=1 rides the same redirect since the once-only result popup (24 Aug); anchor + tab kept.
-    assert 'tab={_rtab}&done=1#action' in text, "the redirect lost its anchor or its tab"
+    # The URL is built by _post_back since /next (2026-09-05): drive it rather than grep it.
+    from mcpgawk import panel
+    assert panel._post_back("T", "n3", "") == "/?t=T&tab=n3&done=1#action", \
+        "the redirect lost its anchor or its tab"
+    assert 'send_header("Location", _back)' in text and "_back = _post_back(" in text
     assert text.count('send_header("Location", _back)') >= 2, \
         "a post-action redirect stopped using the anchored, tab-carrying URL"
     assert 'id="action"' in text, "the anchor target does not exist in the page"
@@ -420,14 +424,20 @@ def test_sign_in_button_carries_the_fleet_name_never_None(monkeypatch):
     """figma — a remote server with no store entry — rendered a sign-in button whose hidden key
     was the literal string 'None' (its absent store key), a dead button that failed with
     "no server named 'None'" when the founder clicked it (driven live 2026-08-14). run_login
-    addresses by fleet NAME, so the form must carry the name."""
+    addresses by fleet NAME, so the form must carry the name.
+
+    The fixture host moved off mcp.figma.com on 2026-09-08: Figma is now a known vendor wall and
+    gets NO sign-in button at all, which is its own contract in
+    tests/test_signed_in_is_visible.py. The invariant pinned here — a button that exists carries
+    the fleet name, never a stringified None — is unchanged, and needs a server that qualifies.
+    """
     from mcpgawk import panel, remote_login
 
     monkeypatch.setattr(remote_login, "login_url",
                         lambda entry, name="", path=None: "https://x.example/authorize")
     monkeypatch.setattr(remote_login, "stored_access_token", lambda url: None)
     html = panel.render(
-        {"entries": {"figma": {"url": "https://mcp.figma.com/mcp"}},
+        {"entries": {"nova": {"url": "https://mcp.nova.example/mcp"}},
          "store": {"servers": {}}, "pending": [], "findings": [], "recent_calls": [],
          "hooks": {}, "adapters": {}, "unscannable": [], "observed": {}},
         token="tok", action=None)
@@ -436,7 +446,7 @@ def test_sign_in_button_carries_the_fleet_name_never_None(monkeypatch):
     login_forms = [f for f in _re.findall(r"<form(?:(?!</form>).)*?</form>", html, _re.S)
                    if 'value="login"' in f]
     assert login_forms, "the qualifying remote server got no sign-in button"
-    assert any('name="key" value="figma"' in f for f in login_forms), \
+    assert any('name="key" value="nova"' in f for f in login_forms), \
         "the sign-in form must carry the fleet name run_login resolves"
 
 
@@ -709,6 +719,11 @@ def test_the_session_log_is_one_dated_stream_newest_first(monkeypatch, tmp_path)
     run = types.SimpleNamespace(kind="verify", target="kite", status="ok",
                                 started_at="2026-08-15T06:58:49Z", summary="")
     monkeypatch.setattr(runlog, "list_runs", lambda **kw: [run])
+    # The stream skips the run registry when no db exists (a never-run machine is not an error);
+    # this machine has recorded runs, so the registry file is present.
+    registry = tmp_path / "runs.db"
+    registry.write_bytes(b"")
+    monkeypatch.setattr(runlog, "default_path", lambda: registry)
     monkeypatch.setattr(panel, "monitor_status", lambda home=None: {
         "running": True, "since": "2026-08-15T07:22:00Z",
         "alerts": [{"server": "resend", "kind": "drift", "detail": "x",
@@ -728,7 +743,8 @@ def test_the_session_log_is_one_dated_stream_newest_first(monkeypatch, tmp_path)
     whens = [ln["when"] for ln in lines if ln["when"]]
     assert whens == sorted(whens, reverse=True), "the stream must be newest first"
     html = panel._session_log_html(lines)
-    assert "slrow" in html and "07:30:00" in html
+    assert "slrow" in html and panel._local_stamp("2026-08-15T07:30:00Z") in html, \
+        "rendered in this machine's local clock, dated (walk 2026-09-05)"
 
 
 def test_the_page_seeds_the_session_log_so_live_is_never_blank(monkeypatch):
@@ -930,3 +946,30 @@ def test_a_second_click_stops_the_first_held_child(tmp_path, monkeypatch):
     assert panel._SIGNIN_CHILD["proc"] is second
     with panel._SIGNIN_LOCK:
         panel._SIGNIN_CHILD.clear()
+
+
+def test_alerts_survive_a_build_with_no_paid_engine(tmp_path, monkeypatch):
+    """A missing OPTIONAL import must cost only what it can no longer classify.
+
+    Found by the PUBLIC suite, 2026-09-09, not this one: `from gawk_platform.monitor.status import
+    never_succeeded` sat above the alert loop inside a single `try`, so on a build without the paid
+    engine the ImportError was swallowed and the WHOLE alert stream disappeared from the session
+    log. A missing write that reads as "nothing to report" — the same shape as the swallowed
+    `resources/list`, and invisible in this repo because the paid engine is always importable here.
+    """
+    import sys
+
+    from mcpgawk import panel
+
+    monkeypatch.setitem(sys.modules, "gawk_platform.monitor.status", None)  # import raises
+    monkeypatch.setattr(panel, "monitor_status", lambda home=None: {
+        "running": False, "alerts": [
+            {"server": "resend", "kind": "drift", "detail": "x",
+             "raised_at": "2026-08-15T07:30:00Z", "state": "pending"}],
+        "servers": [{"server_id": "kite", "last_check": "2026-08-15T07:25:00Z", "last_ok": True}]})
+    monkeypatch.setattr(panel, "verify_runs_dir", lambda: tmp_path / "none")
+
+    texts = " ".join(ln["text"] for ln in panel.session_log_lines())
+    assert "alert · resend · drift" in texts, \
+        "the alert stream must not vanish because an optional import failed"
+    assert "kite" in texts, "the per-server line still renders, minus the classification"

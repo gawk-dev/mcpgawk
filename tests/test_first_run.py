@@ -69,6 +69,52 @@ def test_stderr_tail_is_empty_when_the_server_said_nothing():
         assert _stderr_tail(fh) == ""
 
 
+# --- ledger 113 (1c): a local process is never "unreachable" ------------------------------------ #
+
+def test_a_stdio_child_that_exits_silently_is_server_failed_not_unreachable():
+    snap = asyncio.run(probe_stdio("silent", "sh", ["-c", "exit 1"], timeout=10))
+    assert snap.error and snap.error_kind == "server-failed"
+    assert "exited before answering initialize; it printed nothing" in snap.error
+    assert "the server said:" not in snap.error                 # nothing was said; do not pretend
+
+
+def test_a_missing_stdio_binary_is_command_missing():
+    snap = asyncio.run(probe_stdio("gone", "definitely-not-a-real-binary-xyz", [], timeout=10))
+    assert snap.error and snap.error_kind == "command-missing"
+
+
+def test_network_transports_keep_their_own_kinds():
+    from mcpgawk.probe import _kind_of
+    assert _kind_of(ConnectionRefusedError("refused"), None, "http") == "connect-failed"
+    assert _kind_of(RuntimeError("no route"), None, "sse") == "unreachable"
+    assert _kind_of(RuntimeError("closed"), None, "stdio") == "server-failed"
+
+
+# --- ledger 113 (1d): --no-track writes nothing, the run log included ------------------------------ #
+
+def test_no_track_never_opens_the_run_log(monkeypatch, tmp_path, capsys):
+    """The registry crawl scans on a read-only rootfs under --no-track; a run log that still opened
+    there printed 'run log close failed (disk I/O error)' beside the server's own stderr."""
+    from mcpgawk import cli
+    monkeypatch.setenv("MCPGAWK_RUNS", str(tmp_path / "no-such-dir" / "runs.db"))
+    monkeypatch.setenv("MCPGAWK_HISTORY", str(tmp_path / "history.json"))
+    monkeypatch.setenv("MCPGAWK_NO_UPDATE_CHECK", "1")
+    code = cli.main(["scan", "--stdio", "sh -c 'exit 1'", "--yes", "--no-track", "--json"])
+    assert code != 0                                           # the server failed; that is reported
+    assert not (tmp_path / "no-such-dir").exists()             # and nothing was written for it
+    assert "run log" not in capsys.readouterr().err
+
+
+def test_a_tracked_scan_still_records_its_run(monkeypatch, tmp_path):
+    from mcpgawk import cli, runlog
+    monkeypatch.setenv("MCPGAWK_RUNS", str(tmp_path / "runs.db"))
+    monkeypatch.setenv("MCPGAWK_HISTORY", str(tmp_path / "history.json"))
+    monkeypatch.setenv("MCPGAWK_NO_UPDATE_CHECK", "1")
+    cli.main(["scan", "--stdio", "sh -c 'exit 1'", "--yes", "--json"])
+    assert (tmp_path / "runs.db").exists()
+    assert any(r.kind == "scan" for r in runlog.list_runs(limit=5))
+
+
 # --- ledger 114: the two failure causes the registry crawl saw most get a next step ------------- #
 
 def test_uvs_own_from_line_is_quoted_verbatim_as_the_hint():

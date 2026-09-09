@@ -643,6 +643,37 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--port", type=int, default=7718, help="local port (default: 7718)")
     pn.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
+    wr = sub.add_parser(
+        "wrap",
+        help="run a server through mcpgawk, inside the agent's own session",
+        description="Put mcpgawk in the pipe the client already opens, instead of asking for "
+                    "access of its own. The client's config launches `mcpgawk wrap -- <the "
+                    "server's own command>`, so the real server starts in the client's "
+                    "environment with the client's credentials, and every message passes through: "
+                    "the tool surface it declares becomes its baseline with no scan and no "
+                    "sign-in, and every tools/call is checked against that baseline as it "
+                    "happens. Client-agnostic by construction — it is a config edit, so Claude "
+                    "Code, Codex, Cursor, Claude Desktop and the rest are covered by the same "
+                    "mechanism. This slice OBSERVES: a call that would be blocked is said on "
+                    "stderr and recorded, never dropped.")
+    wr.add_argument("--name", default=None,
+                    help="the config name of this server, so records carry the name you know it "
+                         "by (default: whatever the server calls itself)")
+    wr.add_argument("--install", metavar="SERVER", default=None,
+                    help="edit every config file that names SERVER so its client launches it "
+                         "through mcpgawk (the original command is kept inside the new args, and "
+                         "a backup beside each file)")
+    wr.add_argument("--uninstall", metavar="SERVER", default=None,
+                    help="undo --install: the original command is read back out of the wrapper's "
+                         "own arguments, so nothing depends on a backup being current")
+    wr.add_argument("--client", default=None, metavar="CLIENT",
+                    help="with --install/--uninstall: only this client's config files "
+                         "(e.g. claude-code), leaving every other client untouched")
+    wr.add_argument("--dry-run", action="store_true",
+                    help="with --install/--uninstall: say what would change, write nothing")
+    wr.add_argument("command", nargs=argparse.REMAINDER,
+                    help="-- followed by the server's own launch command")
+
     d = sub.add_parser(
         "decide",
         help="review and decide on servers that changed after you approved them (opens locally)",
@@ -1660,6 +1691,15 @@ def _main_body(argv: list[str] | None) -> int:
         _staleness_advisory()
         return code
 
+    # `--no-track` means "measure but write nothing" — the run log included. It is the flag the
+    # registry crawl runs under, on a read-only rootfs, where opening the run log produced
+    # "run log close failed (OperationalError: disk I/O error)" beside the server's own stderr
+    # and was once read as an instrument crash ([FOUNDER 2026-09-05] ledger 113, brief §1d).
+    if "--no-track" in raw:
+        code = _dispatch(argv)
+        _staleness_advisory()
+        return code
+
     # Cheap, and it keeps the timeline honest: a scan killed by Ctrl-C last week should not still
     # read as "in progress" today.
     runlog.reconcile_stale()
@@ -1780,6 +1820,18 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if args.cmd == "decide":
         from .decide import serve
         return serve(port=args.port, open_browser=not args.no_open)
+
+    if args.cmd == "wrap":
+        if args.install or args.uninstall:
+            from .wrap import install as _wrap_install
+            return _wrap_install(args.install or args.uninstall,
+                                 undo=bool(args.uninstall), dry_run=args.dry_run,
+                                 client=args.client)
+        from .wrap import run as _wrap_run
+        _argv = list(getattr(args, "command", None) or [])
+        if _argv and _argv[0] == "--":
+            _argv = _argv[1:]
+        return _wrap_run(_argv, name=args.name)
 
     if args.cmd == "status":
         from .status import collect, collect_and_render, to_json
