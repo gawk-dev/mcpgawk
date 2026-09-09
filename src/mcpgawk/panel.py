@@ -7087,7 +7087,7 @@ def observed_only(d: dict[str, Any], now: str = "") -> list[dict[str, Any]]:
     no fleet listing, no store, no queue and had no baseline. mcpgawk watched an agent call it
     1605 times and said nothing anywhere. Pure over what `collect` already read; never raises.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     entries = d.get("entries") or {}
     store_names = set()
     for k in ((d.get("store") or {}).get("servers") or {}):
