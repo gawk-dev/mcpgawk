@@ -82,6 +82,14 @@ def _snapshot(session: Session):
         protocol_version=session.protocol_version,
         tools=list(session.tools),
         server_info=dict(session.server_info),
+        # WHAT THIS CONNECTION ACTUALLY ASKED FOR, and no more. A wrap rides the client's own
+        # session and sees exactly the `tools/list` the client sent — never prompts/list or
+        # resources/list, because the client had no reason to send them. Leaving this empty is
+        # read downstream as "no recorded fact, do not restrict" (the right reading for records
+        # written before the field existed), which made the very next full scan report the first
+        # sighting of a resource as "changed since you approved it". Wrap knows better than that,
+        # so it says so.
+        enumerated=["tool"],
     )
 
 

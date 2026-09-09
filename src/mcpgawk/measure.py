@@ -78,8 +78,11 @@ _EXFIL_NAME = re.compile(r"\b(fetch|http|request|download|browse|scrape|curl|web
 class ToolMeasure:
     name: str
     tokens: int                      # INDEX
-    write: bool                      # EXACT (structural)
-    exfil_capable: bool              # EXACT (structural)
+    write: bool                      # BOUNDED (declaration first, then a verb heuristic)
+    # BOUNDED, and it was mis-annotated EXACT until 2026-09-10 — which is how a regex over the tool
+    # name came to headline a report as though it were a structural fact. It reads readOnlyHint
+    # first; absent that, it pattern-matches. Both arms can be wrong, and the report must say so.
+    exfil_capable: bool
     annotations: dict[str, Any]      # EXACT (declared)
     # Both EXACT counts, not judgements. They exist so grade.py can ask whether a tool is described
     # in proportion to what it does; the judgement lives there, the facts live here. Kept on this
@@ -116,7 +119,14 @@ def _count(enc, text: str) -> int:
     return len(enc.encode(text)) if enc is not None else max(1, len(text) // 4)
 
 
-def _exfil_capable(tool: dict[str, Any]) -> bool:
+def _exfil_capable(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> bool:
+    # A DECLARATION OUTRANKS THE REGEX, exactly as it does in `_is_write` one function below. This
+    # arm was missing until 2026-09-10 and the two classifiers disagreed about the same annotation:
+    # four tools on a live 70-tool server matched `_EXFIL_NAME` on the bare word "request" sitting
+    # inside the product's own noun ("recording request"), and two of those were declared
+    # readOnlyHint=true. A server that annotated honestly was reported as the leak path for it.
+    if (ann or tool.get("annotations") or {}).get("readOnlyHint") is True:
+        return False
     if _EXFIL_NAME.search(tool.get("name", "") + " " + (tool.get("description") or "")):
         return True
     props = ((tool.get("inputSchema") or {}).get("properties") or {})
@@ -150,7 +160,7 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         props = ((t.get("inputSchema") or {}).get("properties") or {})
         tools.append(ToolMeasure(
             name=t.get("name", "?"), tokens=tk,
-            write=_is_write(t, ann), exfil_capable=_exfil_capable(t), annotations=ann,
+            write=_is_write(t, ann), exfil_capable=_exfil_capable(t, ann), annotations=ann,
             param_count=len(props),
             description_words=len((t.get("description") or "").split())))
     # Integrity pin over the WHOLE tool surface — name + description + canonical input schema +

@@ -465,7 +465,14 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         for t in sorted(tools, key=lambda t: -t["tokens"]):
             tags = [c for c, on in (("write", t["write"]), ("exfil", t["exfil_capable"]),
                                     ("no-annotation", not (t.get("annotations") or {}))) if on]
-            lines.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {', '.join(tags) or 'read-only'}")
+            # NO TAG IS NOT A CLEAN BILL. Untagged means our heuristics stayed quiet, which is a
+            # fact about us, not about the tool. Only the server's own readOnlyHint earns the words
+            # "read-only" — three tools on a real fleet ("restore_folder", "restore_video",
+            # "translate_video") declared nothing, matched no write verb, and were printed read-only
+            # on the strength of our own silence.
+            quiet = ("read-only (declared)" if (t.get("annotations") or {}).get("readOnlyHint") is True
+                     else "no signal")
+            lines.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {', '.join(tags) or quiet}")
 
     # Bounded heuristic signals — one actionable line each. Each KIND is a DISTINCT finding and must
     # be named as itself: filing dynamic-dispatch, tool-shadowing and server-card-mismatch under
