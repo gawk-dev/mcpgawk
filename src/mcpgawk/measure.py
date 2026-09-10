@@ -70,7 +70,34 @@ _WRITE_LEADING = re.compile(
     r"^\W*(?:it\s+|this\s+tool\s+)?(" + "|".join(_third_person(v) for v in _WRITE_VERBS) + r")\b",
     re.I)
 
-_EXFIL_PARAM = re.compile(r"\b(url|uri|endpoint|webhook|href|callback|redirect)\b", re.I)
+#: Parameter-name words that mean "the CALLER chooses a destination". This is the STRUCTURAL half
+#: of exfil detection and the stronger half: whoever controls that argument controls where data
+#: goes, whatever the prose says.
+_EXFIL_PARAM_WORDS = frozenset(
+    {"url", "uri", "endpoint", "webhook", "href", "callback", "redirect"})
+
+#: The old rule was `re.compile(r"\b(url|uri|...)\b")` applied to the raw property name, and `_` is
+#: a WORD character — so `\burl\b` never matched `source_url`. That is not an edge case: snake_case
+#: is the dominant convention in MCP input schemas, so the parameter arm only ever fired on a
+#: property named EXACTLY `url`. Measured on a live 70-tool server (2026-09-10): it missed
+#: `source_url`, `audio_url`, `image_url`, `cta_url` and `meeting_url` — including `upload_video`,
+#: where the server fetches a URL the caller supplies, which is the textbook shape this rule exists
+#: to catch. Meanwhile the count was driven entirely by the NAME arm matching prose. The strong
+#: signal was dead and the weak one was doing all the work.
+#:
+#: Splitting the identifier first is what makes it precise rather than merely wider: `source_url`
+#: tokenises to {source, url} and matches, while `file_name` tokenises to {file, name} and does
+#: not. A looser regex (dropping `\b`) would have matched `curling_urn`.
+def _param_tokens(name: str) -> set[str]:
+    """`sourceUrl`, `source_url`, `source-url`, `source.url` -> {'source', 'url'}."""
+    return {t.lower() for t in re.findall(r"[A-Za-z]+",
+                                          re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name))}
+
+
+def _is_destination_param(name: str) -> bool:
+    return bool(_param_tokens(name) & _EXFIL_PARAM_WORDS)
+
+
 _EXFIL_NAME = re.compile(r"\b(fetch|http|request|download|browse|scrape|curl|web)\b", re.I)
 
 
@@ -82,13 +109,23 @@ class ToolMeasure:
     # BOUNDED, and it was mis-annotated EXACT until 2026-09-10 — which is how a regex over the tool
     # name came to headline a report as though it were a structural fact. It reads readOnlyHint
     # first; absent that, it pattern-matches. Both arms can be wrong, and the report must say so.
-    exfil_capable: bool
+    exfil_capable: bool              # see `exfil_basis` below for WHY it is true
     annotations: dict[str, Any]      # EXACT (declared)
     # Both EXACT counts, not judgements. They exist so grade.py can ask whether a tool is described
     # in proportion to what it does; the judgement lives there, the facts live here. Kept on this
     # side of the wall for the same reason `write` is: counting is a fact, deciding is not.
     param_count: int = 0
     description_words: int = 0
+    #: WHY `exfil_capable` is true: "param:<name>" (structural — the tool takes a destination from
+    #: its caller) or "wording:<word>" (lexical — only its prose suggests network reach), and ""
+    #: when it is false. The report prints this so a reader can weigh the two arms differently
+    #: instead of receiving one number over both.
+    #:
+    #: DEFAULTED, and last, on purpose: it is DERIVED from the same tool `exfil_capable` is derived
+    #: from, so a caller that builds a ToolMeasure by hand (every test fixture, and `grade.py`'s
+    #: callers) must not be forced to restate it. Empty then means "not flagged, or nobody said" —
+    #: which is exactly what the renderer treats as "no claim to make".
+    exfil_basis: str = ""
 
 
 @dataclass
@@ -119,18 +156,48 @@ def _count(enc, text: str) -> int:
     return len(enc.encode(text)) if enc is not None else max(1, len(text) // 4)
 
 
-def _exfil_capable(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> bool:
-    # A DECLARATION OUTRANKS THE REGEX, exactly as it does in `_is_write` one function below. This
-    # arm was missing until 2026-09-10 and the two classifiers disagreed about the same annotation:
-    # four tools on a live 70-tool server matched `_EXFIL_NAME` on the bare word "request" sitting
-    # inside the product's own noun ("recording request"), and two of those were declared
-    # readOnlyHint=true. A server that annotated honestly was reported as the leak path for it.
+def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str:
+    """WHY this tool was flagged, in the product's own words. `""` means it was not.
+
+    Two arms of very different strength, and the report was printing one number over both:
+
+      * ``param:<name>`` — the tool takes a DESTINATION from its caller (`source_url`,
+        `webhook_url`). Structural: whoever controls that argument controls where data goes,
+        whatever the prose says.
+      * ``wording:<word>`` — only the name or description suggests network reach. Lexical, and
+        routinely wrong: on a live 70-tool server, "request" matched inside the product's own noun
+        "recording request" twice.
+
+    Naming the basis is the point. A one-line headline that asserts "can reach the network" over
+    both arms overstates the weak one, and the operator cannot tell which tools it is confident
+    about. Neither arm OBSERVES anything — `mcpgawk verify` is what does that.
+
+    A DECLARATION OUTRANKS BOTH, exactly as in `_is_write`. That arm was missing until 2026-09-10,
+    and two tools that declared `readOnlyHint: true` were reported as the server's leak path.
+    """
     if (ann or tool.get("annotations") or {}).get("readOnlyHint") is True:
-        return False
-    if _EXFIL_NAME.search(tool.get("name", "") + " " + (tool.get("description") or "")):
-        return True
-    props = ((tool.get("inputSchema") or {}).get("properties") or {})
-    return any(_EXFIL_PARAM.search(k) for k in props)
+        return ""
+    # Parameter first: it is the strongest evidence, so it should be the reported reason when
+    # several arms fire (`add_watermark` has an `image_url` AND the word "http" in its prose).
+    for k in ((tool.get("inputSchema") or {}).get("properties") or {}):
+        if _is_destination_param(k):
+            return f"param:{k}"
+    # THE TOOL'S OWN NAME NAMES A DESTINATION. `fetch_url` is not a chance word in prose — the
+    # tool advertises what it does in its identifier, and a schema-less tool would otherwise be
+    # demoted to "wording" alongside a description that merely says "curl". Same destination
+    # vocabulary as the parameter arm, so this is one rule applied in two places rather than a
+    # second list that drifts: `fetch_url` -> {fetch, url} qualifies, while
+    # `create_recording_request` -> {create, recording, request} does not, and neither does
+    # `prepare_upload`.
+    name = tool.get("name", "")
+    if _is_destination_param(name):
+        return f"name:{name}"
+    m = _EXFIL_NAME.search(name + " " + (tool.get("description") or ""))
+    return f"wording:{m.group(0).lower()}" if m else ""
+
+
+def _exfil_capable(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> bool:
+    return bool(_exfil_basis(tool, ann))
 
 
 def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
@@ -160,7 +227,8 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         props = ((t.get("inputSchema") or {}).get("properties") or {})
         tools.append(ToolMeasure(
             name=t.get("name", "?"), tokens=tk,
-            write=_is_write(t, ann), exfil_capable=_exfil_capable(t, ann), annotations=ann,
+            write=_is_write(t, ann), exfil_capable=_exfil_capable(t, ann),
+            exfil_basis=_exfil_basis(t, ann), annotations=ann,
             param_count=len(props),
             description_words=len((t.get("description") or "").split())))
     # Integrity pin over the WHOLE tool surface — name + description + canonical input schema +

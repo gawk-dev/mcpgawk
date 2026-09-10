@@ -122,6 +122,7 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
             "tools": [
                 {"name": t.name, "tokens": t.tokens,
                  "write": t.write, "exfil_capable": t.exfil_capable,
+                 "exfil_basis": t.exfil_basis or None,
                  "annotations": t.annotations or None}
                 for t in m.tools
             ],
@@ -199,16 +200,53 @@ def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
         ]))
 
     if exfil_c:
-        named = sorted((t for t in tools if t["exfil_capable"]),
-                       key=lambda t: -t["tokens"])[:2]
-        which = ", ".join(t["name"] for t in named)
-        head = (f"{exfil_c} of {n} tools can read your content AND reach the network"
-                if exfil_c > 1 else
-                f"1 tool can read your content AND reach the network — {which}")
-        body = ["That pairing is the leak path" + (f" ({which})." if exfil_c > 1 else "."),
-                "One poisoned document is enough: it instructs the tool, the tool has the reach, "
-                "and your data leaves. Neither half is a flaw on its own — the combination is the "
-                "exposure."]
+        # TWO ARMS OF VERY DIFFERENT STRENGTH, AND THIS USED TO PRINT ONE NUMBER OVER BOTH.
+        # "N tools can read your content AND reach the network" asserts a capability; what was
+        # actually read is either a parameter that takes a destination (structural) or a word in
+        # the prose (lexical, and routinely wrong — `prepare_upload` matched "curl" in a
+        # description about browser-direct upload, and it is inbound-only). Saying which lets a
+        # reader act on the five and merely glance at the three, instead of distrusting all eight.
+        flagged = sorted((t for t in tools if t["exfil_capable"]), key=lambda t: -t["tokens"])
+        # `param:` (the caller supplies a destination) and `name:` (the tool's identifier names
+        # one, e.g. `fetch_url`) are both DECLARED destinations and share a headline; only
+        # `wording:` — a chance word in prose — is the weak arm.
+        by_param = [t for t in flagged
+                    if str(t.get("exfil_basis") or "").startswith(("param:", "name:"))]
+        by_word = [t for t in flagged if str(t.get("exfil_basis") or "").startswith("wording:")]
+
+        def _names(ts, k=2):
+            shown = ", ".join(t["name"] for t in ts[:k])
+            return shown + (f" +{len(ts) - k} more" if len(ts) > k else "")
+
+        if by_param and by_word:
+            head = (f"{exfil_c} of {n} tools could send data outward — {len(by_param)} take a "
+                    f"destination from the caller, {len(by_word)} matched on wording alone")
+        elif by_param:
+            head = (f"{len(by_param)} of {n} tools take a destination from the caller"
+                    if len(by_param) > 1 else
+                    f"1 tool takes a destination from the caller — {_names(by_param)}")
+        else:
+            head = (f"{len(by_word)} of {n} tools name network reach in their own text"
+                    if len(by_word) > 1 else
+                    f"1 tool names network reach in its own text — {_names(by_word)}")
+
+        body = []
+        if by_param:
+            args = ", ".join(sorted({t["exfil_basis"].split(":", 1)[1] for t in by_param})[:3])
+            body.append(
+                f"{_names(by_param)} name a destination ({args}) — as an argument the caller "
+                f"supplies, or in the tool's own name. That is the leak path: whoever controls it "
+                f"controls where the data goes. One poisoned document is enough — it supplies the "
+                f"destination, the tool has the reach, and your data leaves.")
+        if by_word:
+            words = ", ".join(sorted({t["exfil_basis"].split(":", 1)[1] for t in by_word})[:3])
+            body.append(
+                f"{_names(by_word)} matched only on wording ({words}) — a word in the name or "
+                f"description, not a destination it accepts. Treat that as a prompt to look, not "
+                f"a finding.")
+        body.append("All of this is read from the server's own declarations. Nothing here was "
+                    "observed: `mcpgawk verify` runs the tools in a sandbox and reports what they "
+                    "actually contact.")
         out.append((head, body))
 
     if write_c and ac["annotated"] == 0:
