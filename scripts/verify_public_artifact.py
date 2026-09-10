@@ -159,7 +159,10 @@ def check(path: Path) -> list[str]:
     # the scrub ran, checked on the built artefact rather than on the source that was supposed to
     # produce it — vendored trees included, because that is where it was.
     for raw, m in pairs:
-        if not m.endswith(_TEXTUAL + (".json",)):
+        # `tests/` is skipped for the reason §4 gives about secret-shaped strings: you cannot test
+        # a path detector without path-shaped fixtures, and the gate for this very check carries
+        # them on purpose. Tests ship in the sdist, so scanning them guarantees permanent noise.
+        if not m.endswith(_TEXTUAL + (".json",)) or m.startswith("tests/"):
             continue
         try:
             blob = _read(path, raw)
