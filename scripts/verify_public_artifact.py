@@ -142,6 +142,43 @@ def check(path: Path) -> list[str]:
         for pat in SECRET_PATTERNS:
             if pat.search(blob):
                 problems.append(f"CREDENTIAL-SHAPED STRING in {m} (pattern {pat.pattern!r})")
+
+    # 5. THE BUILD MACHINE'S OWN PATHS. Not a credential, so §4 never looked for it — and §4
+    # skips `node_modules/` entirely, which is exactly where it hid.
+    #
+    # `pnpm deploy` resolves the two workspace deps to an ABSOLUTE file-scheme URL naming the
+    # build machine's home directory, and npm copies that literal into both `package.json` and
+    # the `package-lock.json` it generates. Both ride into the wheel. Measured 2026-09-10
+    # against the artefact PyPI
+    # actually serves: 0.1.34, 0.1.40 and 0.1.41 each ship two files naming the author's macOS
+    # username and full repo layout. Harmless to run, but this is a product whose claim is that
+    # nothing leaves your machine, and a reviewer who unzips the wheel finds the author's home
+    # directory in it.
+    #
+    # The build now scrubs these (`hatch_build._scrub_build_paths`). This is the gate that proves
+    # the scrub ran, checked on the built artefact rather than on the source that was supposed to
+    # produce it — vendored trees included, because that is where it was.
+    for raw, m in pairs:
+        if not m.endswith(_TEXTUAL + (".json",)):
+            continue
+        try:
+            blob = _read(path, raw)
+        except Exception:                         # noqa: BLE001 — already reported above if textual
+            continue
+        # SPELLED APART on purpose. Written whole, these literals make THIS FILE match its own
+        # detector — and it ships inside the sdist, so the gate would fail every release by
+        # reading itself. Exactly the trap `test_the_gate_does_not_match_its_own_source` already
+        # guards for SECRET_PATTERNS; caught here by the suite the first time this check ran
+        # against the real public build.
+        _scheme = b"file://" + b"/"
+        for _home in (b"Users", b"home", b"root", b"c:"):
+            marker = _scheme + _home + b"/"
+            if marker.lower() in blob.lower():
+                problems.append(
+                    f"BUILD MACHINE PATH in artefact: {m} contains "
+                    f"{marker.decode()!r} — the wheel names the build machine's home directory"
+                )
+                break
     return problems
 
 
