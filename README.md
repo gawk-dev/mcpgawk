@@ -186,7 +186,7 @@ boundaries in [THREAT-MODEL.md](THREAT-MODEL.md). Security reports go through [S
 
 ## License
 
-**Apache-2.0** — see [LICENSE](LICENSE). Part of the **nativerse** · gawk.dev family. The value is in the
+**Apache-2.0** — see [LICENSE](LICENSE). Part of the [**nativerse**](https://nativerse-ventures.com/) · [gawk.dev](https://gawk.dev/) family. Site and docs: [mcp.gawk.dev](https://mcp.gawk.dev/). The value is in the
 repo, not a cloud.
 
 ## Use it from your agent (skill)
