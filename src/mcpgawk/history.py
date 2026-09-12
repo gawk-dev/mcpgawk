@@ -5,6 +5,7 @@ and it's the user's own machine. No sync, no cloud.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -245,6 +246,47 @@ def _mask_ident(ident: str) -> str:
     return redact_ident(ident)
 
 
+#: Bumped whenever the REDACTION RULES change, so every stored record is masked again once under
+#: the new rules instead of keeping whatever the old ones produced. Raised to 2 on 2026-09-11 when
+#: the redactors began consuming the detector's 46 provider signatures — records written before
+#: that carry only the old structural masking.
+#:
+#: WHY A STAMP AT ALL. `save()` re-redacted every record of every server on every write: measured
+#: 0.944 s and 80,159 calls over 593 immutable, already-masked records, which is the dominant cost
+#: of a store write and the main driver of lock hold time. Skipping records already masked at the
+#: CURRENT version keeps the boundary's guarantee — an unstamped record from any writer, present or
+#: future, is still masked here — while making the work proportional to what actually changed.
+#: Moving redaction into the callers would have been the other way to make it cheap, and it is
+#: exactly the defect this module's own docstring warns about: a rule that lives in one caller is
+#: not a rule.
+_REDACTION_VERSION = 2
+
+#: The stamp's key. Leading underscore so it reads as machinery, not as recorded evidence.
+#:
+#: CONTENT-BOUND, NOT A BARE FLAG. The stamp is a claim, and a claim about content must be checked
+#: against that content or it is just a request to be trusted. The value is
+#: `"<version>:<digest of the record's redactable fields>"`, so anything that edits a record after
+#: it was masked — a migration, a hand edit, a rewrite by another tool — changes the digest and the
+#: record is masked again. Caught by an existing test on the first run: it simulates a pre-gate
+#: store by replacing "[REDACTED]" with a raw credential, which a bare version stamp would have
+#: sailed straight past, leaving the credential on disk and inventing drift against it.
+_REDACTED_AT = "_redacted"
+
+
+def _redaction_stamp(rec: dict[str, Any]) -> str:
+    """`<version>:<digest>` over everything in the record except the stamp itself."""
+    body = {k: v for k, v in rec.items() if k != _REDACTED_AT}
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    return f"{_REDACTION_VERSION}:{digest}"
+
+
+def _is_proven_masked(rec: dict[str, Any]) -> bool:
+    """True only when the record still matches the stamp it carries, under the CURRENT rules."""
+    stamp = rec.get(_REDACTED_AT)
+    return isinstance(stamp, str) and stamp == _redaction_stamp(rec)
+
+
 def redact_record(rec: dict[str, Any]) -> dict[str, Any]:
     """Mask credential shapes in one record, IN PLACE. Field-aware, never a whole-blob pass.
 
@@ -281,6 +323,7 @@ def redact_record(rec: dict[str, Any]) -> dict[str, Any]:
                 v = [(_mask_ident(i) if isinstance(i, str) else i) for i in v]
             masked[_mask_ident(k) if isinstance(k, str) else k] = v
         rec[field] = masked
+    rec[_REDACTED_AT] = _redaction_stamp(rec)   # binds the claim to what was actually masked
     return rec
 
 
@@ -295,7 +338,12 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
         if not isinstance(entry, dict):
             continue
         for rec in [entry.get("approved"), *(entry.get("history") or [])]:
-            if isinstance(rec, dict):
+            # Skip only what is PROVABLY already masked under the current rules. Anything
+            # unstamped — a record from `baseline.approve`'s direct save, from an older version,
+            # or from a writer that does not exist yet — is masked here exactly as before, so the
+            # boundary's guarantee is unchanged. Bumping `_REDACTION_VERSION` re-masks everything
+            # once. See the note on that constant for the cost this avoids.
+            if isinstance(rec, dict) and not _is_proven_masked(rec):
                 redact_record(rec)
     # Owner-only: this file is a complete inventory of the user's MCP servers and their tool
     # descriptions. It was world-readable until 2026-07-27 — see state.py.

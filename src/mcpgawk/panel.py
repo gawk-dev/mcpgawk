@@ -5517,7 +5517,26 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
     # And the panel swallowed an unparseable timestamp as fresh; `_age_seconds` returns None for
     # that (UNKNOWN), which must never render as a pass. Reached only when monitoring is installed,
     # so the monitor package is importable here (monitor_status already imported it above).
-    from gawk_platform.monitor.status import STALE_AFTER_S, _age_seconds, never_succeeded
+    # GUARDED, THOUGH THE DATA FLOW ALREADY PROTECTS IT. `servers` can only be non-empty if the
+    # guarded import in `monitor_status` above already succeeded, so this is belt-and-braces rather
+    # than a fix for a demonstrated crash. It is here because the previous justification was a
+    # COMMENT ("reached only when monitoring is installed, so the monitor package is importable
+    # here") and `installed` is only `find_spec("gawk_platform")` — the package being FINDABLE, not
+    # this submodule importing. A partial install or an ImportError inside status.py satisfies one
+    # and not the other, and the panel is the surface the founder actually reviews. The sibling
+    # crossing at the `never_succeeded` tally already degrades instead of raising; this now matches.
+    #
+    # `age_seconds` is the PUBLIC name. This imported the private `_age_seconds` until 2026-09-12,
+    # which meant a rename in the paid package would break the free panel silently, with nothing
+    # there aware it had an outside caller. A rule shared across the licence boundary needs a name
+    # its consumer is allowed to use.
+    try:
+        from gawk_platform.monitor.status import STALE_AFTER_S, age_seconds, never_succeeded
+    except Exception:  # noqa: BLE001 — an absent or broken paid engine costs the classification, not the page
+        return (frame + state + err
+                + '<div class="note warn">Monitoring history is present, but the engine that '
+                  'classifies it could not be loaded — so this pane cannot say which servers are '
+                  'stale. That is a missing answer, not a clean one.</div>')
 
     parts = []
     stale = 0
@@ -5544,7 +5563,7 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
         # 2026-08-15: 8 local servers, last checked 1 Aug, under "11 watched" and RUNNING).
         # Local servers are excluded from polling BY DEFAULT — polling one spawns it with the
         # credentials in its config — and the tab must say which rows are history, not coverage.
-        age = _age_seconds(r.get("last_check"))
+        age = age_seconds(r.get("last_check"))
         is_stale = age is None or age >= STALE_AFTER_S     # None = never-run OR unparseable: UNKNOWN
         # NEVER SUCCEEDED outranks stale, and is asked BEFORE it: a server that has failed every
         # check is not a fresh chip gone cold, it has no baseline and never had one. This chip
@@ -7271,6 +7290,55 @@ def signin_asks(entries: dict) -> list[str]:
             if isinstance(e, dict) and _login_button_applicable(e, n)]
 
 
+#: (identity, store) for the LAST store read by `_store_for_buttons`. Not a TTL cache: the key is
+#: the file's own identity, so a write invalidates it immediately and a stale render is impossible.
+_STORE_MEMO: tuple[tuple[str, int, int, int], dict[str, Any]] | None = None
+
+
+def _store_for_buttons() -> dict[str, Any]:
+    """A READ-ONLY snapshot of the history store, memoised on file identity.
+
+    MEASURED 2026-09-11: one render of the founder's fleet called `history.load()` **20 times** —
+    0.411s of a 1.677s render, 24% of it — re-parsing the same 10MB file from disk once per server,
+    because the only load site sits inside `_login_button_applicable` and that is called from three
+    loops over the fleet plus two per-row sites. The panel re-reads on every request and has no
+    cache of any kind, and the page carries a 5-second meta refresh, so this repeats forever.
+
+    THE KEY IS THE FILE'S IDENTITY — path, mtime_ns, size, inode — not a clock. A TTL can serve a
+    store that has already changed; this cannot. Any write moves mtime_ns, the key misses, and the
+    next read is fresh. That matters here because a scan or an approval can land mid-render.
+
+    THE RESULT IS SHARED AND MUST NOT BE MUTATED. `_login_button_applicable` only reads it, and
+    that is the only caller. A writer must keep using `history.load()` directly under the lock:
+    handing a writer a shared object is how two callers start editing each other's store.
+
+    Threading: `panel` serves on a ThreadingHTTPServer, so two renders can race here. The worst
+    outcome is a redundant load, which is what this already replaced — never a torn read, because
+    the tuple is swapped in one assignment and never mutated in place.
+    """
+    global _STORE_MEMO
+    from . import history
+    # `history.load()` with NO argument, exactly as the call site did before the memo existed.
+    # Passing the path broke a test that patches `load` with a zero-argument fake: the TypeError
+    # was swallowed by the caller's `except Exception` and the sign-in offer silently became
+    # False. A cache must not change the call it is caching.
+    try:
+        path = history.default_path()
+        st = os.stat(path)
+    except Exception:      # noqa: BLE001 — no path, no stat, or a patched module without one
+        return history.load() or {}
+    # THE LOADER IS PART OF THE KEY. A test (or any caller) that swaps `history.load` must never be
+    # served a snapshot the real loader produced, and vice versa; holding the function object in
+    # the key also keeps it alive, so this cannot be fooled by an id() reused after collection.
+    key = (str(path), st.st_mtime_ns, st.st_size, st.st_ino, history.load)
+    memo = _STORE_MEMO
+    if memo is not None and memo[0] == key:
+        return memo[1]
+    store = history.load()
+    _STORE_MEMO = (key, store)
+    return store
+
+
 def _login_button_applicable(entry: dict, name: str = "") -> bool:
     """Offer sign-in wherever one can actually happen, and nowhere else.
 
@@ -7298,8 +7366,7 @@ def _login_button_applicable(entry: dict, name: str = "") -> bool:
             if name and remote_login.stored_login_id(remote_login.local_signin_key(name)):
                 return False
             try:
-                from . import history
-                store = history.load()
+                store = _store_for_buttons()          # memoised on file identity; read-only
                 for key, se in (store.get("servers") or {}).items():
                     if name in (se.get("aliases") or []):
                         rec = se.get("approved") or (se.get("history") or [{}])[-1]

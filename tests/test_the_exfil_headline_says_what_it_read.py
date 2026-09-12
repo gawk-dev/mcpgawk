@@ -47,8 +47,41 @@ def test_a_caller_supplied_destination_is_seen_however_it_is_spelled(param):
 
 
 @pytest.mark.parametrize("param", [
+    # A list of destinations is still destinations. Both of these are real parameters on the
+    # live Notion server, and the singular-only rule read neither — the same failure as
+    # `\burl\b` against `source_url`, one spelling further on. Measured 2026-09-10.
+    "file_urls", "data_source_urls", "webhook_urls", "endpoints", "callbacks",
+])
+def test_a_list_of_destinations_is_still_destinations(param):
+    assert _is_destination_param(param), f"{param} names destinations and must be caught"
+
+
+@pytest.mark.parametrize("param", [
+    # An ID that REFERS to a destination is not a destination. Both of these are real params on
+    # the live resend server and both were counted as caller-supplied destinations until
+    # 2026-09-10: `remove-webhook` deletes a webhook by ID, and `replay-webhook-event` redelivers
+    # to the endpoint that webhook ALREADY holds. Neither lets the caller name a place.
+    "webhookId", "webhook_id", "endpointId", "callback_ids",
+])
+def test_an_id_that_refers_to_a_destination_is_not_one(param):
+    assert not _is_destination_param(param), f"{param} selects a destination, it does not name one"
+
+
+@pytest.mark.parametrize("param", [
+    # ...but an explicit url-ish token still wins, so the rule drops references, not spellings.
+    "webhook_url_id", "callback_uri_id",
+])
+def test_a_spelled_out_url_outranks_the_reference_rule(param):
+    assert _is_destination_param(param), f"{param} names a URL, whatever else it carries"
+
+
+@pytest.mark.parametrize("param", [
     "file_name", "file_size_bytes", "title", "video_id",    # real params from the same server
     "curling_urn", "urn", "hurl", "follow_redirects",       # near-misses a looser regex would take
+    # `redirect` is excluded from the plural set ON PURPOSE. In the plural it names a policy,
+    # not a place, and flagging a boolean as a caller-supplied destination is exactly the
+    # overclaim this arm exists to avoid.
+    "max_redirects", "redirects",
 ])
 def test_precision_is_not_traded_away_for_reach(param):
     """Dropping `\\b` would have "fixed" the bug by matching `curling_urn`. Splitting does not."""
@@ -103,8 +136,12 @@ def test_the_headline_separates_the_two_arms_instead_of_asserting_capability():
     head = " ".join(h for h, _ in out)
     body = " ".join(" ".join(b) for _, b in out)
 
-    assert "2 take a destination from the caller" in head, head
-    assert "1 matched on wording alone" in head, head
+    # The COUNT is the structural arm alone. [FOUNDER 2026-09-10] The lexical hit is named in the
+    # same breath and explicitly excluded, so a reader can see it without it inflating the number.
+    assert "2 of 4 tools take a destination from the caller" in head, head
+    assert "1 more matched on wording alone, not counted" in head, head
+    # The headline number must never be the sum of the two arms — that was the overclaim.
+    assert "3 of 4" not in head, head
     # The overclaim this file exists to remove.
     assert "can read your content AND reach the network" not in head + body
 
@@ -119,8 +156,28 @@ def test_a_wording_only_server_never_claims_a_destination():
     """The `prepare_upload` case on its own. The sentence must stay true of an inbound-only tool."""
     out = _headlines([{"name": "prepare_upload", "basis": "wording:curl"}])
     head = " ".join(h for h, _ in out)
-    assert "names network reach in its own text" in head, head
+    assert "mentions network reach in its own text" in head, head
     assert "take a destination" not in head, "nothing here accepts a destination"
+    # A wording-only server must STILL be shown. The count is structural, so gating the block on
+    # the count would have made this server print nothing at all — "stop counting it" was never
+    # "stop showing it".
+    assert head.strip(), "a wording-only server must still say something"
+    assert "Worth a look, not a finding" in head, head
+
+
+def test_a_partial_tool_dict_does_not_raise():
+    """Callers pass minimal tool dicts, and this block no longer sits behind a count.
+
+    Gating the exfil block on what was FOUND rather than on `exfil_c` means it now runs for
+    EVERY server, including callers that build a tool dict with nothing but a name — which is
+    the shape `build_narrative`'s own callers use. Indexing `t["exfil_capable"]` there raised
+    KeyError and took the whole verdict down with it, turning a clean read-only server into a
+    crash. A missing key must read as "nobody said", never as an exception.
+    """
+    out = label._concerns(1, 120, 0, 0, {"annotated": 1, "read_only": 1, "destructive": 0},
+                          [{"name": "get_forecast"}], heavy=False, injections=[],
+                          expensive=False, secrets=[])
+    assert isinstance(out, list), "a partial tool dict must render, not raise"
 
 
 def test_a_tool_whose_own_name_names_a_destination_is_not_demoted_to_wording():
@@ -138,6 +195,25 @@ def test_a_tool_whose_own_name_names_a_destination_is_not_demoted_to_wording():
     assert _exfil_basis(_tool("create_recording_request", "Create a recording request")) \
         == "wording:request"
     assert _exfil_basis(_tool("prepare_upload", "e.g. curl it", ["file_name"])) == "wording:curl"
+
+
+def test_a_name_that_names_the_object_is_not_a_named_destination():
+    """`remove-webhook` names what it acts ON. The endpoint was chosen when it was created.
+
+    Both of these are live resend tools. Until 2026-09-10 the name arm reused the FULL parameter
+    vocabulary, so any tool whose identifier merely contained `webhook` was read as advertising a
+    destination — and when the reference rule stopped their `webhookId` parameter from firing,
+    they fell straight through to this arm and the structural total did not move. Guarding the
+    displacement, not just the first rule, is the point of this test.
+    """
+    assert _exfil_basis(_tool("remove-webhook", "Remove a webhook by ID", ["webhookId"])) == ""
+    assert _exfil_basis(
+        _tool("replay-webhook-event", "Queue one more delivery of a webhook event to its "
+                                      "endpoint", ["eventId", "webhookId"])) == ""
+    # The tool that DOES take a destination is still caught, by the arm that should catch it.
+    assert _exfil_basis(
+        _tool("create-webhook", "receive notifications at a URL", ["endpoint", "events"])) \
+        == "param:endpoint"
 
 
 def test_the_mechanism_is_stated_for_a_named_destination_not_only_a_parameter():

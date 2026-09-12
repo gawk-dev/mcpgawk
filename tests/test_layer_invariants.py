@@ -283,3 +283,109 @@ def test_the_behaviour_profile_has_one_owner_and_an_override():
             os.environ.pop("GAWK_BEHAVIOUR_PROFILE", None)
         else:
             os.environ["GAWK_BEHAVIOUR_PROFILE"] = old
+
+
+#: Every module in the FREE engine that reaches across the licence boundary, and how many
+#: hand-over points it has. The test's own rule — "a new one appearing is a review event, not an
+#: error" — was written for cli.py and applied to cli.py alone, while panel.py grew SIX crossings
+#: unpinned, one of them unguarded and importing a private symbol (2026-09-11 audit).
+#:
+#: Update a count here deliberately, with the crossing reviewed. That is the whole point: the
+#: numbers are a prompt to look, not a target to satisfy.
+PAID_CROSSINGS = {
+    "cli.py": 3,      # run_account, platform_main, run_pillar — the licence seam
+    "panel.py": 6,    # monitor status/store, never_succeeded, the staleness rule, issue_key, license_state
+    "status.py": 1,   # license_state, for the grace/ended badge
+    "verify.py": 1,   # run_source_audit
+}
+
+
+def _paid_import_nodes(tree):
+    import ast
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import) and any(
+                a.name.split(".")[0] == "gawk_platform" for a in n.names):
+            yield n
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] == "gawk_platform":
+            yield n
+
+
+def _free_engine_modules():
+    from pathlib import Path as _P
+    return sorted((_P(__file__).resolve().parents[1] / "src" / "mcpgawk").glob("*.py"))
+
+
+def test_every_free_module_that_crosses_the_wall_is_pinned():
+    """The gap the audit found: the wall was pinned for ONE file. Any other free module that starts
+    importing the paid engine now has to be listed, which is the review event the rule intends."""
+    import ast
+
+    found = {}
+    for path in _free_engine_modules():
+        nodes = list(_paid_import_nodes(ast.parse(path.read_text(encoding="utf-8"))))
+        if nodes:
+            found[path.name] = len(nodes)
+
+    unlisted = sorted(set(found) - set(PAID_CROSSINGS))
+    assert not unlisted, (
+        f"{unlisted} in the FREE engine import the PAID engine and are not pinned here. "
+        "Add them with the count and a note on why the crossing exists."
+    )
+    for name, n in sorted(PAID_CROSSINGS.items()):
+        assert found.get(name) == n, (
+            f"{name} has {found.get(name, 0)} paid import(s), pinned at {n}. If the change is "
+            "intended, update PAID_CROSSINGS in the same commit — a new hand-over point across the "
+            "licence boundary is a review event."
+        )
+
+
+def test_every_crossing_outside_cli_is_guarded():
+    """A free install must degrade, not raise. cli.py is exempt: it crosses only after the licence
+    gate has already decided, so an ImportError there is a broken paid install and should surface.
+    Everywhere else the paid engine is optional, and the panel is the surface the founder reviews.
+    """
+    import ast
+
+    unguarded = []
+    for path in _free_engine_modules():
+        if path.name == "cli.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        handlers = [h for n in ast.walk(tree) if isinstance(n, ast.Try) for h in [n]]
+        guarded_nodes = {id(n) for t in handlers for n in _paid_import_nodes(t)}
+        for n in _paid_import_nodes(tree):
+            if id(n) not in guarded_nodes:
+                unguarded.append(f"{path.name}:{n.lineno}")
+
+    assert not unguarded, (
+        f"paid imports with no try/except in the free engine: {unguarded}. A free install reaching "
+        "one of these raises instead of degrading — panel.py:5520 did exactly that, justified by a "
+        "comment rather than an assertion."
+    )
+
+
+def test_the_free_engine_never_imports_a_private_paid_symbol():
+    """A rule shared across the licence boundary needs a name its consumer is allowed to use.
+
+    `panel.py` imported `gawk_platform.monitor.status._age_seconds` — PRIVATE — so a rename in the
+    paid package would have broken the free panel silently, with nothing in that package aware it
+    had an outside caller. Fixed 2026-09-12 by making `age_seconds` public; this stops the next one.
+    """
+    import ast
+
+    offenders = []
+    for path in _free_engine_modules():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for n in _paid_import_nodes(tree):
+            names = [a.name for a in getattr(n, "names", [])]
+            for name in names:
+                leaf = name.split(".")[-1]
+                if leaf.startswith("_") and not leaf.startswith("__"):
+                    offenders.append(f"{path.name}:{n.lineno} imports {name}")
+
+    assert not offenders, (
+        "the free engine imports PRIVATE symbols from the paid package: " + "; ".join(offenders)
+        + ". Give the symbol a public name in the paid module instead — a private name carries no "
+        "promise, so the paid package can rename it and break the free engine with no warning."
+    )
+

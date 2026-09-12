@@ -70,6 +70,33 @@ const MUTATING = new Set([
     "import",
     "upload",
     "trigger",
+    // PARITY WITH THE PYTHON WRITE RULE (2026-09-11). This list may be STRICTER than
+    // mcpgawk/measure.py's _WRITE_VERBS -- safe mode is default-deny, so extra mutating verbs only
+    // block more -- but it must never be MISSING one, and it was missing eleven.
+    //
+    // The hole is not that `login` became uncallable; a name with no READ verb is already `unknown`
+    // and uncallable. It is a name carrying BOTH: `list_rotate_keys` has a read verb, `rotate` was
+    // absent here, and the real classifier returned { klass: "read", callable: true } -- safe mode
+    // would have INVOKED a key-rotating tool. Measured before the fix, not reasoned about.
+    //
+    // tests/test_write_verbs_are_one_rule_across_languages.py asserts the subset relation and fails
+    // when a verb is added to the Python owner without reaching this file.
+    "archive",
+    "authenticate",
+    "grant",
+    // "issue" is DELIBERATELY NOT HERE, and the Python parity test records the exception. Python
+    // counts it as a write verb ("issue a certificate"), but this list matches bare NAME TOKENS,
+    // and in that position "issue" is overwhelmingly a noun: `get_issue`, `add_issue_note`,
+    // `list_issues` on GitHub, Jira and Linear. Adding it classified `get_issue` as mutating and
+    // made a read tool uncallable in safe mode — the same false-positive class Python documents for
+    // "start"/"open"/"close", which it excludes for exactly this reason.
+    "login",
+    "merge",
+    "publish",
+    "push",
+    "rotate",
+    "schedule",
+    "trade",
 ]);
 /** Verbs that only read — a name needs one of these (and no mutating verb) to be callable. */
 const READ = new Set([

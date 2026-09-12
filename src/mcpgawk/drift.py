@@ -58,7 +58,13 @@ def _item_hashes(snap: ServerSnapshot) -> dict[str, str]:
 
 #: Descriptions are stored truncated. A drift diff needs the CHANGE to be legible, not the whole
 #: essay — and an unbounded field lets a hostile server grow the user's history file without limit.
-MAX_TEXT = 600
+#: 600 → 2000 [FOUNDER 2026-09-12]: measured on the founder's fleet, 69 of 390 tool descriptions
+#: (brandfetch 6/6, gitnexus 15/17, Notion 17/42) hit the 600 cut, and 14 of 18 change blocks in
+#: `mcpgawk changes` could only say "changed past what the store keeps". The store is bounded by
+#: the per-server sighting cap either way. Texts stored before this line are 600 long; a hash,
+#: not the text, decides whether a description CHANGED, so the first re-scan does not report the
+#: longer text as a change.
+MAX_TEXT = 2000
 
 
 def _item_texts(snap: ServerSnapshot) -> dict[str, str]:
@@ -405,6 +411,26 @@ class DriftReport:
                 or self.transport_changed is not None
                 or (self.protocol_changed is not None and not self.protocol_migration))
 
+    def surface_changed(self) -> bool:
+        """`any()` minus the login, transport and protocol arms — did the SERVER's TOOL SURFACE
+        move, whoever was signed in and however the snapshot was taken.
+
+        A changelog is a record of what the server did. A login change is a fact about this
+        machine; a transport or protocol difference between two consecutive records is a fact
+        about the two writers (`wrap` stamps stdio for an http upstream, and a second client
+        negotiates another spec revision). `any()` counts all three so the scan is never silent
+        about them against an approval; here each would print a block with no change under it.
+        On the founder's store that was dadan "changing" eleven times on 2026-09-09."""
+        return (self.pin_changed or bool(self.added or self.removed or self.changed
+                                         or self.schema_changed or self.annotation_changed))
+
+    def text_kept(self, key: str) -> bool:
+        """Whether the stored text can show this change. `texts` holds the first MAX_TEXT
+        characters of a description; a change past that line moves the item hash and leaves the
+        two stored texts identical, so `insertion`/`deletion` have nothing to show."""
+        before, after = self.texts.get(key, (None, None))
+        return before is not None and after is not None and before != after
+
     def gained_params(self, key: str) -> list[str]:
         before, after = self.props.get(key, ([], []))
         return sorted(set(after) - set(before))
@@ -531,6 +557,24 @@ def _fingerprints(rec: dict[str, Any]) -> tuple[dict[str, str], bool]:
     return {f"tool.{n}": h for n, h in (rec.get("tools") or {}).items()}, True
 
 
+def kinds_spoken_for(rec: dict[str, Any]) -> set[str] | None:
+    """Which item kinds this record can vouch for, or None when it cannot say.
+
+    THE ONE READER of `enumerated`. None means the record carries no usable enumeration: the
+    field is absent (written before 0.1.40) or an empty list (`wrap` between 0.1.40 and 0.1.41
+    stamped `[]`). Both are a fact about the WRITER, not a guess about the server. Each caller
+    applies its own policy to None — `comparable_kinds` refuses to restrict (a false negative on
+    an injection surface is worse than a false positive against an approval), `cli._changes`
+    compares tools only (a flip-flop between two writers is not a changelog entry). On 2026-09-12
+    those two policies were two private readers of the same field, one treating `[]` as "speaks
+    for everything" and the other as "cannot say" — the tenth instance of a rule defined in one
+    file and re-derived in another."""
+    en = rec.get("enumerated")
+    if isinstance(en, list) and en:
+        return {str(k) for k in en}
+    return None
+
+
 def comparable_kinds(prev: dict[str, Any], curr: dict[str, Any]) -> set[str]:
     """Which item kinds these two records may honestly be diffed on.
 
@@ -555,9 +599,9 @@ def comparable_kinds(prev: dict[str, Any], curr: dict[str, Any]) -> set[str]:
     if it succeeded.
     """
     def _speaks_for(rec: dict[str, Any]) -> set[str]:
-        en = rec.get("enumerated")
-        if isinstance(en, list) and en:
-            return {str(k) for k in en}
+        spoken = kinds_spoken_for(rec)
+        if spoken is not None:
+            return spoken
         # NO RECORDED ENUMERATION -> NO RESTRICTION, deliberately. `probe` always asks for prompts
         # and resources; a kind is missing from a scan-written record only when the call actually
         # raised. So inferring "never asked" from "no items of that kind" would be wrong for the
@@ -850,14 +894,20 @@ def ago(stamp: str | None, now: datetime | None = None) -> str | None:
     return "just now"
 
 
-def render(name: str, r: DriftReport) -> str:
+def render(name: str, r: DriftReport, head: str | None = None) -> str:
+    """One renderer for every diff surface. `head` replaces the DRIFT headline when the two records
+    are not "your approval" and "now" — `changes` compares consecutive snapshots that were never
+    approved, and "changed since you approved it" there would claim a decision nobody made."""
     if r.unreadable:
         # No diff, because there is no diff we could stand behind. Say that plainly rather than
         # printing a comparison the reader has just declared untrustworthy.
         return (f"    ⚠ BASELINE NOT READABLE on {name} — {r.unreadable}\n"
                 f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
-    if when:
+    approval = head is None      # the default caller compares "your approval" with "now"
+    if head is not None:
+        pass
+    elif when:
         # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
         # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say
         # what the timestamp is.
@@ -892,6 +942,17 @@ def render(name: str, r: DriftReport) -> str:
                     # A deleted safety caveat steers the model as effectively as an added
                     # instruction. Showing only what was gained made that class invisible.
                     lines.append(f"            {short} lost:   {_excerpt(lost)}")
+                if not gained and not lost and not r.text_kept(key):
+                    # The hash moved and the stored text did not: the change sits past the
+                    # characters this store kept (two of Notion's four changes in Aug–Sep 2026
+                    # did). A bare "CHANGED" with nothing under it reads as a detector that
+                    # cannot explain itself; say what it cannot see and why. The number is the
+                    # length of the text that WAS stored, not today's MAX_TEXT — a record cut at
+                    # 600 before the limit rose to 2000 must not claim 2000.
+                    kept = len((r.texts.get(key) or ("", ""))[0]) or MAX_TEXT
+                    lines.append(f"            {short}: the description changed past the "
+                                 f"{kept} characters the store kept — re-scan with --detail "
+                                 f"to read the current text")
         # C1 — the description is what the model READS; these are what the tool can SEND and what it
         # CLAIMS it will do. Both were previously invisible unless the prose happened to change too.
         for key in [k for k in r.schema_changed if k.startswith(f"{kind}.")]:
@@ -912,35 +973,53 @@ def render(name: str, r: DriftReport) -> str:
             lines.append(f"        + {_KIND_LABEL[kind]} added: {', '.join(split['added'])}")
         if split["removed"]:
             lines.append(f"        - {_KIND_LABEL[kind]} removed: {', '.join(split['removed'])}")
-    if r.transport_changed:
+    if r.transport_changed and approval:
         before, after = r.transport_changed
         note = (" — a LOCAL server is now a REMOTE endpoint; its trust posture changed"
                 if before == "stdio" and after in ("http", "sse") else "")
         lines.append(f"        ! TRANSPORT changed: {before} → {after}{note}")
-    if r.protocol_changed:
+    elif r.transport_changed:
+        # A changelog compares consecutive RECORDS, and two writers record the same server through
+        # different transports: `wrap` is a stdio bridge and stamps stdio for an http upstream
+        # (wrap.py `_snapshot`). On the founder's store 2026-09-09 that read as dadan flipping
+        # stdio↔http eleven times in a day. It is a fact about how the snapshot was taken, so it
+        # is shown as one — never as the server changing.
+        before, after = r.transport_changed
+        lines.append(f"        · recorded over {after}; the previous snapshot over {before}")
+    if r.protocol_changed and (approval or r.protocol_migration):
         before, after = r.protocol_changed
         # Still SHOWN either way — a migration is worth seeing. It just isn't a decision.
         lines.append(f"        · MCP spec migration: {before} → {after} (newer revision, not drift)"
                      if r.protocol_migration else
                      f"        ! MCP protocol changed: {before} → {after}")
+    elif r.protocol_changed:
+        before, after = r.protocol_changed
+        lines.append(f"        · negotiated MCP {after}; the previous snapshot {before}")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
-    if r.login_changed:
+    if r.login_changed and approval:
         lines.append("        ! SIGNED IN AS SOMEONE ELSE, possibly: this scan went through a "
                      "different sign-in than the one your baseline was approved under. mcpgawk "
                      "cannot read WHICH account (no MCP token here carries an issuer or subject), "
                      "only that the sign-in is not the same one. If you switched accounts, this "
                      "baseline describes the other account's surface — re-approve to adopt this "
                      "one.")
+    elif r.login_changed:
+        lines.append("        · a different sign-in than the previous snapshot — if you switched "
+                     "accounts, part of this change may be the other account's surface")
     if r.pin_not_compared:
         lines.append(f"        · {r.pin_not_compared}")
-    if r.baseline_extended:
+    if r.baseline_extended and approval:
         lines.append("        (prompts/resources were not fingerprinted before now — their "
                      "baseline starts with this scan)")
+    elif r.baseline_extended:
+        lines.append("        (prompts/resources were not fingerprinted in the earlier snapshot — "
+                     "only tools were compared here)")
     if r.changed and not r.hostile:
         # Absence of a signature is NOT a clean bill of health, and saying nothing here would let
         # the quieter wording read as "harmless". The detectors are pattern-based and bounded; the
         # diff above is the evidence, and the human is still the one deciding.
         lines.append("        Nothing in what changed matched a known injection pattern — that is "
-                     "not proof it is safe. Read the diff above before approving.")
+                     + ("not proof it is safe. Read the diff above before approving."
+                        if approval else "not proof it was safe."))
     return "\n".join(lines)

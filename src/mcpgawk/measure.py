@@ -36,6 +36,15 @@ _WRITE_VERBS = (
     "edit", "rename", "move", "set", "add",
     "place", "cancel", "submit", "issue", "transfer", "buy", "sell", "trade", "schedule",
     "publish", "archive", "enable", "disable", "reset", "rotate", "approve", "reject", "terminate",
+    # [FOUNDER 2026-09-11] Authentication is a write. `login` establishes a session — it changes
+    # state on the server even though it mutates no record, and kite's `login` fell out of the
+    # write set when its all-defaults annotations stopped being treated as a declaration.
+    # MEASURED over the 390 recorded tools before adding: `login` newly flags exactly the three
+    # kite login tools and nothing else. `authenticate` flags nothing today and is here so the
+    # rule generalises rather than matching one literal spelling. `authorize`, `connect` and
+    # `sign` were considered and REJECTED — each brought a false positive (a permission check, a
+    # resend editor handshake, and Revolut's `get_trading_setup`).
+    "login", "authenticate",
 )
 
 
@@ -94,8 +103,42 @@ def _param_tokens(name: str) -> set[str]:
                                           re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name))}
 
 
+#: A list of destinations is still destinations. `file_urls` and `data_source_urls` are real
+#: parameters on a live server (Notion, measured 2026-09-10) and the singular-only rule read
+#: neither — the same failure as `\burl\b` against `source_url`, one spelling further on.
+#:
+#: `redirect` is deliberately EXCLUDED from the plural form. In the plural it names a policy,
+#: not a place: `follow_redirects`, `max_redirects`. Adding it would flag a boolean flag as a
+#: caller-supplied destination, which is the class of overclaim this arm exists to avoid.
+_EXFIL_PARAM_PLURALS = frozenset(w + "s" for w in _EXFIL_PARAM_WORDS - {"redirect"})
+
+
+#: An ID that REFERS to a destination is not a destination. `webhookId` selects a webhook the
+#: account already has; the endpoint it delivers to was chosen when that webhook was created, not
+#: by this caller. Measured on the live resend server (2026-09-10): `remove-webhook(webhookId)`
+#: and `replay-webhook-event(eventId, webhookId)` were both counted as caller-supplied
+#: destinations, and neither lets the caller name a place.
+#:
+#: This NARROWS the arm, which is the only safe direction: the standing rule is never to widen
+#: the vocabulary to improve a number, and an arm whose whole claim is "whoever controls this
+#: argument controls where data goes" must not fire on an argument that controls no such thing.
+#:
+#: An explicit url-ish token still wins — `webhook_url_id` names a URL and is read as one — so
+#: the rule drops references, not spellings.
+#:
+#: What this does NOT say: that `replay-webhook-event` sends nothing outward. It plainly does —
+#: it queues a delivery to the stored endpoint. It says this arm cannot see that, because the
+#: destination is not in the call. Observing a delivery is `mcpgawk verify`'s job, not a
+#: schema reader's.
+_REFERENCE_TOKENS = frozenset({"id", "ids"})
+_URLISH_TOKENS = frozenset({"url", "uri", "urls", "uris", "href", "hrefs"})
+
+
 def _is_destination_param(name: str) -> bool:
-    return bool(_param_tokens(name) & _EXFIL_PARAM_WORDS)
+    toks = _param_tokens(name)
+    if not (toks & _EXFIL_PARAM_WORDS or toks & _EXFIL_PARAM_PLURALS):
+        return False
+    return not (toks & _REFERENCE_TOKENS and not toks & _URLISH_TOKENS)
 
 
 _EXFIL_NAME = re.compile(r"\b(fetch|http|request|download|browse|scrape|curl|web)\b", re.I)
@@ -175,7 +218,10 @@ def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str
     A DECLARATION OUTRANKS BOTH, exactly as in `_is_write`. That arm was missing until 2026-09-10,
     and two tools that declared `readOnlyHint: true` were reported as the server's leak path.
     """
-    if (ann or tool.get("annotations") or {}).get("readOnlyHint") is True:
+    _ann = ann or tool.get("annotations") or {}
+    if is_default_fill(_ann):                # same rule as `_is_write`, stated once (see is_default_fill)
+        _ann = {}                            # a no-op today: default-fill has readOnlyHint false, which never silences
+    if _ann.get("readOnlyHint") is True:
         return ""
     # Parameter first: it is the strongest evidence, so it should be the reported reason when
     # several arms fire (`add_watermark` has an `image_url` AND the word "http" in its prose).
@@ -189,8 +235,18 @@ def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str
     # second list that drifts: `fetch_url` -> {fetch, url} qualifies, while
     # `create_recording_request` -> {create, recording, request} does not, and neither does
     # `prepare_upload`.
+    #
+    # A NAME MUST SPELL OUT A URL, not merely mention a thing that has one. `remove-webhook` and
+    # `replay-webhook-event` (live resend, measured 2026-09-10) name the OBJECT they act on; the
+    # endpoint was chosen when that webhook was created. Reusing the full parameter vocabulary
+    # here read both as destinations — and when the reference rule above stopped their
+    # `webhookId` param from firing, they simply fell through to this arm and the structural
+    # total never moved. A fix that only re-buckets rows is not a fix.
+    #
+    # Store-wide before this narrowing, across 390 tools on 15 servers, the name arm's ONLY hits
+    # were those two false positives. It costs nothing measured and removes both.
     name = tool.get("name", "")
-    if _is_destination_param(name):
+    if _param_tokens(name) & _URLISH_TOKENS:
         return f"name:{name}"
     m = _EXFIL_NAME.search(name + " " + (tool.get("description") or ""))
     return f"wording:{m.group(0).lower()}" if m else ""
@@ -200,7 +256,71 @@ def _exfil_capable(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> b
     return bool(_exfil_basis(tool, ann))
 
 
+#: Which arm found it, as one rule rather than a prefix string retyped per surface.
+#:
+#: `param:` and `name:` are STRUCTURAL — something in the call names a destination, so whoever
+#: controls it controls where data goes. `wording:` is LEXICAL: a word in prose, and measured at
+#: 0 true positives out of 11 across 390 tools on 15 real servers (2026-09-10).
+#:
+#: [FOUNDER 2026-09-10] Only the structural arms are COUNTED. The lexical ones are still shown,
+#: labelled as wording-only — the decision was to stop inflating a number, not to hide anything.
+#: The report sent to a reviewer had already drawn the line here (`scripts/gen_dadan.py`) while
+#: the product had not, so its own screens counted tools that report would never have listed.
+#:
+#: Callers must ask through this function. A prefix tuple copied into a second file is how
+#: display rules drift apart from counting rules.
+def is_structural_basis(basis: str | None) -> bool:
+    """True when the destination is IN the call, not merely in the prose about it."""
+    return str(basis or "").startswith(("param:", "name:"))
+
+
+#: The MCP spec's documented defaults for the four behaviour hints, read from the installed
+#: `mcp.types.ToolAnnotations` docstrings rather than recalled: readOnlyHint false, destructiveHint
+#: true, idempotentHint false, openWorldHint true.
+_MCP_DEFAULT_HINTS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
+
+#: [FOUNDER 2026-09-11] An annotation block that is EXACTLY the spec defaults is treated as
+#: UNANNOTATED, because that is what a server library emits when it serialises a struct nobody
+#: filled in — it is the shape of the absence, not a statement.
+#:
+#: MEASURED: kite carries this identical block on all 22 tools. `cancel_order` and `get_profile`
+#: are annotated identically, which is the discriminator — a tuple that cannot tell an
+#: order-canceller from a profile reader is not describing either of them. `destructiveHint: true`
+#: there then short-circuited `_is_write` and called 16 pure reads writes. The MCP spec itself says
+#: "Clients should never make tool use decisions based on ToolAnnotations received from untrusted
+#: servers"; this is the narrow version of that — do not make a decision on a value nobody set.
+#:
+#: EXACTLY FOUR KEYS, ALL PRESENT, ALL EQUAL. Deliberately strict. `{"readOnlyHint": false}` alone
+#: is a real declaration and stays one, as does any three-of-four subset: a partial block is
+#: someone choosing, and the regression tests that pin those (Emergent's `pause_job`, the
+#: readiness write-scope cases) are pinning real behaviour. `title` is ignored — it is prose and
+#: says nothing about behaviour.
+#:
+#: WHERE THIS MUST NOT BE APPLIED, and why the demotion is a LOCAL REBIND rather than a
+#: normalisation of the stored dict:
+#:   * `drift.py` and `fingerprint.py` compare and hash the RAW annotations. Demoting there would
+#:     fire a false rug-pull on every existing kite baseline and, worse, would hide a genuine
+#:     `destructiveHint: false -> default` risk gain.
+#:   * `panel.py`'s "Declared" column reports what the server SAID. That stays literal.
+#:   * `enforce/derive_scopes.py` derives POLICY. `unguarded` is allow-by-default while
+#:     `write:<tool>` is deny-by-default, so demoting there would flip kite's order-placing tools
+#:     from guarded to open. Policy reads raw hints, deliberately.
+def is_default_fill(ann: dict[str, Any] | None) -> bool:
+    """True when this annotation block is indistinguishable from one nobody filled in."""
+    if not isinstance(ann, dict):
+        return False
+    return {k: v for k, v in ann.items() if k != "title"} == _MCP_DEFAULT_HINTS
+
+
 def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
+    if is_default_fill(ann):                 # a struct nobody filled in declares nothing; fall through to the verbs
+        ann = {}                             # LOCAL rebind only — the stored tuple stays raw for drift and the panel
     if ann.get("destructiveHint") is True:   # a declared-destructive tool mutates, even if the verb heuristic misses it
         return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic

@@ -20,9 +20,14 @@
  * `gawk_platform/enforce/redact.py` are separate. Drift between the copies is the standing risk,
  * so the tests assert the SHAPES, not just the outcomes.
  */
+import { SECRET_SIGNATURES } from "./secret-signatures.js";
 const SECRETS = [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
-    /\bAKIA[0-9A-Z]{16}\b/g,
+    // All four AWS key prefixes, matching mcpgawk/secret_corpus.py. `AKIA` alone was the shipped
+    // shape until 2026-09-11, when the Python side was measured DETECTING ASIA/ABIA/ACCA and
+    // redacting none of them — an AWS temporary STS credential was named as a secret and then
+    // printed verbatim. This copy had the same hole.
+    /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g,
     /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
     /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
     // Vendor-prefixed keys: `sk-live-…`, `sk_test_…`. Hyphens/underscores allowed inside the body.
@@ -32,6 +37,12 @@ const SECRETS = [
     // character, and that exact gap let a live key past the platform copy of these patterns.
     /(?:[\w.-]+[_.\-])?(?:api[_-]?key|access[_-]?key|secret[_-]?key|key|secret|token|password|passwd|bearer|credential)s?["']?\s*[:=]\s*["']?\S{8,}/gi,
     /\bauthorization\s*:\s*(?:bearer|basic)\s+\S+/gi,
+    // Every provider signature the DETECTOR knows, generated from src/mcpgawk/secret_corpus.py.
+    // The patterns above are broad STRUCTURAL shapes (an assignment, a vendor prefix); these are
+    // narrow provider-anchored ones, and a BARE credential with no assignment around it matches no
+    // structural shape. Python's redactors import the corpus directly; this file cannot, so it is
+    // generated from the same one definition rather than copied.
+    ...SECRET_SIGNATURES,
 ];
 /** A URL's credential-bearing query values and any userinfo, masked but still identifiable. */
 function redactUrls(text) {

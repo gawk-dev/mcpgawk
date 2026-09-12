@@ -21,6 +21,34 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+
+def _signatures():
+    """The detector's provider signatures, loadable BOTH as a package module and as a bare file.
+
+    THIS FILE MUST STAY BARE-LOADABLE. `guard_hook` imports `spool` by absolute path with no
+    parent package, and `spool` imports this module; a plain `from .secret_corpus import …` here
+    raises ImportError in that context, the hook swallows it, and the decision log silently stops
+    redacting. Measured 2026-09-11 when exactly that was introduced — the bare-context test caught
+    it immediately. Same relative-then-sibling-by-path idiom as `spool._redactor`.
+
+    Failing to a bare tuple would be a silent downgrade of redaction, so absence is never quiet:
+    the structural patterns above still apply, and the parity test asserts the provider ones do.
+    """
+    try:
+        from .secret_corpus import SECRET_SIGNATURES
+    except ImportError:                                    # loaded as a bare file, no package
+        import importlib.util
+        import os
+        spec = importlib.util.spec_from_file_location(
+            "_bare_secret_corpus",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "secret_corpus.py"))
+        if not (spec and spec.loader):                     # pragma: no cover — file always ships
+            return ()
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        SECRET_SIGNATURES = mod.SECRET_SIGNATURES
+    return tuple(pat for _label, pat in SECRET_SIGNATURES)
+
 PLACEHOLDER = "[REDACTED]"
 
 #: Credential shapes. Each is anchored on a structure a secret has and prose does not.
@@ -52,6 +80,20 @@ _SECRETS = [
     # table showed it as `--header "[REDACTED]` — advice mangled by the redactor (2026-09-03). A
     # placeholder (`…`, `<token>`) is not a credential.
     re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+(?![<…])\S+"),
+    # EVERY PROVIDER SIGNATURE THE DETECTOR KNOWS, from its one definition rather than a second
+    # hand-written list. The patterns above are broad STRUCTURAL shapes (an assignment, a vendor
+    # prefix); these are narrow provider-anchored ones. Both are needed: a BARE credential with no
+    # assignment around it matches no structural shape.
+    #
+    # WHY THIS IS AN IMPORT AND NOT A COPY (2026-09-11). `secret_corpus` detected four AWS
+    # prefixes — AKIA, ASIA, ABIA, ACCA — and this list masked only AKIA, so an AWS temporary STS
+    # credential was DETECTED, named in a report as a hardcoded secret, and then written out
+    # verbatim to the store, the spool and the reviewer's copy. Measured the same day: 35 of the
+    # 46 detected shapes survived this redactor. That was never an AWS bug; it was two lists with
+    # nothing comparing them. Redaction may mask MORE than detection finds, never less, and
+    # `tests/test_every_detected_secret_is_redacted.py` now asserts exactly that in both
+    # directions for every signature.
+    *_signatures(),
 ]
 
 #: Personal data. Emails are the realistic leak in a description; card-shaped digit runs are rare

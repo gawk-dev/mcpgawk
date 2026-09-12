@@ -12,7 +12,7 @@ from typing import Any
 
 from .grade import cost_phrase, grade
 from .ambient import detect_ambient, summarize
-from .measure import Measurement
+from .measure import Measurement, is_default_fill, is_structural_basis
 from .probe import ServerSnapshot
 from .servercard import compare_to_reality
 
@@ -65,13 +65,28 @@ HEAVY_TOKENS = 3000
 def _trust_surface(m: Measurement) -> dict[str, Any]:
     total = m.tool_count
     write = sum(1 for t in m.tools if t.write)
-    exfil = sum(1 for t in m.tools if t.exfil_capable)
-    destructive = sum(1 for t in m.tools if (t.annotations or {}).get("destructiveHint") is True)
+    # THE COUNT IS STRUCTURAL ONLY. [FOUNDER 2026-09-10] A tool flagged because its prose happens
+    # to contain "fetch" or "request" is shown, but never counted — see `is_structural_basis`.
+    # This is the single write point for the number: `exfil_count` and `exfil_pct` feed the
+    # narrative headline, the JSON risk flags, the fleet rows, ambient, the trust index and the
+    # dashboard, and every one of them reads it from here rather than re-deriving it.
+    exfil = sum(1 for t in m.tools if t.exfil_capable and is_structural_basis(t.exfil_basis))
+    wording = sum(1 for t in m.tools if t.exfil_capable and not is_structural_basis(t.exfil_basis))
+    # [FOUNDER 2026-09-11] An all-defaults block is not a declaration (measure.is_default_fill), so
+    # it must not be counted as one here either — this number feeds trustindex's -15 penalty and
+    # the "N tool(s) declare destructiveHint=true" reason line. Counting kite's default-fill was
+    # penalising a server for a value nobody set.
+    destructive = sum(1 for t in m.tools
+                      if not is_default_fill(t.annotations)
+                      and (t.annotations or {}).get("destructiveHint") is True)
     return {
         "write_pct": round(100 * write / total) if total else 0,
         "exfil_pct": round(100 * exfil / total) if total else 0,
         "write_count": write,
         "exfil_count": exfil,
+        #: Carried so a surface can SHOW the weak arm without any surface being able to add it
+        #: back into the headline by accident.
+        "exfil_wording_count": wording,
         "destructive_declared_count": destructive,
     }
 
@@ -199,36 +214,49 @@ def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
             "follow. Details on the ⚠ lines below.",
         ]))
 
-    if exfil_c:
-        # TWO ARMS OF VERY DIFFERENT STRENGTH, AND THIS USED TO PRINT ONE NUMBER OVER BOTH.
-        # "N tools can read your content AND reach the network" asserts a capability; what was
-        # actually read is either a parameter that takes a destination (structural) or a word in
-        # the prose (lexical, and routinely wrong — `prepare_upload` matched "curl" in a
-        # description about browser-direct upload, and it is inbound-only). Saying which lets a
-        # reader act on the five and merely glance at the three, instead of distrusting all eight.
-        flagged = sorted((t for t in tools if t["exfil_capable"]), key=lambda t: -t["tokens"])
-        # `param:` (the caller supplies a destination) and `name:` (the tool's identifier names
-        # one, e.g. `fetch_url`) are both DECLARED destinations and share a headline; only
-        # `wording:` — a chance word in prose — is the weak arm.
-        by_param = [t for t in flagged
-                    if str(t.get("exfil_basis") or "").startswith(("param:", "name:"))]
-        by_word = [t for t in flagged if str(t.get("exfil_basis") or "").startswith("wording:")]
+    # TWO ARMS OF VERY DIFFERENT STRENGTH, AND THIS USED TO PRINT ONE NUMBER OVER BOTH.
+    # "N tools can read your content AND reach the network" asserts a capability; what was
+    # actually read is either a parameter that takes a destination (structural) or a word in
+    # the prose (lexical, and routinely wrong — `prepare_upload` matched "curl" in a
+    # description about browser-direct upload, and it is inbound-only).
+    # `.get`, not `[...]`: this block used to sit behind `if exfil_c:`, which meant a caller
+    # passing a partial tool dict never reached it. Now that it is gated on what was FOUND, it
+    # runs for every server, and a missing key must read as "nobody said" — not raise. Absent is
+    # not flagged, which is the same rule `exfil_basis` already states for the empty string.
+    flagged = sorted((t for t in tools if t.get("exfil_capable")),
+                     key=lambda t: -(t.get("tokens") or 0))
+    # `param:` (the caller supplies a destination) and `name:` (the tool's identifier names
+    # one, e.g. `fetch_url`) are both DECLARED destinations and share a headline; only
+    # `wording:` — a chance word in prose — is the weak arm.
+    by_param = [t for t in flagged if is_structural_basis(t.get("exfil_basis"))]
+    by_word = [t for t in flagged if not is_structural_basis(t.get("exfil_basis"))]
+
+    # GATED ON WHAT WAS FOUND, NOT ON THE COUNT. `exfil_c` is structural-only since the founder's
+    # 2026-09-10 decision, so gating this block on it would have silently dropped a server whose
+    # only hits are lexical — turning "stop counting it" into "stop showing it", which is the one
+    # thing that decision did not say. Absence of a finding is never safety, including absence we
+    # introduced ourselves.
+    if by_param or by_word:
 
         def _names(ts, k=2):
             shown = ", ".join(t["name"] for t in ts[:k])
             return shown + (f" +{len(ts) - k} more" if len(ts) > k else "")
 
         if by_param and by_word:
-            head = (f"{exfil_c} of {n} tools could send data outward — {len(by_param)} take a "
-                    f"destination from the caller, {len(by_word)} matched on wording alone")
+            head = (f"{len(by_param)} of {n} tools take a destination from the caller — "
+                    f"{len(by_word)} more matched on wording alone, not counted")
         elif by_param:
             head = (f"{len(by_param)} of {n} tools take a destination from the caller"
                     if len(by_param) > 1 else
                     f"1 tool takes a destination from the caller — {_names(by_param)}")
         else:
-            head = (f"{len(by_word)} of {n} tools name network reach in their own text"
+            # Named as a prompt to look, never as a finding: this arm measured 0 true positives
+            # out of 11 across 390 tools on 15 real servers.
+            head = (f"Worth a look, not a finding: {len(by_word)} of {n} tools mention network "
+                    f"reach in their own text"
                     if len(by_word) > 1 else
-                    f"1 tool names network reach in its own text — {_names(by_word)}")
+                    f"Worth a look, not a finding: 1 tool mentions network reach in its own "
+                    f"text — {_names(by_word)}")
 
         body = []
         if by_param:
@@ -293,8 +321,11 @@ def _flagged_table(tools: list[dict[str, Any]], n: int) -> list[str]:
             else "    The tools that can change data or send it out:")
     out = ["", head]
     for t in shown:
-        tag = ("write + exfil" if (t["write"] and t["exfil_capable"])
-               else ("write" if t["write"] else "exfil"))
+        # A row must not wear the strong word for a weak reason. `exfil` here means a destination
+        # is in the call; a prose match reads `wording?` so the row says which arm found it.
+        ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
+        tag = (f"write + {ex}" if (t["write"] and t["exfil_capable"])
+               else ("write" if t["write"] else ex))
         out.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {tag}")
     remaining = len(flagged) - len(shown)
     if remaining > 0:
@@ -501,7 +532,8 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     if verbose:
         lines.append("    all tools (heaviest first):")
         for t in sorted(tools, key=lambda t: -t["tokens"]):
-            tags = [c for c, on in (("write", t["write"]), ("exfil", t["exfil_capable"]),
+            _ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
+            tags = [c for c, on in (("write", t["write"]), (_ex, t["exfil_capable"]),
                                     ("no-annotation", not (t.get("annotations") or {}))) if on]
             # NO TAG IS NOT A CLEAN BILL. Untagged means our heuristics stayed quiet, which is a
             # fact about us, not about the tool. Only the server's own readOnlyHint earns the words
@@ -574,7 +606,13 @@ def render_summary(labels: list[dict[str, Any]], local_servers: int = 0) -> str:
     toks = sum(lab["x-mcpgawk"]["cost_index_tokens"] for lab in labels)
     flagged = sum(1 for lab in labels for t in lab["x-mcpgawk"]["tools"]
                   if t["write"] or t["exfil_capable"])
-    exfil = sum(1 for lab in labels for t in lab["x-mcpgawk"]["tools"] if t["exfil_capable"])
+    # STRUCTURAL ONLY, and it must be asked for here rather than inherited from the boolean.
+    # This line re-derived the fleet total straight from `exfil_capable`, so it would have gone
+    # on counting prose matches long after `_trust_surface` stopped — and it feeds
+    # `ambient.summarize`, which says "N of their tools can send data outward" out loud. A rule
+    # that lives in one function is not a rule.
+    exfil = sum(1 for lab in labels for t in lab["x-mcpgawk"]["tools"]
+                if t["exfil_capable"] and is_structural_basis(t.get("exfil_basis")))
     ns = len(labels)
     out = ("─" * 64 + f"\n{ns} server{'s' if ns != 1 else ''} · {tools} tools · "
            f"{toks:,} tokens loaded into every session · {flagged} can change or send data.\n"

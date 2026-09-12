@@ -44,7 +44,7 @@ def test_trust_surface_percentages():
 def test_trust_surface_empty_server_no_division_by_zero():
     ts = _label([])["x-mcpgawk"]["trust_surface"]
     assert ts == {"write_pct": 0, "exfil_pct": 0, "write_count": 0, "exfil_count": 0,
-                  "destructive_declared_count": 0}
+                  "exfil_wording_count": 0, "destructive_declared_count": 0}
 
 
 def test_annotation_completeness_matches_grade_hygiene():

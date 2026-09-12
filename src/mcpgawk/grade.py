@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 
 from .measure import Measurement
 
+from mcpgawk.measure import is_default_fill
+
 DISCLAIMER = ("Grade = craft (lean + honest), not a safety verdict. A server can be "
               "well-crafted and still do something you don't want. Signals are pointers, not part of the grade.")
 
@@ -75,6 +77,11 @@ def cost_phrase(tokens_per_tool: int) -> str:
 
 def _is_annotated(ann: dict) -> bool:
     # "annotated" = the tool declares its read/write intent (the trust-relevant hints).
+    # [FOUNDER 2026-09-11] A block that is exactly the spec defaults is the shape of an unfilled
+    # struct, not a declaration — see measure.is_default_fill. kite scored 100% hygiene on 22 tools
+    # nobody had annotated; it now scores what it actually earned.
+    if is_default_fill(ann):
+        return False
     return bool(ann) and ("readOnlyHint" in ann or "destructiveHint" in ann)
 
 

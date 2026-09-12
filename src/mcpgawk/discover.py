@@ -697,6 +697,21 @@ def discover_report(home: Path | str | None = None, platform: str | None = None,
     # plugin was signed in and calling tools while the fleet listed only codex's copy of the same
     # URL under another name (2026-09-04). Disabled plugins (`enabledPlugins[key] == false`) are
     # skipped like any disabled entry.
+    # A registry that EXISTS but will not parse is not the same as no plugins, and it used to
+    # render identically: `_claude_code_plugins` swallows the error and returns [], so a corrupt
+    # `installed_plugins.json` produced a report that said `claude-code: ok` and never mentioned
+    # it. Measured 2026-09-11 — every plugin-provided server vanished under an "ok". That is the
+    # exact collapse this module's own status vocabulary exists to prevent ("nothing was found"
+    # and "nothing was looked at" must never render alike), so the registry now reports through
+    # the same reader as every other config. ABSENT stays silent: no registry really does mean no
+    # plugins.
+    _reg_path = home_path / ".claude" / "plugins" / "installed_plugins.json"
+    _reg_data, _reg_status = _read_config_status(_reg_path)
+    if _reg_status != ABSENT:
+        if _reg_status != OK:
+            sources.append({"client": "claude-code", "path": ".claude/plugins/installed_plugins.json",
+                            "status": _reg_status, "servers": 0, "disabled": [],
+                            "unrecognised": []})
     for key, install in _claude_code_plugins(home_path):
         plugin = key.split("@", 1)[0]
         sweep(install, "claude-code", ".mcp.json", _SHAPE_MCPSERVERS,

@@ -573,6 +573,23 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--json", action="store_true", help="machine-readable (the cross-runtime shape)")
     b.add_argument("--server", metavar="NAME", help="one server (name or alias) instead of all")
 
+    ch = sub.add_parser(
+        "changes",
+        help="what a server's tools did over time — the changelog no vendor publishes",
+        description=(
+            "Every change to a server's tool surface between consecutive recorded snapshots: "
+            "tools added and removed, input schemas widened, descriptions and annotations "
+            "rewritten. Read from the local history, so it works for servers you have already "
+            "approved — `decide` shows only what you have not yet said yes to. Same comparison "
+            "as the scan's DRIFT block."
+        ),
+    )
+    ch.add_argument("server", nargs="?", metavar="NAME",
+                    help="one server (name or alias); omit for every server")
+    ch.add_argument("--since", default="30d", metavar="WHEN",
+                    help="window start: 30d, 7d, 2026-08-01, or a full timestamp (default 30d)")
+    ch.add_argument("--json", action="store_true", help="one entry per change")
+
     a = sub.add_parser("approve",
                        help="accept a server's current tools as the trusted baseline (clears DRIFT)",
                        description="Accept a server's current tools as the baseline you trust. "
@@ -957,6 +974,144 @@ def _baseline(args) -> int:
             # Before 2026-09-03 the sighting's time was printed under "approved": a borrowed date.
             print(f"    approved   time and actor not recorded · baseline measured "
                   f"{rec.get('measured_at') or '—'}")
+    return 0
+
+
+def _parse_since(text: str, now: datetime | None = None) -> datetime | None:
+    """`30d`, `7d`, `2026-08-01`, or a full ISO timestamp → an aware UTC datetime. None = unparseable."""
+    now = now or datetime.now(timezone.utc)
+    t = (text or "").strip()
+    if t.endswith("d") and t[:-1].isdigit():
+        from datetime import timedelta
+        return now - timedelta(days=int(t[:-1]))
+    try:
+        dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _record_time(rec: dict) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(rec.get("measured_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _changes(args) -> int:
+    """What each server's surface did over time, read back from the local history.
+
+    Measured on the founder's real store 2026-09-12: five third-party servers changed nineteen
+    times in six weeks and no surface could show it afterwards — every change had been approved,
+    `decide` shows only unapproved change, and `baseline` only the current state. The history was
+    write-only once you said yes. This reads it.
+
+    Consecutive snapshots are compared with `drift.compare`, the scan's own rule, never by pin: the
+    pin covers tools only, and a resource or prompt that appears with no tool change is exactly the
+    class the dadan false alarm came from. `comparable_kinds` inside `compare` keeps a partial
+    snapshot from accusing the server of removing what it was never asked for.
+    """
+    path = getattr(args, "history", None)
+    store, store_err = _store_or_say_why(path)
+    _warn_if_store_unreadable(store_err)
+    if store_err:
+        if args.json:
+            print(json.dumps({"error": "the history store is unreadable; what changed is UNKNOWN",
+                              "changes": []}, indent=2, sort_keys=True))
+        return 4
+
+    since = _parse_since(args.since)
+    if since is None:
+        print(f"mcpgawk: cannot read --since {args.since!r}. Use 30d, 7d, a date, or a timestamp.",
+              file=sys.stderr)
+        return 2
+
+    servers = store.get("servers") or {}
+    if args.server:
+        key = history.resolve(store, args.server)
+        if key is None or key not in servers:
+            print(f"mcpgawk: no history for '{args.server}'. Run `mcpgawk scan` first.",
+                  file=sys.stderr)
+            return 2
+        keys = [key]
+    else:
+        keys = sorted(servers)
+
+    def _speaks_for_kinds(rec: dict) -> bool:
+        # One reader of `enumerated` (`drift.kinds_spoken_for`); this is only the policy on None.
+        # A record without a usable stamp may be a `tools/list`-only sighting, and diffing its
+        # prompts/resources against a full probe's is how dadan read as gaining and losing one
+        # resource eleven times on 2026-09-09.
+        return drift.kinds_spoken_for(rec) is not None
+
+    found: list[dict] = []
+    snapshots: dict[str, int] = {}
+    tools_only = 0
+    for key in keys:
+        recs = [r for r in (servers[key].get("history") or []) if isinstance(r, dict)]
+        recs.sort(key=lambda r: str(r.get("measured_at") or ""))
+        snapshots[key] = len(recs)
+        # The last record BEFORE the window is the base for the first change inside it; without
+        # it the first in-window change is invisible.
+        prev: dict | None = None
+        for rec in recs:
+            at = _record_time(rec)
+            if at is not None and at < since:
+                prev = rec
+                continue
+            if prev is not None:
+                a, b = prev, rec
+                if not (_speaks_for_kinds(a) and _speaks_for_kinds(b)):
+                    # Restrict BOTH sides to tools through `comparable_kinds`' own rule, in
+                    # memory — the store is never rewritten by a read.
+                    a, b = {**a, "enumerated": ["tool"]}, {**b, "enumerated": ["tool"]}
+                    tools_only += 1
+                r = drift.compare(a, b)
+                if r is not None and r.surface_changed():
+                    found.append({"key": key, "name": history.display_name(store, key),
+                                  "prev": prev, "curr": rec, "report": r})
+            prev = rec
+
+    if args.json:
+        out = {"since": since.isoformat(), "snapshots": snapshots, "tools_only_comparisons": tools_only,
+               "changes": [
+            {"server": f["key"], "name": f["name"], "at": f["curr"].get("measured_at"),
+             "prev_at": f["prev"].get("measured_at"),
+             "added": f["report"].added, "removed": f["report"].removed,
+             "changed": f["report"].changed, "schema_changed": f["report"].schema_changed,
+             "annotation_changed": f["report"].annotation_changed,
+             "token_delta": f["report"].token_delta,
+             "transport_changed": f["report"].transport_changed,
+             "protocol_changed": f["report"].protocol_changed,
+             "login_changed": bool(f["report"].login_changed)}
+            for f in found]}
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+
+    label = since.date().isoformat()
+    footer = ("" if not tools_only else
+              f"\n  {tools_only} comparison{'s' if tools_only != 1 else ''} covered tools only: one "
+              f"snapshot did not record which kinds it enumerated (written by wrap before 0.1.41 "
+              f"or a scan before 0.1.40), so prompts and resources were not compared there.")
+    if not found:
+        which = history.display_name(store, keys[0]) if len(keys) == 1 else f"{len(keys)} servers"
+        n = sum(snapshots.values())
+        print(f"No change recorded for {which} since {label} ({n} snapshot{'s' if n != 1 else ''})."
+              + footer)
+        return 0
+
+    print(f"{len(found)} change{'s' if len(found) != 1 else ''} since {label}"
+          f" across {len({f['key'] for f in found})} server"
+          f"{'s' if len({f['key'] for f in found}) != 1 else ''}:")
+    for f in found:
+        at = str(f["curr"].get("measured_at") or "?")[:16].replace("T", " ")
+        before = str(f["prev"].get("measured_at") or "?")[:16].replace("T", " ")
+        head = f"\n    ⟳ {at}  {f['name']} changed  (previous snapshot {before}):"
+        # Each tools-only block already carries its own "(prompts/resources were not
+        # fingerprinted in the earlier snapshot)" line from `render`; the footer is for the
+        # no-change path, where there is no block to carry it.
+        print(drift.render(f["name"], f["report"], head=head))
     return 0
 
 
@@ -1802,6 +1957,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if args.cmd == "baseline":
         return _baseline(args)
+
+    if args.cmd == "changes":
+        return _changes(args)
 
     if args.cmd == "approve":
         return _approve(args)
