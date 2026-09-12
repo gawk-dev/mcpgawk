@@ -78,8 +78,8 @@ request, used or not.
 
 **CLI** (any terminal):
 ```bash
-pip install --upgrade mcpgawk        # or: uv tool install --force mcpgawk
-mcpgawk scan mcp.json
+uv tool install --force mcpgawk      # or: pipx install --force mcpgawk
+mcpgawk                              # finds every agent config on the machine itself
 ```
 
 **Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
