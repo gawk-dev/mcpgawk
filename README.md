@@ -24,9 +24,10 @@ you approved, and blocks the ones that changed. It runs on your machine and uplo
 The same engine powers **mcpgawk Platform**: `mcpgawk enforce` puts one endpoint in front of the
 whole fleet with a key per caller, policy on every call and a hash-chained audit log, and
 `mcpgawk monitor` watches the servers you approved around the clock and tells you when one drifts.
-This free layer is the seeing and the blocking underneath it. If you have a licence,
-`mcpgawk login <key>` fetches the paid engine and turns those on — the same install, one more
-command, nothing else to set up.
+This free layer is the seeing and the blocking underneath it. mcpgawk Platform is £29 per
+person per month for up to 3 machines: start a free 7-day trial at https://mcp.gawk.dev/trial.html
+(no card) or subscribe at https://mcp.gawk.dev/subscribe. Then `mcpgawk login <key>` on this same
+install fetches the paid engine and turns those on — one more command, nothing else to set up.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif"

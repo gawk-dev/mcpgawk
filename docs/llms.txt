@@ -14,7 +14,8 @@ Upgrade audit (MCP 2): `mcpgawk scan --track` before and after upgrading a serve
 the approved baseline is the audit. `mcpgawk approve <server>` moves the baseline; nothing else does.
 
 ## Docs
-- Beta guide: https://mcp.gawk.dev/beta.html
+- Free 7-day trial, no card: https://mcp.gawk.dev/trial.html
+- Subscribe, £29 per person per month: https://mcp.gawk.dev/subscribe
 - PyPI: https://pypi.org/project/mcpgawk/
 - Source (free engine): https://github.com/gawk-dev/mcpgawk
 - Agent skill: https://github.com/gawk-dev/mcpgawk/tree/main/skills/mcpgawk

@@ -4,6 +4,9 @@ All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelo
 
 > Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
 > commit message — the note recorded at the moment that version was published — not from memory.
+>
+> Releases from 0.1.30 onward are written up on GitHub Releases:
+> https://github.com/gawk-dev/mcpgawk/releases
 
 ## [0.1.29] — 2026-08-16
 
