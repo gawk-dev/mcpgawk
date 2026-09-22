@@ -122,12 +122,12 @@ def _own_binary() -> str:
 
 USAGE = (
     "usage: mcpgawk login '<license-key>'\n\n"
-    "Wrap the key in single quotes: it carries | characters, which your shell would read as a\n"
-    "pipe and split the key at the first one.\n\n"
+    "Keep the key in single quotes so your shell passes it through whole.\n\n"
     "Your key is the only thing you add. With it, `login` fetches the paid engine (pre-built,\n"
     "checksum-verified, gated on the key), installs it beside the free scanner, and saves the key\n"
-    "so the paid capabilities unlock. Lost the key? https://mcp.gawk.dev/trial.html or reply to\n"
-    "the email that carried it. The free scanner (`mcpgawk scan`) keeps working either way."
+    "so the paid capabilities unlock. Lost the key? It is in your subscription or trial email;\n"
+    "reply to that email, or see https://mcp.gawk.dev/activate.html. The free scanner\n"
+    "(`mcpgawk scan`) keeps working either way."
 )
 
 
@@ -153,9 +153,10 @@ def login_with_fetch(key: str) -> int:
     print("Fetching the paid engine with your key (pre-built, checksum-verified) …", flush=True)
     status, body = _post(ENDPOINT, json.loads(request_body(key)))
     if status == 403:
-        print("mcpgawk login: this key does not unlock the engine (it is not on a live trial or "
-              "licence). Request a trial at https://mcp.gawk.dev/trial.html, or check the key "
-              "you pasted — the whole key, in single quotes.", file=sys.stderr)
+        print("mcpgawk login: this key does not unlock the engine — it is not on a live trial or "
+              "subscription. Subscribe at https://mcp.gawk.dev/subscribe, start a free trial at "
+              "https://mcp.gawk.dev/trial.html, or check you pasted the whole key in single "
+              "quotes.", file=sys.stderr)
         return EXIT_NOT_ELIGIBLE
     if status != 200 or not all(body.get(k) for k in ("url", "filename", "sha256")):
         print(f"mcpgawk login: the engine download is not available right now (HTTP {status}). "

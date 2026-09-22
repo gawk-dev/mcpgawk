@@ -1283,8 +1283,9 @@ _ACCOUNT_NEEDS_PLATFORM = (
     "mcpgawk {cmd}: the paid engine is not in this environment yet.\n"
     "Your licence key is the one thing that adds it: run `mcpgawk login '<license-key>'` and the\n"
     "engine is fetched, checksum-verified and put beside the free scanner in one step. The\n"
-    "quotes matter: the key carries | characters, which your shell would read as a pipe.\n"
-    "Lost the key? https://mcp.gawk.dev/trial.html — or reply to the email that carried it.\n"
+    "quotes matter: they let your shell pass the key through whole.\n"
+    "Lost the key? It is in your subscription or trial email; reply to that email, or see\n"
+    "https://mcp.gawk.dev/activate.html.\n"
     "The free scanner (`mcpgawk scan`) keeps working either way."
 )
 
@@ -1360,7 +1361,7 @@ _PLATFORM_UNAVAILABLE = (
     "mcpgawk {cap}: {desc}.\n"
     "This is a mcpgawk Platform capability and it isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
-    "  Already subscribed? Your purchase email has the install instructions.\n"
+    "  Already have a key? It is in your subscription or trial email.\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
 )
 
