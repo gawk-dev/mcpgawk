@@ -97,7 +97,19 @@ def install_argv(wheel: Path) -> list[str]:
     pipx = shutil.which("pipx")
     if "pipx" in prefix.parts and pipx:
         return [pipx, "install", "--force", str(wheel)]
+    # A plain venv installs with its own pip — unless it has none. `uv venv` creates no pip, so
+    # `uv venv && uv pip install mcpgawk` (a common path) reached here and died AFTER the engine
+    # was fetched: "No module named pip" (measured on the published 0.1.52, 2026-09-22). When pip
+    # is absent and uv is on PATH, let uv install into THIS interpreter — still the one rule.
+    if _has_pip() is False and uv:
+        return [uv, "pip", "install", "--quiet", "--python", sys.executable, "--reinstall", str(wheel)]
     return [sys.executable, "-m", "pip", "install", "--quiet", "--force-reinstall", str(wheel)]
+
+
+def _has_pip() -> bool:
+    """Whether `python -m pip` would run in this interpreter. Isolated so a test can decide."""
+    import importlib.util
+    return importlib.util.find_spec("pip") is not None
 
 
 def _own_binary() -> str:

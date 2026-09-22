@@ -187,6 +187,17 @@ def test_the_wheel_is_installed_where_the_running_interpreter_lives(monkeypatch,
     monkeypatch.setattr(engine_fetch.sys, "prefix", str(tmp_path / "somewhere"))
     argv = engine_fetch.install_argv(wheel)
     assert argv[:4] == [sys.executable, "-m", "pip", "install"] and "--force-reinstall" in argv
+    # a plain venv WITHOUT pip (`uv venv` makes one) and uv on PATH: uv installs into THIS
+    # interpreter. Measured on the published 0.1.52: the engine was fetched, then "No module
+    # named pip" — a customer on `uv venv && uv pip install mcpgawk` got nothing.
+    monkeypatch.setattr(engine_fetch, "_has_pip", lambda: False)
+    monkeypatch.setattr(engine_fetch.shutil, "which", lambda name: "/usr/local/bin/uv" if name == "uv" else None)
+    argv = engine_fetch.install_argv(wheel)
+    assert argv[:2] == ["/usr/local/bin/uv", "pip"] and argv[argv.index("--python") + 1] == sys.executable
+    assert "tool" not in argv, "not a uv tool env — do not create one"
+    # no pip AND no uv: the pip command stays, so the failure is loud and names the missing step
+    monkeypatch.setattr(engine_fetch.shutil, "which", lambda name: None)
+    assert engine_fetch.install_argv(wheel)[:3] == [sys.executable, "-m", "pip"]
 
 
 def test_login_without_a_key_on_a_free_install_names_the_key_as_the_one_missing_step(monkeypatch, capsys):
