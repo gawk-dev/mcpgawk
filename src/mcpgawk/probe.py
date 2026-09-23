@@ -699,7 +699,11 @@ async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
                               error_kind="misconfigured")
     # A config entry's `transport` is a CLAIM, and a stale one more often than not — so it only sets
     # the order we try things in, never what we trust. See probe_url / transport.py.
-    transport = entry.get("transport", "http")
+    # Claude Code and VS Code spell it `type` ("sse" / "http" / "streamable-http"); reading only
+    # `transport` tried every correctly declared SSE server as HTTP first and told the user to fix
+    # a config that was right. `type: "local"` (opencode) is a command, not a transport claim.
+    _type = str(entry.get("type") or "").lower().replace("_", "-")
+    transport = entry.get("transport") or ("sse" if _type == "sse" else "http")
     headers = entry.get("headers")
     auth = None
     if entry.get("_refreshable_login"):

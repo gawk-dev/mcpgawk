@@ -186,7 +186,7 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
     Same contract as `_item_signals`: only non-empty entries, so a missing KEY means clean while a
     missing MAP means nobody looked.
     """
-    from .signals import _scan_text     # local import: keeps drift's module graph acyclic
+    from .signals import _scan_params, _scan_text   # local import: keeps drift's module graph acyclic
 
     out: dict[str, list[str]] = {}
     for it in items or ():
@@ -194,7 +194,9 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
             continue
         ident = it.get("name") or it.get("uri") or "?"
         key = f"{kind}.{ident}"
-        if found := _scan_text(it.get("description") or "", key):
+        # Parameters too: an exfil-by-argument rug pull changes the SCHEMA, and judging only the
+        # prose let it through as "nothing matched a known injection pattern".
+        if found := _scan_text(it.get("description") or "", key) + _scan_params(it, key):
             out[key] = sorted({f.kind for f in found})
     return out
 

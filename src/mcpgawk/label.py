@@ -13,6 +13,7 @@ from typing import Any
 from .grade import cost_phrase, grade
 from .ambient import detect_ambient, summarize
 from .measure import Measurement, is_default_fill, is_structural_basis
+from .signals import is_instruction_finding
 from .probe import ServerSnapshot
 from .servercard import compare_to_reality
 
@@ -433,7 +434,7 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
     caveats = x.get("caveats") or []
     failed = bool(x.get("is_failure")) or any(("probe error" in c) or ("scan failed" in c) for c in caveats)
     has_dispatch = any((s.get("kind") or "").startswith("dispatch:") for s in (x.get("bounded_signals") or []))
-    injections = [s for s in (x.get("bounded_signals") or []) if (s.get("kind") or "").startswith("injection:")]
+    injections = [s for s in (x.get("bounded_signals") or []) if is_instruction_finding(s.get("kind"))]
     # A hardcoded live credential in the server's own surface is a finding in its own right — a
     # cheap, read-only server that ships a Stripe key must NEVER render CLEAN (the same self-
     # contradiction the injection gate exists to prevent).

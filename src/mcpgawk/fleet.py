@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import configcheck
+from .signals import is_instruction_finding
 from .ambient import detect_ambient, summarize
 from .redact import redact_url
 from .probe import _missing_program
@@ -128,7 +129,7 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     has_dispatch = any((s.get("kind") or "").startswith("dispatch:")
                        for s in (x.get("bounded_signals") or []))
     injections = [s for s in (x.get("bounded_signals") or [])
-                  if (s.get("kind") or "").startswith("injection:")]
+                  if is_instruction_finding(s.get("kind"))]
     if injections:
         bits.append(f"⚠ {len(injections)} injection finding{'s' if len(injections) != 1 else ''}")
     secrets = [s for s in (x.get("bounded_signals") or [])

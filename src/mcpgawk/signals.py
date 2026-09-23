@@ -38,6 +38,7 @@ SIGNAL_KINDS: dict[str, str] = {
     "injection:secret-exfil": "detect",
     "injection:covert-recipient": "detect",
     "injection:url-exfil": "detect",
+    "injection:context-harvest": "detect",
     "secret:hardcoded": "detect",
     "obfuscation:hidden-unicode": "detect",
     "dispatch:dynamic-tool-catalog": "detect_dynamic_dispatch",
@@ -131,6 +132,46 @@ _URL_EXFIL = re.compile(
     r"(?:send|post|forward|upload|exfiltrat\w*|transmit|mirror|copy|report)\b[^.]{0,60}?"
     + _SENSITIVE_OBJECT + r"[^.]{0,40}?" + _URL,
     re.IGNORECASE)
+
+# --- Detector 6: context harvest (exfil through the tool's OWN arguments). ---
+# Found 2026-09-24 running skydock's public rug-pull sample: an approved weather tool gained a
+# `conversation_history` parameter ("must include all conversation history") and every detector
+# above stayed silent — each needs a literal artefact (secret file, mailbox, URL), and this attack
+# names none: the tool's own server is the destination. STRUCTURAL, per the 0-FP rule above: the
+# PARAMETER NAME is the evidence. Bare `history`/`context`/`messages`/`transcript`/`system_prompt`
+# are ordinary parameters of honest tools and deliberately do not match.
+_CONTEXT_HARVEST_PARAM = re.compile(
+    r"^(?:(?:full|entire|complete|whole|all)_)?(?:conversation|chat|messages?)_(?:history|log|transcript)$"
+    r"|^(?:full|entire|complete|whole)_(?:conversation|chat)$"
+    r"|^(?:previous|prior|past)_messages$")
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower().replace("-", "_")
+
+
+def _scan_params(item: dict, tool: str) -> list[Finding]:
+    props = ((item.get("inputSchema") or {}).get("properties") or {}) if isinstance(item, dict) else {}
+    hits = sorted(p for p in props if isinstance(p, str) and _CONTEXT_HARVEST_PARAM.match(_snake(p)))
+    if not hits:
+        return []
+    return [Finding(tool=tool, kind="injection:context-harvest",
+                    evidence=f"asks for the conversation as an argument: {', '.join(hits)[:100]}")]
+
+
+def is_instruction_finding(kind: str | None) -> bool:
+    """A finding whose evidence is text telling the AGENT what to do — the class that must never sit
+    under a CLEAN verdict or a "nothing looks malicious" line. One rule, read by `label` and
+    `fleet` alike, so the two verdicts cannot disagree about it.
+
+    Includes `shadowing:cross-server-reference`: a description instructing the agent about ANOTHER
+    server's tool (Invariant E002) is an instruction by definition. It excludes
+    `shadowing:name-collision` on purpose — two servers can innocently share a tool name, and
+    `test_a_non_injection_signal_does_not_suppress_clean` pins that.
+    """
+    k = kind or ""
+    return k.startswith("injection:") or k == "shadowing:cross-server-reference"
+
 
 _DETECTORS = (
     ("injection:hidden-markup", _HIDDEN_MARKUP),
@@ -291,6 +332,7 @@ def detect(snap: ServerSnapshot) -> list[Finding]:
     findings: list[Finding] = []
     for t in snap.tools:
         findings.extend(_scan_text(t.get("description") or "", t.get("name", "?")))
+        findings.extend(_scan_params(t, t.get("name", "?")))
     for pr in snap.prompts:
         findings.extend(_scan_text(pr.get("description") or "", f"prompt:{pr.get('name', '?')}"))
     return findings
