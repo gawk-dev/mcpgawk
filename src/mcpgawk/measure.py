@@ -318,11 +318,24 @@ def is_default_fill(ann: dict[str, Any] | None) -> bool:
     return {k: v for k, v in ann.items() if k != "title"} == _MCP_DEFAULT_HINTS
 
 
+# Code execution is the widest write there is. A PAIR — execute-verb next to a code object — because
+# "evaluate" alone is ordinary read-only prose ("Evaluates whether…"). Separators include `_` so
+# snake_case names match (`\b` does not split `run_shell_command`). Found 2026-09-24: skydock's
+# `evaluate_python_expression` (a bare eval()) counted as neither write nor exfil. MEASURED before
+# adding: fires on 0 of the 346 recorded tools in tests/corpus/detectors.
+_CODE_EXEC = re.compile(
+    r"(?:^|[\W_])(?:eval|evaluate|evaluates|exec|execute|executes|run|runs)[\W_]+(?:\w+[\W_]+)?"
+    r"(?:python|code|expression|script|shell|command|cmd|sql|javascript|js|bash)(?:$|[\W_])", re.I)
+
+
 def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
     if is_default_fill(ann):                 # a struct nobody filled in declares nothing; fall through to the verbs
         ann = {}                             # LOCAL rebind only — the stored tuple stays raw for drift and the panel
     if ann.get("destructiveHint") is True:   # a declared-destructive tool mutates, even if the verb heuristic misses it
         return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
+    # Before readOnlyHint on purpose: a tool that runs arbitrary code cannot honestly be read-only.
+    if _CODE_EXEC.search(tool.get("name", "")) or _CODE_EXEC.search(tool.get("description") or ""):
+        return True
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic
         return False
     description = (tool.get("description") or "").strip()
