@@ -241,6 +241,29 @@ async def _bounded(coro_factory, name: str, transport: str, timeout: float,
                               error_kind=_kind_of(real, status, transport))
 
 
+def _oauth_failure(exc: BaseException) -> str | None:
+    """'registration-refused' / 'sign-in-failed' when an MCP SDK OAuth error is anywhere in the
+    chain (task groups wrap it, `raise from` hides it), else None. By type, never by message."""
+    try:
+        from mcp.client.auth.exceptions import OAuthFlowError, OAuthRegistrationError, OAuthTokenError
+    except ImportError:                                   # pragma: no cover - an mcp dep
+        return None
+    seen: set[int] = set()
+    stack = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, OAuthRegistrationError):
+            return "registration-refused"
+        if isinstance(e, (OAuthFlowError, OAuthTokenError)):
+            return "sign-in-failed"
+        stack.extend(getattr(e, "exceptions", ()) or ())
+        stack.extend((e.__cause__, e.__context__))
+    return None
+
+
 def _kind_of(exc: BaseException, status: int | None = None, transport: str | None = None) -> str:
     """Classify a probe failure by EXCEPTION TYPE, never by message text (F2's lesson). An
     HTTPStatusError means the host answered HTTP and then refused to speak MCP — that is a live URL
@@ -253,6 +276,12 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
     which is why the ladder's error text looked right while the classification silently fell
     through to "unreachable". Only our own non-MCP fetches (the Server Card) raise the plain httpx
     type. Checking one fork is the same as checking neither."""
+    oauth = _oauth_failure(exc)
+    if oauth is not None:
+        # OUR sign-in broke, on a live endpoint. Before this, an OAuth flow error fell through to
+        # "not-an-mcp-endpoint" / "unreachable" and printed "no MCP endpoint found" — Linear,
+        # Sentry, Globalping, Semgrep, Supabase all read as the server's fault (RCA RC3, 2026-09-24).
+        return oauth
     types: list[type] = []
     for module in ("httpx", "httpx2"):
         try:
@@ -560,8 +589,19 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     or they will chase a "server down" that is really a typo (and vice versa)."""
     kinds = {s.error_kind for _, s in attempts}
     # Most specific, most actionable kind wins — each one sends the user somewhere different.
-    if "auth-required" in kinds:
+    if "registration-refused" in kinds:
+        kind = "registration-refused"
+    elif "sign-in-failed" in kinds:
+        kind = "sign-in-failed"
+    elif "auth-required" in kinds:
         kind = "auth-required"
+        try:
+            from .oauth_login import stored_login_unreadable
+            if url and stored_login_unreadable(url):
+                # A sign-in IS stored and could not be decrypted: "needs credentials" would hide it.
+                kind = "login-unreadable"
+        except Exception:  # noqa: BLE001 — a probe for a better label must never break the report
+            pass
     elif "not-an-mcp-endpoint" in kinds:
         kind = "not-an-mcp-endpoint"
     elif "timed-out" in kinds:
@@ -588,10 +628,22 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     lines = [f"  - {label}: {' '.join((snap.error or 'no detail').split())}"
              for label, snap in attempts]
     if skipped:
-        why = ("endpoint found, it needs credentials" if kind == "auth-required"
+        why = ("endpoint found, it needs credentials" if kind in ("auth-required", "sign-in-failed",
+                                                                   "registration-refused",
+                                                                   "login-unreadable")
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
         lines.append(f"  - not attempted ({why}): " + ", ".join(skipped))
-    if kind == "auth-required":
+    if kind == "login-unreadable":
+        head = ("a stored sign-in exists but cannot be decrypted (its key changed or was lost) — "
+                "sign in again: `mcpgawk scan --http <url> --login`")
+    elif kind == "sign-in-failed":
+        head = ("sign-in failed — the endpoint is live and the sign-in broke, which may be "
+                "mcpgawk's fault rather than the server's (the server's own client may work). "
+                "`mcpgawk report` writes the details we need; the SDK said")
+    elif kind == "registration-refused":
+        head = ("the server refuses automatic client registration — sign in with a client you "
+                "register with it yourself: `mcpgawk scan --http <url> --login --oauth-client-id <id>`")
+    elif kind == "auth-required":
         head = ("authentication required — the endpoint is live but refused this scan; "
                 "retry with `--login` or `--header \"Authorization: Bearer …\"`")
     elif kind == "timed-out":

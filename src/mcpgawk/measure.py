@@ -45,6 +45,12 @@ _WRITE_VERBS = (
     # `sign` were considered and REJECTED — each brought a false positive (a permission check, a
     # resend editor handshake, and Revolut's `get_trading_setup`).
     "login", "authenticate",
+    # 2026-09-24: "launch", "translate" and "duplicate" were considered (three misses in the Laya
+    # evaluation's hand labels) and REJECTED — none is unambiguous in isolation ("launch date",
+    # "find duplicate contacts", a translate_text tool that only returns text), and classify.ts
+    # must carry every verb here as a NAME token, where each would make a read uncallable in safe
+    # mode. Three of the four tools they would catch declare readOnlyHint: false, which
+    # `_is_write` now reads; resend's duplicate-template stays missed.
 )
 
 
@@ -338,6 +344,12 @@ def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
         return True
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic
         return False
+    # An EXPLICIT "not read-only" is the server saying it writes; it only ever moves the verdict
+    # towards caution, like destructiveHint above. Default-fill blocks were demoted to {} first, so
+    # kite's all-defaults tuple cannot reach here. MEASURED 2026-09-24: flags 10 more corpus tools,
+    # 9 plainly writes (create/run/restore/start) and takeAppScreenshot, which starts a device session.
+    if ann.get("readOnlyHint") is False:
+        return True
     description = (tool.get("description") or "").strip()
     text = tool.get("name", "") + " " + description
     # Bare verb anywhere ("create_file", "will delete the row"), OR a third-person verb leading the

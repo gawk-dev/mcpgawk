@@ -63,6 +63,16 @@ def wrapped_remote_url(entry: dict[str, Any]) -> str:
     return ""
 
 
+def _stored_doc(url: str) -> dict:
+    """The stored document, decrypted (T2-3). Raises OSError when there is none, as the direct
+    read it replaces did, so callers' `except (OSError, ValueError)` keep their meaning."""
+    from .oauth_login import FileTokenStorage
+    storage = FileTokenStorage(url)
+    if not storage._path.exists():
+        raise OSError("no stored login")
+    return storage._read()
+
+
 def _token_path(url: str) -> Path:
     """Same derivation as oauth_login.FileTokenStorage — one owner of the scheme would be better,
     but duplicating a sha256 prefix is safer than importing the login machinery into a read path."""
@@ -76,7 +86,7 @@ def stored_access_token(url: str) -> str:
     the same honest answer as never having logged in.
     """
     try:
-        doc = json.loads(_token_path(url).read_text(encoding="utf-8"))
+        doc = _stored_doc(url)
     except (OSError, ValueError):
         return ""
     tokens = doc.get("tokens")
@@ -108,7 +118,7 @@ def stored_login_id(url: str) -> str | None:
     inventing an id here would report an account change on every store written before this existed.
     """
     try:
-        doc = json.loads(_token_path(url).read_text(encoding="utf-8"))
+        doc = _stored_doc(url)
     except (OSError, ValueError):
         return None
     got = doc.get("login_id")
@@ -125,7 +135,7 @@ def stored_inband_at(url: str) -> str | None:
     the two kinds apart before it says the word "signed in".
     """
     try:
-        doc = json.loads(_token_path(url).read_text(encoding="utf-8"))
+        doc = _stored_doc(url)
     except (OSError, ValueError):
         return None
     if not doc.get("inband_login"):

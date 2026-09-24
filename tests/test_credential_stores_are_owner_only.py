@@ -24,6 +24,7 @@ explicit mode closes both.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -65,8 +66,10 @@ def test_the_token_file_is_owner_only_even_if_chmod_fails(store, monkeypatch):
     monkeypatch.setattr(Path, "chmod", refuse)
     fresh._write({"access_token": "CANARY_TOKEN_98765"})
     assert _mode(fresh._path) == 0o600
-    assert "CANARY_TOKEN_98765" in Path(fresh._path).read_text(encoding="utf-8"), \
+    assert "CANARY_TOKEN_98765" in json.dumps(fresh._read()), \
         "sanity: the token really was written, so the mode assertion is not vacuous"
+    assert "CANARY_TOKEN_98765" not in Path(fresh._path).read_text(encoding="utf-8"), \
+        "T2-3: the token must not be readable on disk"
 
 
 def test_a_store_written_before_the_fix_is_repaired_on_the_next_write(store):

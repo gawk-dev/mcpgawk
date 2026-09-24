@@ -171,6 +171,7 @@ class _Sandbox:
             "GAWK_BEHAVIOUR_PROFILE": str(self.state / "behaviour.json"),
             "GAWK_BEHAVIOUR": str(self.state / "behaviour.json"),   # the guard hook's reader
             "GAWK_OAUTH_STORE": str(self.state / "oauth"),
+            "GAWK_OAUTH_KEY_BACKEND": "file",      # a throwaway sandbox never touches the Keychain
             "MCPGAWK_AUTH_NEEDED": str(self.state / "auth-needed.json"),
             "GAWK_CONFIG": str(self.state / "config.json"),
             "MCPGAWK_SPOOL": str(self.state / "spool"),

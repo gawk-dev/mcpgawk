@@ -4917,6 +4917,8 @@ def _run_action_bg(kind: str, target: str | None = None,
                 res = run_login(target)
             elif kind == "login-done":
                 res = run_login_done(target)
+            elif kind == "login-backend":
+                res = run_login_backend(target)
             else:
                 res = {"ok": False, "message": f"unknown action {kind!r}"}
             msg = res.get("message") or ("done" if res.get("ok") else "failed")
@@ -5900,7 +5902,9 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
                                "listen": r.summary.get("listen"),
                                "keys": bool(r.summary.get("keys")),
                                "keys_file": r.summary.get("keys_file"),
-                               "stdio": r.summary.get("transport") == "stdio"}
+                               "stdio": r.summary.get("transport") == "stdio",
+                               # T2-2: credential-free remote backends, for one-click sign-in.
+                               "remote_backends": r.summary.get("remote_backends") or []}
                 break
     except Exception as exc:                      # noqa: BLE001 — recorded, never disguised
         out["runs_error"] = str(exc)
@@ -6111,7 +6115,8 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                  else " · stdio (no listener)")
         keys = " · per-principal keys in force" if live.get("keys") else ""
         live_html = (f'<div class="note ok">Gateway RUNNING since {since} — in front of '
-                     f'{what}{where}{keys}</div>' + _snippet_for(live)
+                     f'{what}{where}{keys}</div>' + _gateway_signin_block(live, token)
+                     + _snippet_for(live)
                      + _issue_key_form(live, token, action)
                      + _playground_form(live, token))
     elif gw.get("runs_error"):
@@ -6824,8 +6829,16 @@ def run_login(name: str | None) -> dict[str, Any]:
             return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
         return {"ok": False,
                 "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
+    return _run_oauth_login(name, url, _transport_flag(entry, url), entry)
+
+
+def _run_oauth_login(name: str, url: str, flag: str, entry: dict | None = None) -> dict[str, Any]:
+    """The browser OAuth sign-in for ONE url, via `mcpgawk scan --http|--sse <url> --login` as a
+    child, publishing the authorise link and judging success by a token ON DISK. Split out of
+    run_login (unchanged) so the Gateway tab (T2-2) signs a gateway backend in the same way."""
+    from . import remote_login
     try:
-        proc, log_path = _run_login_cli(url, _transport_flag(entry, url))
+        proc, log_path = _run_login_cli(url, flag)
     except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "message": f"sign-in for {name} did not complete: {exc}"}
     _register_login_child(name, proc)
@@ -6880,13 +6893,65 @@ def run_login(name: str | None) -> dict[str, Any]:
     # never the child's LAST line: that was the scan footer ("Scanned locally — your server
     # inventory never left this machine.") on the founder's figma click, 2026-09-03, with the
     # 403 registration refusal five lines above it.
-    _vl = vendor_signin_limit(entry)
+    _vl = vendor_signin_limit(entry) if entry is not None else None
     if _vl:
         return {"ok": False,
                 "message": (f"sign-in for {name} did not complete — {_vl['reason']} "
                             f"({_vl['symptom']}). {_vl['url']}")}
     return {"ok": False,
             "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
+
+
+def run_login_backend(name: str | None) -> dict[str, Any]:
+    """T2-2: sign in to a gateway backend by NAME. The URL comes from the running gateway's own run
+    record (credential-free remote backends only), never from the form: a panel that signed in to
+    whatever URL a request named would be a way to make it authorise anything."""
+    live = (gateway_status() or {}).get("live") or {}
+    match = next((b for b in live.get("remote_backends") or [] if b.get("name") == name), None)
+    if not name or match is None:
+        return {"ok": False, "message": f"no running gateway backend named {name!r} to sign in to"}
+    url = str(match["url"])
+    return _run_oauth_login(name, url, "--sse" if url.rstrip("/").endswith("/sse") else "--http")
+
+
+def _gateway_signin_block(live: dict[str, Any], token: str) -> str:
+    """One Sign in button per gateway backend with no usable stored sign-in (T2-2)."""
+    from . import remote_login
+    rows, pending = [], []
+    refused = remote_login.auth_needed()               # evidence: which backends REFUSED us
+    for b in live.get("remote_backends") or []:
+        url = str(b.get("url") or "")
+        name_ = str(b.get("name") or url)
+        # A button only on evidence (a 401 / needed re-auth the gateway recorded) and only while
+        # nothing usable is stored. A public backend (deepwiki) never refused, so it gets none.
+        if not url or refused.get(name_) != url:
+            continue
+        if remote_login.stored_access_token(url):
+            # Refused at this gateway's start, signed in since: the running gateway connects
+            # backends only at start (browser walk, 2026-09-24), so say what completes it.
+            pending.append(_esc(name_))
+            continue
+        name = str(b.get("name") or url)
+        from urllib.parse import urlsplit
+        host = _esc(urlsplit(url).hostname or "")
+        rows.append(f'<form method="post" style="display:inline-block;margin:.5rem .5rem 0 0">'
+                    f'<input type="hidden" name="token" value="{_esc(token)}">'
+                    f'<input type="hidden" name="key" value="{_esc(name)}">'
+                    f'<button class="act-sm" name="act" value="login-backend">Sign in to '
+                    f'{_esc(name)}</button> <span class="dim">{host}</span></form>')
+    note = ""
+    if pending:
+        note = (f'<div class="note ok">Signed in to {", ".join(pending)} — restart the gateway to '
+                f'connect {"it" if len(pending) == 1 else "them"}: it reaches its backends when it '
+                f'starts.</div>')
+    if not rows:
+        return note
+    # Buttons INSIDE the note: a row outside it fell off the card's left edge (browser walk,
+    # 2026-09-24) — one grid, not a stray line under the box.
+    return ('<div class="note warn">These gateway backends have no usable sign-in, so the gateway '
+            'cannot reach them. Sign in once here; the gateway, scans and Drift Watch then share '
+            'the same stored sign-in (encrypted on this machine).<div>' + "".join(rows)
+            + '</div></div>' + note)
 
 
 def _login_failure_detail(name: str, url: str, out: str) -> str:
@@ -9263,7 +9328,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                    "mute": f"mute · {_k}" if _k else "mute",
                                    "pin": f"pin · {_k}" if _k else "pin",
                                    }[act])
-            if act in ("scan", "verify", "login", "login-done"):
+            if act in ("scan", "verify", "login", "login-done", "login-backend"):
                 # `key` carries the server for a row action; absent = whole fleet. `launch=1` is
                 # sent only by the /next never-measured card, whose sentence is the consent to
                 # launch a local server once (run_scan).

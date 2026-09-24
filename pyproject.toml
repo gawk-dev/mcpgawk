@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.56"
+version = "0.1.57"
 description = "One gateway in front of every MCP server your agents can reach — every call checked against a baseline you approved. Local-first: nothing leaves your machine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,8 @@ classifiers = [
     "Environment :: Console",
 ]
 dependencies = [
-    "mcp>=2,<3",         # official protocol client — v2 speaks 2026-07-28 and negotiates down to earlier revisions
+    "mcp>=2.2,<3",       # official protocol client (2.2: issuers_match, used by oauth_login) — v2 speaks 2026-07-28 and negotiates down to earlier revisions
+    "cryptography>=42",  # AES-GCM for stored sign-ins at rest (oauth_login); arrives via mcp/pyjwt, imported directly
     "httpx2>=2",         # the fork mcp v2 transports run on; probe.py builds the no-redirect client directly
     "tiktoken>=0.7",     # named cost-index tokenizer (cl100k); honestly labelled, not Claude-exact
     "httpx>=0.27",       # well-known Server Card fetch (also a transitive mcp dep; pinned explicitly)

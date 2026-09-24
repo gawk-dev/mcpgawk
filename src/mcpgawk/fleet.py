@@ -83,6 +83,13 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     if x.get("is_failure"):
         if x.get("error_kind") == "auth-required":
             return "AUTH", "needs credentials — not scanned"
+        if x.get("error_kind") == "sign-in-failed":
+            # Not the server's fault until shown otherwise (RCA RC3): say so, and where to look.
+            return "AUTH", "sign-in failed — may be mcpgawk's fault; `mcpgawk report` has the details"
+        if x.get("error_kind") == "login-unreadable":
+            return "AUTH", "stored sign-in can't be decrypted (its key changed) — sign in again"
+        if x.get("error_kind") == "registration-refused":
+            return "AUTH", "refuses automatic registration — sign in with --oauth-client-id"
         if x.get("error_kind") == "misconfigured":
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
@@ -116,6 +123,11 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         # interpreter path, so the row read worse than this. Needs a trimmer that keeps the
         # message and a redactor that does not fire on paths. probe.py already CAPTURES it.
         return "UNREACHABLE", "no MCP endpoint found"
+
+    if n == 0 and not x.get("prompt_count") and not x.get("resource_count"):
+        # Zoho, 2026-09-24: signed in, exposed nothing, rendered CLEAN. Nothing measured is not a
+        # clean bill of health; the usual cause is the server's own settings (no tools enabled).
+        return "REVIEW", "exposes no tools — nothing to measure; check the server's own settings"
 
     flags = x.get("risk_flags") or {}
     ts = x.get("trust_surface") or {}

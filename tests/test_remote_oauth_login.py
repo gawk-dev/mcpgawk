@@ -38,6 +38,12 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+
+def _stored(path):
+    """A store document as the product reads it (T2-3: encrypted at rest)."""
+    doc = json.loads(path.read_text())
+    return oauth_login._decrypt_doc(doc) if doc.get("mcpgawk_enc") else doc
+
 @pytest.fixture
 def oauth_base():
     """A real OAuth-protected MCP server in its own process; yields its base URL."""
@@ -126,7 +132,7 @@ def test_the_token_is_stored_for_next_time_and_kept_private(oauth_base, store, c
     files = list(store.glob("*.json"))
     assert len(files) == 1, f"expected one per-server token file, got {files}"
     assert oct(files[0].stat().st_mode & 0o777) == "0o600", "a token file must not be world-readable"
-    saved = json.loads(files[0].read_text())
+    saved = _stored(files[0])
     assert saved["tokens"]["access_token"], "no access token was persisted"
 
 
@@ -146,7 +152,7 @@ def test_a_second_scan_reuses_the_token_and_never_opens_a_browser(oauth_base, st
 def test_the_access_token_never_reaches_the_snapshot(oauth_base, store, clicks):
     """The credential is for the connection, not for anything we record or print."""
     snap = _scan_with_login(oauth_base)
-    token = json.loads(next(iter(store.glob("*.json"))).read_text())["tokens"]["access_token"]
+    token = _stored(next(iter(store.glob("*.json"))))["tokens"]["access_token"]
 
     assert token not in json.dumps(snap.tools)
     assert token not in (snap.error or "")
@@ -237,7 +243,7 @@ def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_pat
                 "a registered redirect URI cannot move"
             meta = provider.context.client_metadata
             assert str(meta.redirect_uris[0]) == uri
-            assert meta.token_endpoint_auth_method == "client_secret_post"
+            assert meta.token_endpoint_auth_method == "client_secret_basic"   # RFC 6749 default; the server may still steer it (oauth_login._fit_auth_method_to_server)
         finally:
             server.shutdown()
 
@@ -303,7 +309,7 @@ def test_a_preregistered_client_can_be_stored_from_inside_a_running_loop(tmp_pat
 
     uri = asyncio.run(inside_a_loop())
     assert uri == "http://localhost:23948/callback"
-    doc = json.loads(remote_login._token_path("https://mcp.example.com/mcp").read_text())
+    doc = _stored(remote_login._token_path("https://mcp.example.com/mcp"))
     assert doc["client_info"]["client_id"] == "client-abc" and doc["preregistered"] is True
     assert doc["client_info"]["redirect_uris"] == ["http://localhost:23948/callback"]
 
@@ -340,5 +346,5 @@ def test_the_scan_runner_stores_the_preregistered_client_before_probing(tmp_path
     assert len(snaps) == 1 and seen.get("auth") is not None
     assert seen.get("port") == 23957, "the pre-registered redirect port is the one bound"
     assert str(seen["auth"].context.client_metadata.redirect_uris[0]) == "http://localhost:23957/callback"
-    doc = json.loads(remote_login._token_path("https://mcp.example.com/mcp").read_text())
+    doc = _stored(remote_login._token_path("https://mcp.example.com/mcp"))
     assert doc["preregistered"] is True and doc["client_info"]["client_id"] == "client-abc"
