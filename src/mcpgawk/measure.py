@@ -45,6 +45,10 @@ _WRITE_VERBS = (
     # `sign` were considered and REJECTED — each brought a false positive (a permission check, a
     # resend editor handshake, and Revolut's `get_trading_setup`).
     "login", "authenticate",
+    # D1 (2026-09-26): "trigger" and "replay" were considered and REJECTED. "trigger" is a noun in
+    # every automation server's reads ("Get a trigger by id"); "replay" would block session-replay
+    # reads in TS safe mode. So resend's replay-webhook-event, which matched only via "does not
+    # schedule" before the negation rule below, is now MISSED — like duplicate-template.
     # 2026-09-24: "launch", "translate" and "duplicate" were considered (three misses in the Laya
     # evaluation's hand labels) and REJECTED — none is unambiguous in isolation ("launch date",
     # "find duplicate contacts", a translate_text tool that only returns text), and classify.ts
@@ -84,6 +88,27 @@ _WRITE = re.compile(r"\b(" + "|".join(_WRITE_VERBS) + r")\b", re.I)
 _WRITE_LEADING = re.compile(
     r"^\W*(?:it\s+|this\s+tool\s+)?(" + "|".join(_third_person(v) for v in _WRITE_VERBS) + r")\b",
     re.I)
+
+# D1 (sweep 2026-09-25): `_WRITE` matches WORDS, and prose uses a write verb without describing a
+# write. openzeppelin's eight generators each end "Does not write to disk."; jina's blog search
+# mentions "technical write-ups". All counted as tools that can change data. Two prose shapes are
+# dropped, and ONLY in the description: a verb directly negated ("does not write", "never sends",
+# "cannot delete"), and a verb that starts a hyphen compound ("write-ups"). A verb that ENDS one
+# still counts: "soft-delete", "hard-delete", "bulk-update" and "auto-create" are writes. The NAME
+# keeps the bare pattern: hyphens separate words in names (`create-webhook`), so the compound rule
+# would blind every kebab-case tool. Participles and nouns ("a record set on a name", hood;
+# "pre-trade" and "before entering a trade", agentberg) are NOT handled — telling them from a verb
+# needs grammar this regex does not have.
+_NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bcannot|\bno\s+longer)\s+(?:\w+ly\s+)?$", re.I)
+
+
+def _describes_write(description: str) -> bool:
+    for mt in _WRITE.finditer(description):
+        before, after = description[:mt.start()], description[mt.end():]
+        if _NEGATED.search(before) or re.match(r"-[A-Za-z]", after):
+            continue
+        return True
+    return False
 
 #: Parameter-name words that mean "the CALLER chooses a destination". This is the STRUCTURAL half
 #: of exfil detection and the stronger half: whoever controls that argument controls where data
@@ -381,10 +406,11 @@ def _is_write(tool: dict[str, Any], ann: dict[str, Any], demote: bool | None = N
     if "readOnlyHint" not in ann and ("destructiveHint" in ann or "idempotentHint" in ann):
         return True
     description = (tool.get("description") or "").strip()
-    text = tool.get("name", "") + " " + description
-    # Bare verb anywhere ("create_file", "will delete the row"), OR a third-person verb leading the
+    # Bare verb in the name ("create_file") or in the prose ("will delete the row", minus the
+    # negated and compound uses — see _describes_write), OR a third-person verb leading the
     # description ("Creates a file") — see _WRITE_LEADING for why the second one is anchored.
-    return bool(_WRITE.search(text)) or bool(_WRITE_LEADING.match(description))
+    return (bool(_WRITE.search(tool.get("name", ""))) or _describes_write(description)
+            or bool(_WRITE_LEADING.match(description)))
 
 
 def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -> Measurement:

@@ -289,6 +289,11 @@ class DriftReport:
     #: NOW, so this run cannot claim (or clear) drift on them — and must say so rather than
     #: reporting every prompt as newly "added".
     baseline_extended: bool = False
+    #: How the baseline being compared against was set — `history.baseline_origin`: "approve",
+    #: "first-sighting", or None (unknown, older than the field). Set by the caller that holds the
+    #: store; `compare` sees only the two records. Decides whether the headline may say "you
+    #: approved it".
+    baseline_origin: str | None = None
     #: `{kind}.{name}` -> (before, after) redacted description text, for the items in `changed`.
     #: Empty when either record predates text storage (ADR-0012) — the diff degrades to the hash
     #: verdict rather than inventing content.
@@ -909,6 +914,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
     approval = head is None      # the default caller compares "your approval" with "now"
     if head is not None:
         pass
+    elif r.baseline_origin == "first-sighting":
+        # Trust on first use is not a decision. "changed since you approved it" told a user who
+        # never ran `approve` that they had (new-developer walk, 2026-09-26).
+        head = (f"    ⟳ DRIFT on {name} — changed since first seen"
+                f"{' ' + when if when else ''}; you have not approved this server yet:")
     elif when:
         # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
         # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say

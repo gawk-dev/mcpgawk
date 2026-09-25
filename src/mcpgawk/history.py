@@ -622,6 +622,10 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
         entry = server_entry(store, key)
         if base is None:
             entry["approved"] = rec          # trust-on-first-use
+            # Say HOW it became the baseline. Without this a first sighting and a human `approve`
+            # from before approved_at existed looked alike, and drift told a user who never
+            # approved anything "changed since you approved it" (new-developer walk, 2026-09-26).
+            entry["approved_via"] = "first-sighting"
         if adopted:
             # AN ADOPTED RECORD'S ALIASES MAY NAME OTHER SERVERS. A record conflated under the old
             # identity carries the config name of EVERY entry that shared it — so keeping them here
@@ -672,6 +676,7 @@ def approve(key: str, path: str | None = None, *,
         # `by` is the OS user at this host — honest, and the slot RBAC fills later.
         entry["approved_at"] = _now_iso()
         entry["approved_by"] = _operator()
+        entry["approved_via"] = "approve"
         save(store, path)
     return latest
 
@@ -699,6 +704,16 @@ def approval_provenance(store: dict[str, Any], key: str) -> tuple[str | None, st
     e = (store.get("servers") or {}).get(key) or {}
     at, by = e.get("approved_at"), e.get("approved_by")
     return (at if isinstance(at, str) else None), (by if isinstance(by, str) else None)
+
+
+def baseline_origin(store: dict[str, Any], key: str) -> str | None:
+    """How a server's baseline was set: "approve" (a person ran `mcpgawk approve`),
+    "first-sighting" (trust on first use), or None for a baseline older than this field, whose
+    origin is unknown and is not guessed."""
+    e = (store.get("servers") or {}).get(key) or {}
+    if e.get("approved_at") or e.get("approved_via") == "approve":
+        return "approve"
+    return "first-sighting" if e.get("approved_via") == "first-sighting" else None
 
 
 def changed_within(store: dict[str, Any], days: int = 7,

@@ -296,8 +296,12 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
               file=sys.stderr)
         for line in _discovery_problems(sources):
             print(f"  ⚠ {line}", file=sys.stderr)
-        print("  Point it at a config:  mcpgawk scan path/to/mcp.json\n"
-              "  Or scan one server:    mcpgawk scan --stdio \"npx -y <server>\"  |  --http <url>",
+        # Lead with "check before you add": a new user with no servers is usually about to add one
+        # (new-developer walk, 2026-09-26), and this is the only place that says how.
+        print("  Check a server before you add it:\n"
+              "    mcpgawk scan --http <url>\n"
+              "    mcpgawk scan --stdio \"npx -y <server>\"\n"
+              "  Or point it at a config:  mcpgawk scan path/to/mcp.json",
               file=sys.stderr)
         return [], {}, []
     if is_discovery:
@@ -976,7 +980,7 @@ def _baseline(args) -> int:
               "the baseline that verify and monitor will compare against.")
         return 0
 
-    print(f"Approved baseline — {len(servers)} server(s). "
+    print(f"Baseline — {len(servers)} server(s). "
           f"verify and monitor compare against exactly this.\n")
     for key in sorted(servers):
         rec = servers[key]
@@ -987,6 +991,10 @@ def _baseline(args) -> int:
         if rec.get("approved_at"):
             print(f"    approved   {rec['approved_at']}"
                   f"{' by ' + rec['approved_by'] if rec.get('approved_by') else ''}")
+        elif rec.get("baseline_origin") == "first-sighting":
+            # Trust on first use: nobody approved it, so say that, and when it was first seen.
+            print(f"    approved   not yet by you · trusted on first scan "
+                  f"{rec.get('measured_at') or '—'}")
         else:
             # Before 2026-09-03 the sighting's time was printed under "approved": a borrowed date.
             print(f"    approved   time and actor not recorded · baseline measured "
@@ -1186,13 +1194,18 @@ def _approve(args) -> int:
                 return 4   # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
             print("Nothing to approve — every tracked server matches its approved baseline.")
             return 0
-        print(f"{len(waiting)} server(s) changed since you approved them:\n")
+        print(f"{len(waiting)} server(s) changed since their baseline:\n")
         for key in waiting:
             entry = store["servers"][key]
             names = ", ".join(entry.get("aliases", [])) or key
             print(f"    {names}  ({key})")
-        print("\nReview the change first — `mcpgawk scan` shows what moved.")
-        print("Then: mcpgawk approve <name>    (or --all)")
+        print("\nReview the change first — `mcpgawk scan` shows what moved. Then accept it:")
+        # The exact command per server. The key always resolves; the name the user sees may be a
+        # whole command line with spaces, or shared by two servers (new-developer walk, 2026-09-26).
+        for key in waiting:
+            print(f"    mcpgawk approve {shlex.quote(key)}")
+        if len(waiting) > 1:
+            print("    or all of them: mcpgawk approve --all")
         return 0 if args.list else 1
 
     targets = waiting if args.all else [k for k in [history.resolve(store, args.server)] if k]
@@ -1760,8 +1773,13 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
     # `alias` names the record for an AD-HOC target (`_adhoc_name`); a config scan's label IS
     # the config name, so the default stands there.
     previous = history.record(key, current, migrate_from=migrate_keys, alias=alias or sn.name)
-    return _Sighting(key=key, previous=previous,
-                     report=drift.compare(previous, current), reidentified_from=was)
+    report = drift.compare(previous, current)
+    if report is not None:
+        # The store read above already holds this key's approval, unless `record` just adopted it
+        # from a migrated key; only then is a second read needed.
+        known = key in (store.get("servers") or {})
+        report.baseline_origin = history.baseline_origin(store if known else history.load(), key)
+    return _Sighting(key=key, previous=previous, report=report, reidentified_from=was)
 
 
 def with_stored_login(entry: dict) -> dict:
@@ -2149,6 +2167,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     # --track: record locally and diff against the last sighting (rug-pull detection).
     drift_reports: dict[str, drift.DriftReport] = {}
+    # name -> the store key, so a drift block can print the exact `approve` command: the name shown
+    # for an ad-hoc scan ("cli-stdio") is deliberately not resolvable (new-developer walk, 2026-09-26).
+    drift_keys: dict[str, str] = {}
     pin_notes: dict[str, str] = {}          # servers whose pin this build cannot compare
     new_baselines: list[str] = []
     reidentified: dict[str, str] = {}
@@ -2171,6 +2192,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 new_baselines.append(sn.name)
             if seen_now.report and seen_now.report.any:
                 drift_reports[sn.name] = seen_now.report
+                drift_keys[sn.name] = seen_now.key
             if seen_now.report and seen_now.report.pin_not_compared:
                 # Kept OUTSIDE drift_reports on purpose: a pin that could not be compared is not
                 # drift, and putting it there would restore the false alarm being removed. But it
@@ -2318,7 +2340,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # count towards the exit code exactly as if the first pass had seen them. Drift and
             # re-identification learned here count too, for the same reason.
             any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE",
-                                                     "FAILED", "TIMED-OUT")
+                                                     "NOT-MCP", "FAILED", "TIMED-OUT")
                                          for r in refreshed.values())
             any_error = any_error or any(s.reidentified_from or (s.report and s.report.any)
                                          for s in late.values())
@@ -2340,6 +2362,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("\n" + render_cli(lab, verbose=args.verbose))
             if rep:
                 print(drift.render(name, rep))
+                _print_accept(drift_keys.get(name))
             continue
         if name in reidentified:
             print(f"\n  ⛔ {name} now identifies itself as a DIFFERENT server "
@@ -2350,9 +2373,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # The change IS the report. What it gained/lost is quoted in the drift block; the
             # rest of the surface — unchanged since approval — stays behind --full.
             print("\n" + drift.render(name, rep))
+            _print_accept(drift_keys.get(name))
         elif name in new_baselines:
-            print(f"\n  ✓ {name}: baseline recorded — first sighting, nothing to diff yet. "
-                  f"What you are trusting:")
+            print(f"\n  ✓ {name}: first scan — baseline recorded. Scan it again later and "
+                  f"mcpgawk tells you if anything changed. What it can do:")
             print("\n" + render_cli(lab, verbose=False))
         elif caveats:
             print("\n" + render_cli(lab, verbose=False))   # a failure is never summarised away
@@ -2408,7 +2432,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # Scanning is not protection. A report with no next step is how the author finished a scan on
     # his own machine and stayed unprotected — the hook existed, worked, and was never installed
     # because nothing ever mentioned it. Only shown when it is actually actionable.
-    _installed = _guard_is_installed()
+    # Only with servers to check: with none, "these servers" named nothing and "`mcpgawk` turns
+    # that on" told a user who had just run `mcpgawk` to run it again (new-developer walk,
+    # 2026-09-26). The empty case already printed how to check a server before adding it.
+    _installed = _guard_is_installed() if (labels or unlabelled or skipped) else True
     if _installed is None:
         print("  Whether your agents are checking these servers could not be determined — the "
               "guard probe failed. Run `mcpgawk guard status`.\n")
@@ -2416,6 +2443,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
         print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
     _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
+
+
+def _print_accept(key: str | None) -> None:
+    """The exact command that accepts a drifted server, by its store key (always resolvable)."""
+    if key:
+        print(f"        Reviewed it and it is fine? mcpgawk approve {shlex.quote(key)}")
 
 
 def _behavioural_capability_note() -> None:

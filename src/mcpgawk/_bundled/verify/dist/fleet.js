@@ -114,6 +114,7 @@ export const FLEET_STATES = [
     "TIMED-OUT",
     "SKIPPED",
     "UNREACHABLE",
+    "NOT-MCP",
     "NOT-SCANNABLE",
 ];
 /** mcpgawk state → the report's status vocabulary + a colour role, so the fleet and a verify report
@@ -139,6 +140,9 @@ export function stateStatus(state) {
             return { label: "skipped", role: "incomplete" };
         case "UNREACHABLE":
             return { label: "unreachable", role: "muted" };
+        case "NOT-MCP":
+            // It answered, so "unreachable" would be false; it is not MCP, so nothing was measured.
+            return { label: "not mcp", role: "muted" };
         case "NOT-SCANNABLE":
             return { label: "remote", role: "muted" };
         default:

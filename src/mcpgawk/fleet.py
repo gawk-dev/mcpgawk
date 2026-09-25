@@ -33,11 +33,16 @@ from .probe import _missing_program
 #: findings, because an unscanned server is an unknown, and an unknown outranks a known risk.
 #: FAILED sits above UNREACHABLE on purpose: both block a scan, but a server that ran and printed
 #: a reason has a fix the user can act on today, while "nothing answered" still needs diagnosing.
-STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW",
-          "INCOMPLETE", "CLEAN")
+#: NOT-MCP (2026-09-26, FOUNDER "add NOT-MCP"): something answered, and it is not MCP — a docs page,
+#: a package URL, a firewall's refusal. It sat under UNREACHABLE, the word `scan` dropped in T1 because
+#: it is false when the endpoint answered. It follows UNREACHABLE: both block a scan, and the fix here
+#: (point the entry at the real endpoint) is one the user can make without diagnosing anything.
+STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "NOT-MCP", "SKIPPED", "NOT-SCANNABLE",
+          "REVIEW", "INCOMPLETE", "CLEAN")
 
 _MARK = {
-    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "SKIPPED": "○",
+    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "NOT-MCP": "●",
+    "SKIPPED": "○",
     "NOT-SCANNABLE": "◌", "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
 }
 
@@ -100,7 +105,7 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         if x.get("error_kind") == "misconfigured":
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
-            return "UNREACHABLE", "responds, but does not speak MCP"
+            return "NOT-MCP", "responds, but does not speak MCP"
         if x.get("error_kind") == "timed-out":
             # The beta page's "sits there doing nothing", named. It is NOT "no endpoint found":
             # the server is there, it took the connection, and it never spoke.
@@ -375,7 +380,8 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
 #: shipping new states under the old number walked around it. Bump whenever the payload gains
 #: anything an older client would have to understand — a new state, a renamed field, a changed
 #: meaning. Purely additive fields a client can ignore (`names`) do not need it.
-FLEET_SCHEMA = "mcpgawk.fleet/2"
+#: Bumped to /3 on 2026-09-26 when NOT-MCP joined STATES.
+FLEET_SCHEMA = "mcpgawk.fleet/3"
 
 
 def to_json(rows: list[FleetRow]) -> dict[str, Any]:

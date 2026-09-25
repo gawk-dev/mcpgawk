@@ -155,7 +155,7 @@ def test_a_profile_that_observed_nothing_is_distinct_from_no_profile():
 
 def test_pending_drift_is_a_blocking_call_to_action():
     out = _render(pending=["notes", "figma"])
-    assert "2 server(s) changed since you approved them" in out
+    assert "2 server(s) changed since their baseline" in out
     assert "notes" in out and "figma" in out
     assert "mcpgawk approve" in out
 

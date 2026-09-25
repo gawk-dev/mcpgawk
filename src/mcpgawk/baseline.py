@@ -146,6 +146,8 @@ def export(path: str | None = None) -> dict[str, Any]:
             # sighting's measurement time stood in for it, and `approved_by` is honestly absent.
             "approved_at": entry.get("approved_at"),      # None until the approval itself is dated
             "approved_by": entry.get("approved_by"),
+            # "approve" / "first-sighting" / None (older than the field). Additive.
+            "baseline_origin": history.baseline_origin(store, key),
             "measured_at": rec.get("measured_at"),        # the sighting's time — a different fact
             "aliases": list(entry.get("aliases") or []),
             "annotations": {
@@ -239,6 +241,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             # would enforce yesterday's labels on today's tools, which reads as coverage and is not.
             record.pop("annotations", None)
         entry["approved"] = record
+        entry["approved_via"] = "approve"     # gated by require_human_approval above
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
         history.save(store, p)

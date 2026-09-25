@@ -16,6 +16,7 @@ Read-only by construction: it opens stores, never writes them, and never starts 
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,7 @@ def hook_health_by_client() -> dict[str, str]:
 
 def render(*, hook_health: dict[str, str], guard_path: Path | None,
            agents: dict[str, int], baseline_total: int, pending: list[str],
+           pending_keys: list[str] | None = None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
@@ -182,11 +184,20 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
                    f"(mcpgawk wrong — still listed on scans, never hidden)")
     if pending:
         out.append("")
-        out.append(f"      {len(pending)} server(s) changed since you approved them — blocked until")
+        out.append(f"      {len(pending)} server(s) changed since their baseline — blocked until")
         out.append("      you decide:")
         for name in pending[:10]:
             out.append(f"          {name}")
-        out.append("      Review: mcpgawk scan     Accept: mcpgawk approve <name>")
+        out.append("      Review: mcpgawk scan")
+        # The exact command per server, by key: a display name can be a whole command line with
+        # spaces, which `approve <name>` cannot take unquoted (new-developer walk, 2026-09-26).
+        keys = list(pending_keys or [])
+        if keys:
+            out.append("      Accept:")
+            for key in keys[:10]:
+                out.append(f"          mcpgawk approve {shlex.quote(key)}")
+        else:
+            out.append("      Accept: mcpgawk approve <name>")
 
     out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, hash-chained log)"]
     if enforce_available:
@@ -296,7 +307,7 @@ def collect() -> dict:
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
     except Exception as exc:                       # noqa: BLE001
-        pending, baseline_total, muted_total = [], 0, 0
+        pending, pending_keys, baseline_total, muted_total = [], [], 0, 0
         baseline_error = f"{type(exc).__name__}: {exc}"
 
     behaviour_tools: int | None = None
@@ -386,7 +397,7 @@ def collect() -> dict:
 
     return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   agents_error=agents_error,
-                  baseline_total=baseline_total, pending=pending,
+                  baseline_total=baseline_total, pending=pending, pending_keys=pending_keys,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
