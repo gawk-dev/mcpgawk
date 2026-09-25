@@ -14,6 +14,7 @@ import asyncio
 import concurrent.futures as _futures
 import json
 import os
+import re
 import shlex
 import sys
 from dataclasses import asdict
@@ -217,6 +218,16 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
                       f"this EXACT redirect URI registered: {_ruri}", file=sys.stderr)
             auth, server = build_login_provider(url)
             timeout = 330.0
+        if auth is None and not entry["headers"]:
+            # K3 (2026-09-25): a URL in no agent config, signed in earlier with --login, was scanned
+            # WITHOUT the stored sign-in and read "AUTH REQUIRED" — the 2026-08-27 fix wired it for
+            # the config path only. Same entry shape, same `with_stored_login`, same `probe()` as
+            # that path, so the record key and alias are identical by construction; `probe()` uses
+            # the refresh-only provider and never permutes (no token offered to guessed paths). An
+            # explicit --header still wins: the caller asked a different question.
+            signed = with_stored_login({"url": url, "transport": transport, "headers": {}})
+            if "_refreshable_login" in signed:
+                return [await probe(signed, f"cli-{transport}")], {f"cli-{transport}": signed}, []
         # `--http`/`--sse` orders the attempts; it does not decide what we believe. The one case we
         # do NOT permute is --login: an OAuth provider would re-run its browser flow per candidate
         # and offer the token to URLs the user never named (see probe_url).
@@ -843,7 +854,7 @@ def _runs(args) -> int:
     for r in runs:
         when = r.started_at[:19].replace("T", " ")
         target = r.target or "(fleet)"
-        print(f"{when}  {_RUN_MARK.get(r.status, r.status):8}  {r.kind:8}  {target}")
+        print(f"{when}  {_RUN_MARK.get(r.status, r.status):8}  {runlog.display_kind(r):8}  {target}")
 
     unfinished = [r for r in runs if not r.finished]
     if unfinished:
@@ -1852,6 +1863,18 @@ def main(argv: list[str] | None = None) -> int:
                 if record.name.startswith("mcp"):
                     record.exc_info = None
                     record.exc_text = None
+                    # D15 (2026-09-25): the SDK also logs ADVICE written for SDK users — "Redirect
+                    # to <url> not followed; use that URL as the endpoint if it is the intended
+                    # server" — and on svelte that URL was a docs page. Our reader is not an SDK
+                    # user: say what happened in mcpgawk's words, never the SDK's instruction.
+                    msg = record.getMessage()
+                    moved = re.search(r"Redirect to (\S+) not followed", msg)
+                    if moved:
+                        record.msg = ("mcpgawk: the server redirected its event stream to %s — "
+                                      "not followed; the scan result below says what was measured")
+                        record.args = (moved.group(1).rstrip(";,."),)
+                    elif msg.startswith("Encountered SSE exception"):
+                        return False      # the failed attempt is already named in the scan result
                 return True
         _logging.lastResort.addFilter(_SdkCleanupNoise())
 
@@ -1909,7 +1932,8 @@ def _main_body(argv: list[str] | None) -> int:
         # error is the caller's, not the tool's.
         _code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
         runlog.finish_run(run_id, runlog.OK if _code == 0 else runlog.INCOMPLETE,
-                          {"exit_code": _code, "usage": _code != 0, **_who})
+                          {"exit_code": _code, "usage": _code != 0,
+                           "help": _code == 0 and bool({"-h", "--help"} & set(raw)), **_who})
         raise
     except BaseException as exc:                       # noqa: BLE001 - recorded, then re-raised
         runlog.finish_run(run_id, runlog.ERROR,

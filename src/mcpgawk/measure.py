@@ -175,6 +175,10 @@ class ToolMeasure:
     #: callers) must not be forced to restate it. Empty then means "not flagged, or nobody said" —
     #: which is exactly what the renderer treats as "no claim to make".
     exfil_basis: str = ""
+    #: K1 (2026-09-25): this tool's annotation block is treated as "nobody filled it in" — decided
+    #: per SERVER in measure(): more than one tool and every one carries the identical spec-default
+    #: block (kite's 22). One tool, or varied blocks, keep their declaration (PostHog's `exec`).
+    default_fill: bool = False
 
 
 @dataclass
@@ -205,6 +209,25 @@ def _count(enc, text: str) -> int:
     return len(enc.encode(text)) if enc is not None else max(1, len(text) // 4)
 
 
+_NON_TEXT_TYPES = {"boolean", "integer", "number"}
+
+
+def _cannot_hold_an_address(schema: Any) -> bool:
+    """A destination-NAMED parameter the schema types as a boolean or number (or an array of them)
+    cannot carry an address. D2 (2026-09-25): OpenZeppelin's `callback: boolean` and jina's
+    `return_url: boolean` were reported as caller-chosen destinations. Untyped or string-typed
+    parameters keep today's reading — the fail-safe direction."""
+    if not isinstance(schema, dict):
+        return False
+    t = schema.get("type")
+    types = set(t) if isinstance(t, list) else {t}
+    if t == "array":
+        inner = (schema.get("items") or {}).get("type") if isinstance(schema.get("items"), dict) else None
+        types = set(inner) if isinstance(inner, list) else {inner}
+    types.discard("null")                    # a nullable boolean is still not an address
+    return bool(types) and None not in types and types <= _NON_TEXT_TYPES
+
+
 def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str:
     """WHY this tool was flagged, in the product's own words. `""` means it was not.
 
@@ -231,8 +254,8 @@ def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str
         return ""
     # Parameter first: it is the strongest evidence, so it should be the reported reason when
     # several arms fire (`add_watermark` has an `image_url` AND the word "http" in its prose).
-    for k in ((tool.get("inputSchema") or {}).get("properties") or {}):
-        if _is_destination_param(k):
+    for k, schema in ((tool.get("inputSchema") or {}).get("properties") or {}).items():
+        if _is_destination_param(k) and not _cannot_hold_an_address(schema):
             return f"param:{k}"
     # THE TOOL'S OWN NAME NAMES A DESTINATION. `fetch_url` is not a chance word in prose — the
     # tool advertises what it does in its identifier, and a schema-less tool would otherwise be
@@ -334,8 +357,9 @@ _CODE_EXEC = re.compile(
     r"(?:python|code|expression|script|shell|command|cmd|sql|javascript|js|bash)(?:$|[\W_])", re.I)
 
 
-def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
-    if is_default_fill(ann):                 # a struct nobody filled in declares nothing; fall through to the verbs
+def _is_write(tool: dict[str, Any], ann: dict[str, Any], demote: bool | None = None) -> bool:
+    # `demote` is measure()'s server-level decision; None keeps the per-block rule for other callers.
+    if (is_default_fill(ann) if demote is None else demote):                 # a struct nobody filled in declares nothing; fall through to the verbs
         ann = {}                             # LOCAL rebind only — the stored tuple stays raw for drift and the panel
     if ann.get("destructiveHint") is True:   # a declared-destructive tool mutates, even if the verb heuristic misses it
         return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
@@ -350,6 +374,12 @@ def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
     # 9 plainly writes (create/run/restore/start) and takeAppScreenshot, which starts a device session.
     if ann.get("readOnlyHint") is False:
         return True
+    # D16 (2026-09-25): the spec says destructiveHint and idempotentHint are "meaningful only when
+    # readOnlyHint == false" — a server that declares either, and leaves readOnlyHint out, is
+    # describing a tool that writes. tandem declares them on its six cache/index-mutating tools and
+    # readOnlyHint: true on its seven reads. MEASURED: 0 of 346 corpus tools change.
+    if "readOnlyHint" not in ann and ("destructiveHint" in ann or "idempotentHint" in ann):
+        return True
     description = (tool.get("description") or "").strip()
     text = tool.get("name", "") + " " + description
     # Bare verb anywhere ("create_file", "will delete the row"), OR a third-person verb leading the
@@ -362,6 +392,12 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         enc, tokenizer_name = _encoder()
     tools: list[ToolMeasure] = []
     total = 0
+    # K1: [FOUNDER 2026-09-11] rule, applied as it was reasoned — across a server's tools. The
+    # reason recorded was kite: cancel_order and get_profile annotated IDENTICALLY, so the block
+    # describes neither. A lone tool, or tools with varied blocks, gives no such evidence; PostHog
+    # deliberately sends the default values on its single `exec`. classify.ts already exempts
+    # single-tool servers. MEASURED: 0 of 346 corpus tools change; kite stays demoted 22 of 22.
+    uniform = len(snap.tools) > 1 and all(is_default_fill(t.get("annotations") or {}) for t in snap.tools)
     for t in snap.tools:
         # Tokenise exactly what a model's context would carry for this tool.
         blob = json.dumps({k: t.get(k) for k in ("name", "description", "inputSchema", "annotations")
@@ -372,8 +408,10 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         props = ((t.get("inputSchema") or {}).get("properties") or {})
         tools.append(ToolMeasure(
             name=t.get("name", "?"), tokens=tk,
-            write=_is_write(t, ann), exfil_capable=_exfil_capable(t, ann),
+            write=_is_write(t, ann, demote=uniform and is_default_fill(ann)),
+            exfil_capable=_exfil_capable(t, ann),
             exfil_basis=_exfil_basis(t, ann), annotations=ann,
+            default_fill=uniform and is_default_fill(ann),
             param_count=len(props),
             description_words=len((t.get("description") or "").split())))
     # Integrity pin over the WHOLE tool surface — name + description + canonical input schema +

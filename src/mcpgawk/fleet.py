@@ -86,6 +86,11 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         if x.get("error_kind") == "sign-in-failed":
             # Not the server's fault until shown otherwise (RCA RC3): say so, and where to look.
             return "AUTH", "sign-in failed — may be mcpgawk's fault; `mcpgawk report` has the details"
+        if x.get("error_kind") == "server-error":
+            # An existing state on purpose: the VS Code FleetState union is closed.
+            return "UNREACHABLE", "the server is answering with errors (HTTP 5xx) — try later"
+        if x.get("error_kind") == "sign-in-incomplete":
+            return "AUTH", "sign-in not completed — run it again and approve in the browser"
         if x.get("error_kind") == "login-unreadable":
             return "AUTH", "stored sign-in can't be decrypted (its key changed) — sign in again"
         if x.get("error_kind") == "registration-refused":
@@ -160,7 +165,9 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
-    if injections or secrets or risky_config or flags.get("high_reach") or flags.get("heavy"):
+    # `heavy` alone is a raw size fact; a REVIEW needs the cost to be a concern (D9, 2026-09-25).
+    from .label import is_cost_concern
+    if injections or secrets or risky_config or flags.get("high_reach") or is_cost_concern(x):
         return "REVIEW", detail
     return "CLEAN", detail
 

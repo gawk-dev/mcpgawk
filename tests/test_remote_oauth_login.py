@@ -348,3 +348,27 @@ def test_the_scan_runner_stores_the_preregistered_client_before_probing(tmp_path
     assert str(seen["auth"].context.client_metadata.redirect_uris[0]) == "http://localhost:23957/callback"
     doc = _stored(remote_login._token_path("https://mcp.example.com/mcp"))
     assert doc["preregistered"] is True and doc["client_info"]["client_id"] == "client-abc"
+
+
+def test_sdk_advice_is_rewritten_in_our_words_and_sse_noise_dropped(capsys):
+    """D15 (2026-09-25): svelte's scan printed the SDK's advice "use that URL as the endpoint if it
+    is the intended server" for a docs page. Our reader is not an SDK user."""
+    import logging
+
+    from mcpgawk import cli
+
+    cli.main(["runs"])
+    capsys.readouterr()
+    flt = next(f for f in logging.lastResort.filters if type(f).__name__ == "_SdkCleanupNoise")
+    moved = logging.LogRecord(
+        name="mcp.client.streamable_http", level=logging.WARNING, pathname="x", lineno=1,
+        msg="GET stream not opened: %s", args=("Redirect to https://svelte.dev/docs/mcp/overview not "
+                                               "followed; use that URL as the endpoint if it is the "
+                                               "intended server",), exc_info=None)
+    assert flt.filter(moved) is True
+    text = moved.getMessage()
+    assert "https://svelte.dev/docs/mcp/overview" in text and "not followed" in text
+    assert "use that URL as the endpoint" not in text and text.startswith("mcpgawk:")
+    sse = logging.LogRecord(name="mcp.client.sse", level=logging.ERROR, pathname="x", lineno=1,
+                            msg="Encountered SSE exception", args=(), exc_info=None)
+    assert flt.filter(sse) is False

@@ -293,6 +293,15 @@ def reconcile_stale(*, path: str | None = None) -> int:
     return changed
 
 
+def display_kind(run: Any) -> str:
+    """What a run WAS, for any list a person reads. [FOUNDER 2026-09-25] D18: `scan --help` keeps
+    its row — it exists to trace unattended callers (a334cca) — but it is labelled, never shown as
+    a scan."""
+    kind = getattr(run, "kind", "") or ""
+    summary = getattr(run, "summary", None)
+    return f"{kind} --help" if isinstance(summary, dict) and summary.get("help") else kind
+
+
 def list_runs(*, kind: str | None = None, limit: int = 100, since: str | None = None,
               path: str | None = None) -> list[Run]:
     """Most recent first. The timeline's read path."""

@@ -484,6 +484,25 @@ def store_preregistered_client(server_url: str, client_id: str,
     return uri
 
 
+from mcp.client.auth.exceptions import OAuthFlowError as _OAuthFlowError  # noqa: E402
+
+
+class SignInIncomplete(_OAuthFlowError):
+    """The person did not finish the browser sign-in: no approval arrived in time, or they declined.
+    Nothing broke. An OAuth-typed error so the scan reports it as a sign-in, never as "no MCP
+    endpoint found" (K4, Attio 2026-09-24); `sign_in_incomplete` lets the classifier tell it from a
+    sign-in that genuinely failed without importing this module."""
+    sign_in_incomplete = True
+
+
+class SignInTimedOut(SignInIncomplete, TimeoutError):
+    """No authorization code within the wait. Still a TimeoutError for existing handlers."""
+
+
+class SignInNotCompleted(SignInIncomplete, RuntimeError):
+    """The authorization server returned an error (e.g. access_denied). Still a RuntimeError."""
+
+
 class LoginNeeded(RuntimeError):
     """The stored login cannot be refreshed and a browser sign-in is required. Raised INSTEAD of
     opening a browser by the refresh-only provider, so an unattended scan can classify it as
@@ -665,9 +684,9 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
         # at once (conformance auth/scope-step-up, 2026-09-24: "State parameter mismatch").
         done.clear()
         if captured["error"]:
-            raise RuntimeError(f"the sign-in was not completed: {captured['error']}")
+            raise SignInNotCompleted(f"the sign-in was not completed: {captured['error']}")
         if not captured["code"]:
-            raise TimeoutError("no authorization code received within 5 minutes")
+            raise SignInTimedOut("no authorization code received within 5 minutes")
         # A code came back, so a PERSON just approved this in a browser. Only this path arms the
         # new-sign-in stamp; the SDK's refresh reaches `set_tokens` without ever coming through
         # here, which is what keeps a refresh from looking like a change of account.

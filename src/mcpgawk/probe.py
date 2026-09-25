@@ -69,8 +69,10 @@ class ServerSnapshot:
     # (a live URL that isn't MCP — e.g. an HTML docs page), "auth-required" (a real MCP endpoint that
     # refused us 401/403 — the user needs `--login`/`--header`, NOT a different URL),
     # "command-missing" (a stdio entry whose program is not on disk — see probe(), and note this is
-    # a DIFFERENT user action from "unreachable": the entry is stale, not the server down).
-    # None when there is no error.
+    # a DIFFERENT user action from "unreachable": the entry is stale, not the server down),
+    # "server-error" (the endpoint answered HTTP 5xx — up but failing; try later, the URL is right),
+    # and the sign-in kinds "sign-in-failed" / "sign-in-incomplete" / "registration-refused" /
+    # "login-unreadable". None when there is no error.
     error_kind: str | None = None
     # Set by the permuting prober when the URL/transport that actually answered is NOT the one that
     # was declared (see transport.py). None means "the declaration was right" — the common case.
@@ -214,10 +216,19 @@ def _status_recorder() -> tuple[dict[str, int | None], Any]:
     server is indistinguishable from a dead host unless we record the status at the moment it
     arrives. (The SSE client does raise the real status error; this is the streamable path's gap.)
     """
-    seen: dict[str, int | None] = {"status": None}
+    seen: dict[str, int | None] = {"status": None, "refused": None}
 
     async def hook(response) -> None:
-        seen["status"] = response.status_code
+        code = response.status_code
+        seen["status"] = code
+        # D12 (2026-09-25): the 2026-08-13 discover fallback sends a SECOND request after a refused
+        # initialize, and its 400 used to overwrite the 401 — agentic-news read as "no MCP endpoint".
+        # Keep the refusal apart from the last status; any 2xx clears it, because the sign-in flow's
+        # own first response is the 401 that starts it, and a later success means it was answered.
+        if code in (401, 403):
+            seen["refused"] = code
+        elif 200 <= code < 300:
+            seen["refused"] = None
 
     return seen, hook
 
@@ -227,6 +238,10 @@ async def _bounded(coro_factory, name: str, transport: str, timeout: float,
     try:
         return await asyncio.wait_for(coro_factory(), timeout)
     except (asyncio.TimeoutError, TimeoutError) as e:
+        if _oauth_failure(e) is not None:
+            # A sign-in that timed out is also a TimeoutError; it is a sign-in, not a silent server.
+            return ServerSnapshot(name=name, transport=transport, protocol_version=None,
+                                  error=f"{type(e).__name__}: {e}", error_kind=_oauth_failure(e))
         # NOT "unreachable": something accepted the connection and then never answered. That is a
         # different fault with a different fix — look at the server's own logs, not at the address —
         # and it is the one the beta page describes as "sits there doing nothing".
@@ -236,9 +251,12 @@ async def _bounded(coro_factory, name: str, transport: str, timeout: float,
     except Exception as e:  # noqa: BLE001 — surface, never crash the scan
         real = _unwrap(e)
         status = status_hint() if status_hint is not None else None
+        detail = f"{type(real).__name__}: {real}"
+        if status is not None and status >= 400 and str(status) not in detail:
+            # The streamable client drops the status from its error; say what the server answered.
+            detail += f" (HTTP {status})"
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
-                              error=f"{type(real).__name__}: {real}",
-                              error_kind=_kind_of(real, status, transport))
+                              error=detail, error_kind=_kind_of(real, status, transport))
 
 
 def _oauth_failure(exc: BaseException) -> str | None:
@@ -257,6 +275,8 @@ def _oauth_failure(exc: BaseException) -> str | None:
         seen.add(id(e))
         if isinstance(e, OAuthRegistrationError):
             return "registration-refused"
+        if getattr(type(e), "sign_in_incomplete", False):
+            return "sign-in-incomplete"
         if isinstance(e, (OAuthFlowError, OAuthTokenError)):
             return "sign-in-failed"
         stack.extend(getattr(e, "exceptions", ()) or ())
@@ -295,6 +315,10 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
         response = getattr(exc, "response", None)
         if response is not None and getattr(response, "status_code", None) in (401, 403):
             return "auth-required"
+        if response is not None and (getattr(response, "status_code", None) or 0) >= 500:
+            # D13 (2026-09-25): a 502/503 is a live host failing, not "a docs page" — aarna and
+            # agenticshelf were told their URL was not an MCP endpoint during an outage.
+            return "server-error"
         return "not-an-mcp-endpoint"
     # Nothing in the exception, but the transport SAW a refusal (see `_status_recorder`). Only
     # 401/403 is read this way: those are the one case where the endpoint is provably live and the
@@ -302,6 +326,10 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
     # the type-based rules above rather than guessed at from a number.
     if status in (401, 403):
         return "auth-required"
+    if status is not None and status >= 500:
+        # The streamable client turns any 5xx into MCPError("Server returned an error response")
+        # with no status; the recorder saw it.
+        return "server-error"
     try:
         from .oauth_login import LoginNeeded
         if isinstance(exc, LoginNeeded):
@@ -509,7 +537,7 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
                     snap = await _snapshot(session, name, "http")
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
-    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["status"])
+    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["refused"] or seen["status"])
 
 
 async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
@@ -591,6 +619,8 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     # Most specific, most actionable kind wins — each one sends the user somewhere different.
     if "registration-refused" in kinds:
         kind = "registration-refused"
+    elif "sign-in-incomplete" in kinds:
+        kind = "sign-in-incomplete"
     elif "sign-in-failed" in kinds:
         kind = "sign-in-failed"
     elif "auth-required" in kinds:
@@ -602,6 +632,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
                 kind = "login-unreadable"
         except Exception:  # noqa: BLE001 — a probe for a better label must never break the report
             pass
+    elif "server-error" in kinds:
+        # Above not-an-mcp-endpoint: one path answering 5xx says the service is there and failing;
+        # the other paths' 404s say nothing about that.
+        kind = "server-error"
     elif "not-an-mcp-endpoint" in kinds:
         kind = "not-an-mcp-endpoint"
     elif "timed-out" in kinds:
@@ -629,6 +663,7 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
              for label, snap in attempts]
     if skipped:
         why = ("endpoint found, it needs credentials" if kind in ("auth-required", "sign-in-failed",
+                                                                   "sign-in-incomplete",
                                                                    "registration-refused",
                                                                    "login-unreadable")
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
@@ -636,6 +671,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     if kind == "login-unreadable":
         head = ("a stored sign-in exists but cannot be decrypted (its key changed or was lost) — "
                 "sign in again: `mcpgawk scan --http <url> --login`")
+    elif kind == "sign-in-incomplete":
+        head = ("sign-in not completed — the endpoint is live and asked you to sign in, but the "
+                "browser approval did not come back (it timed out or was declined). Run the same "
+                "command again and approve in the browser; the SDK said")
     elif kind == "sign-in-failed":
         head = ("sign-in failed — the endpoint is live and the sign-in broke, which may be "
                 "mcpgawk's fault rather than the server's (the server's own client may work). "
@@ -646,6 +685,9 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     elif kind == "auth-required":
         head = ("authentication required — the endpoint is live but refused this scan; "
                 "retry with `--login` or `--header \"Authorization: Bearer …\"`")
+    elif kind == "server-error":
+        head = ("the server is answering with errors (HTTP 5xx) — it is up but failing; the URL is "
+                "right, try again later")
     elif kind == "timed-out":
         head = ("no answer within the time budget — the connection was accepted and the server "
                 "never replied")

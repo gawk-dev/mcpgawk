@@ -55,7 +55,15 @@ def compare_to_reality(card: dict[str, Any], measured_tool_names: list[str]) -> 
     }
     ct = card.get("tools")
     if isinstance(ct, list):
-        declared = sorted({str(t["name"]) for t in ct if isinstance(t, dict) and t.get("name")})
+        # A card may list a tool as an object with a name OR as a bare name string — coinpaprika and
+        # dexpaprika (2026-09-25 sweep) use strings. Reading only objects turned a card that declares
+        # every tool into "31 tools absent from its card" and a failed scan (D11).
+        declared = sorted({str(t["name"]) for t in ct if isinstance(t, dict) and t.get("name")}
+                          | {t.strip() for t in ct if isinstance(t, str) and t.strip()})
+        if ct and not declared:
+            # Entries in a shape we cannot read: say so, never "everything is undeclared".
+            out["tools_comparable"] = False
+            return out
         real = sorted(set(measured_tool_names))
         undeclared = sorted(set(real) - set(declared))   # present but hidden from the card
         phantom = sorted(set(declared) - set(real))       # claimed but not actually present

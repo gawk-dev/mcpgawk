@@ -67,20 +67,29 @@ _COST_PHRASE = {
     "B": "reasonable for a server this size",
     "C": "mid-range for a server this size",
     "D": "expensive for what it does",
-    "F": "very expensive — among the heaviest we've measured",
+    # D10 (2026-09-25): was "very expensive — among the heaviest we've measured", a superlative
+    # nothing checks (the same class as label.py's benchmark sentence, fixed in 9236a8e). The F band
+    # starts at ~675 tokens per tool; say that.
+    "F": "very expensive — over ~675 tokens per tool",
 }
 
 
+def cost_band(tokens_per_tool: int) -> str:
+    """The letter behind cost_phrase. Behaviour keys on THIS, never on the phrase's wording."""
+    return _letter(_cost_score(tokens_per_tool))
+
+
 def cost_phrase(tokens_per_tool: int) -> str:
-    return _COST_PHRASE[_letter(_cost_score(tokens_per_tool))]
+    return _COST_PHRASE[cost_band(tokens_per_tool)]
 
 
-def _is_annotated(ann: dict) -> bool:
+def _is_annotated(ann: dict, default_fill: bool | None = None) -> bool:
     # "annotated" = the tool declares its read/write intent (the trust-relevant hints).
     # [FOUNDER 2026-09-11] A block that is exactly the spec defaults is the shape of an unfilled
     # struct, not a declaration — see measure.is_default_fill. kite scored 100% hygiene on 22 tools
     # nobody had annotated; it now scores what it actually earned.
-    if is_default_fill(ann):
+    # K1: measure() decides default-fill per server; None keeps the per-block rule.
+    if (is_default_fill(ann) if default_fill is None else default_fill):
         return False
     return bool(ann) and ("readOnlyHint" in ann or "destructiveHint" in ann)
 
@@ -116,7 +125,7 @@ def grade(m: Measurement) -> Grade:
     total = m.tool_count
     tpt = round(m.total_tokens / total) if total else 0
     cost = _cost_score(tpt) if total else 100
-    annotated = sum(1 for t in m.tools if _is_annotated(t.annotations or {}))
+    annotated = sum(1 for t in m.tools if _is_annotated(t.annotations or {}, t.default_fill))
     hygiene = round(100 * annotated / total) if total else 100
     overall = round(W_COST * cost + W_HYGIENE * hygiene)
     letter = _letter(overall)

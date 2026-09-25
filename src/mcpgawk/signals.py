@@ -202,6 +202,29 @@ _EXEC_TOOL_NAME = re.compile(
     re.IGNORECASE)
 _DISPATCH_PARAM_NAMES = {"tool", "tool_name", "toolname", "target_tool", "action"}
 
+# SINGLE-DISPATCHER SHAPES the two above never matched (2026-09-25 sweep of 22 unseen servers +
+# the founder's live PostHog scan): a tool whose WHOLE NAME is a bare run verb, or mcp/app/tool +
+# run verb, taking one free-text string that names what to run — PostHog `exec(command)` (cli mode
+# over its whole API), coingecko `execute(code)` (code mode over an SDK), inference.sh
+# `mcp_run(slug)` / `app_run(app)` (a proxy to connected servers). Anchored whole names, so
+# `execute_workflow(workflow_id)` and `run_report(report_id)` stay silent. MEASURED before adding:
+# 0 of the 346 corpus tools fire; on the sweep exactly those three servers.
+# PYTHON-ONLY ON PURPOSE. packages/verify/src/dispatch.ts mirrors the two patterns above, and there
+# EXEC_TOOL_NAME also chooses the tool that verify INVOKES — widening it would make verify call a
+# bare `exec`. Reporting "this scan is incomplete" is safe; driving the tool is not. Pinned by
+# tests/test_dispatch_shapes.py.
+_BARE_DISPATCHER_NAME = re.compile(
+    r"^(?:exec|execute|run|invoke|call)$|^(?:mcp|app|tool)[-_]?(?:run|exec|call|invoke)$",
+    re.IGNORECASE)
+_BARE_DISPATCH_PARAM_NAMES = _DISPATCH_PARAM_NAMES | {"command", "code", "slug", "app"}
+
+
+def verify_can_enumerate(tool_names: list[str]) -> bool:
+    """Whether `mcpgawk verify` can list a dispatcher's hidden tools: only the shapes its own
+    dispatch.ts drives (a discover/execute name pair, or an execute-shaped name). The bare shapes
+    above are reported but never driven, so the report must not send the user to verify for them."""
+    return any(_EXEC_TOOL_NAME.search(n) or _DISCOVER_TOOL_NAME.search(n) for n in tool_names)
+
 
 def detect_dynamic_dispatch(snap: ServerSnapshot) -> list[Finding]:
     """Signal: this server's tools/list likely hides a larger real catalog behind a dynamic
@@ -219,11 +242,15 @@ def detect_dynamic_dispatch(snap: ServerSnapshot) -> list[Finding]:
     out: list[Finding] = []
     for t in snap.tools:
         n = t.get("name", "?")
-        if not _EXEC_TOOL_NAME.search(n):
+        if _EXEC_TOOL_NAME.search(n):
+            selectors = _DISPATCH_PARAM_NAMES
+        elif _BARE_DISPATCHER_NAME.search(n):
+            selectors = _BARE_DISPATCH_PARAM_NAMES
+        else:
             continue
         props = ((t.get("inputSchema") or {}).get("properties") or {})
         for pname, pschema in props.items():
-            if pname.lower().replace("-", "_") in _DISPATCH_PARAM_NAMES and (pschema or {}).get("type") == "string":
+            if pname.lower().replace("-", "_") in selectors and (pschema or {}).get("type") == "string":
                 out.append(Finding(
                     tool=n, kind="dispatch:dynamic-tool-catalog",
                     evidence=(f"'{n}' takes a free-text '{pname}' selector — likely dispatches to "

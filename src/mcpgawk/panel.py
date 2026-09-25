@@ -38,6 +38,12 @@ from . import dxt
 TABS = ("fleet", "runtime", "evidence", "decisions")
 
 
+
+def _run_kind(r) -> str:
+    """runlog.display_kind, imported lazily like every other runlog use in this module (D18)."""
+    from . import runlog as _runlog_mod
+    return _runlog_mod.display_kind(r)
+
 def _esc(v: object) -> str:
     """HTML-escape a value — and render a missing one as nothing.
 
@@ -3403,7 +3409,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     runs = "".join(
         f'<tr><td class="dim">{_esc(_local_stamp(getattr(r, "started_at", "")))}</td>'
-        f'<td class="nm">{_esc(getattr(r, "kind", ""))}</td>'
+        f'<td class="nm">{_esc(_run_kind(r))}</td>'
         f'<td><span class="chip {_run_status(r)[1]}">{_esc(_run_status(r)[0])}</span></td>'
         f'<td class="dim">{_esc(str(getattr(r, "target", "") or "fleet-wide")[:56])}</td></tr>'
         for r in (d.get("runs") or [])) or \
@@ -4529,7 +4535,7 @@ def state(d: dict[str, Any] | None = None) -> dict[str, Any]:
         "calls": [{k: c.get(k) for k in ("ts", "decision", "server", "tool", "adapter", "basis")}
                   for c in calls[:50]],
         "breakdown": {k: v for k, v in call_breakdown(calls).items()},
-        "runs": [{"started_at": str(getattr(r, "started_at", "")), "kind": getattr(r, "kind", ""),
+        "runs": [{"started_at": str(getattr(r, "started_at", "")), "kind": _run_kind(r),
                   "status": getattr(r, "status", ""), "target": getattr(r, "target", "") or "",
                   "run_id": getattr(r, "run_id", "")} for r in (d.get("runs") or [])],
         "pending": list(d.get("pending") or []),
@@ -5493,7 +5499,7 @@ def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
         if Path(runlog.default_path()).is_file():
             import socket as _sock
             for r in runlog.list_runs(limit=15):
-                what = " ".join(x for x in (getattr(r, "kind", ""), getattr(r, "target", ""))
+                what = " ".join(x for x in (runlog.display_kind(r), getattr(r, "target", ""))
                                 if x)
                 status = getattr(r, "status", "")
                 # The same liveness rule as the Evidence table: dead recorder ≠ running.
