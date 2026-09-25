@@ -372,3 +372,18 @@ def test_sdk_advice_is_rewritten_in_our_words_and_sse_noise_dropped(capsys):
     sse = logging.LogRecord(name="mcp.client.sse", level=logging.ERROR, pathname="x", lineno=1,
                             msg="Encountered SSE exception", args=(), exc_info=None)
     assert flt.filter(sse) is False
+
+
+def test_a_declined_session_close_is_not_printed(capsys):
+    """coingecko answered our session-close DELETE with 404 after the scan; the SDK logged
+    "Session termination failed: 404" onto the user's terminal (0.1.58 RC)."""
+    import logging
+
+    from mcpgawk import cli
+
+    cli.main(["runs"])
+    capsys.readouterr()
+    flt = next(f for f in logging.lastResort.filters if type(f).__name__ == "_SdkCleanupNoise")
+    rec = logging.LogRecord(name="mcp.client.streamable_http", level=logging.WARNING, pathname="x",
+                            lineno=1, msg="Session termination failed: %s", args=(404,), exc_info=None)
+    assert flt.filter(rec) is False

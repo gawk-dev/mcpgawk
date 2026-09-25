@@ -1875,6 +1875,10 @@ def main(argv: list[str] | None = None) -> int:
                         record.args = (moved.group(1).rstrip(";,."),)
                     elif msg.startswith("Encountered SSE exception"):
                         return False      # the failed attempt is already named in the scan result
+                    elif msg.startswith("Session termination failed"):
+                        # The server declined our session-close DELETE after the scan finished
+                        # (coingecko, 404). Nothing was lost and nothing is for the reader to do.
+                        return False
                 return True
         _logging.lastResort.addFilter(_SdkCleanupNoise())
 

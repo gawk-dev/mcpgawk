@@ -442,7 +442,9 @@ def _actions(exfil_c: int, write_c: int, ac: dict[str, Any], heavy: bool,
     # records. The CLI prints its own "baseline recorded" line when it actually does.
     acts.append("Re-scan before you trust it again — descriptions are the surface that gets "
                 "rewritten; that rewrite is the attack.")
-    top = _dominates(tools, cost) if heavy else None
+    # Not on a one-tool server: "disable the tools you never call — exec alone …" is advice to
+    # remove the server, worded as if there were a choice (founder's 0.1.58 RC scan, PostHog).
+    top = _dominates(tools, cost) if heavy and len(tools) > 1 else None
     if top:
         acts.append(f"Disable the tools you never call — {top['name']} alone costs "
                     f"{top['tokens']:,} tokens on every message.")
@@ -818,7 +820,7 @@ def render_summary(labels: list[dict[str, Any]], local_servers: int = 0) -> str:
     if failed == ns:
         body = f"{servers} · not measured — no totals."
     else:
-        body = (f"{servers}{f' ({failed} not measured)' if failed else ''} · {tools} tools · "
+        body = (f"{servers}{f' ({failed} not measured)' if failed else ''} · {tools} tool{'s' if tools != 1 else ''} · "
                 f"{toks:,} tokens loaded into every session · {flagged} can change or send data.")
     out = ("─" * 64 + f"\n{body}\n"
            "Scanned locally — your server inventory never left this machine.")
