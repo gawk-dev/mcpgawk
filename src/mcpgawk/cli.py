@@ -1873,8 +1873,10 @@ def main(argv: list[str] | None = None) -> int:
                         record.msg = ("mcpgawk: the server redirected its event stream to %s — "
                                       "not followed; the scan result below says what was measured")
                         record.args = (moved.group(1).rstrip(";,."),)
-                    elif msg.startswith("Encountered SSE exception"):
-                        return False      # the failed attempt is already named in the scan result
+                    elif msg.startswith(("Encountered SSE exception", "Unexpected content type")):
+                        # The failed attempt is already named in the scan result — the content
+                        # type included (T1, 2026-09-25: one stray line per tried path, after it).
+                        return False
                     elif msg.startswith("Session termination failed"):
                         # The server declined our session-close DELETE after the scan finished
                         # (coingecko, 404). Nothing was lost and nothing is for the reader to do.

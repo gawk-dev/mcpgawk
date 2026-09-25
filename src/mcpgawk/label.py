@@ -181,6 +181,8 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
             # read CLEAN. error_kind explains why (unreachable / misconfigured / not-an-mcp-endpoint).
             "is_failure": m.is_failure,
             "error_kind": m.error_kind,
+            # True only when the connection provably carried no credential (see ServerSnapshot).
+            "anonymous": getattr(snap, "anonymous", None),
             # BOUNDED layer — heuristic signals, kept apart from the EXACT facts above.
             "bounded_signals": bounded_signals or None,
             "disclaimer": "Local measurement. Token cost is a comparable index, not an absolute "
@@ -218,7 +220,8 @@ def _dominates(tools: list[dict[str, Any]], cost: int) -> dict[str, Any] | None:
 
 def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
               tools: list[dict[str, Any]], heavy: bool, injections: list[dict[str, Any]],
-              expensive: bool, secrets: list[dict[str, Any]] | None = None) -> list[tuple[str, list[str]]]:
+              expensive: bool, secrets: list[dict[str, Any]] | None = None,
+              undriven: frozenset[str] = frozenset()) -> list[tuple[str, list[str]]]:
     """The things worth a human's attention, MOST IMPORTANT FIRST.
 
     This ordering is the whole point of the narrative report. The old renderer gave every fact the
@@ -306,9 +309,15 @@ def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
                 f"{_names(by_word)} matched only on wording ({words}) — a word in the name or "
                 f"description, not a destination it accepts. Treat that as a prompt to look, not "
                 f"a finding.")
-        body.append("All of this is read from the server's own declarations. Nothing here was "
-                    "observed: `mcpgawk verify` runs the tools in a sandbox and reports what they "
-                    "actually contact.")
+        if all(t.get("name") in undriven for t in flagged):
+            # T4 (2026-09-25): verify never drives a bare dispatcher (PostHog `exec`), and the
+            # dispatch block of this same report says so. Pointing at it here contradicted that.
+            body.append("All of this is read from the server's own declarations. Nothing here was "
+                        "observed, and `mcpgawk verify` does not drive this dispatcher shape.")
+        else:
+            body.append("All of this is read from the server's own declarations. Nothing here was "
+                        "observed: `mcpgawk verify` runs the tools in a sandbox and reports what "
+                        "they actually contact.")
         out.append((head, body))
 
     if write_c and ac["annotated"] == 0:
@@ -426,12 +435,14 @@ def _flagged_table(flagged: dict[str, Any] | None, n: int) -> list[str]:
 
 
 def _actions(exfil_c: int, write_c: int, ac: dict[str, Any], heavy: bool,
-             tools: list[dict[str, Any]], cost: int = 0) -> list[str]:
+             tools: list[dict[str, Any]], cost: int = 0, anonymous: bool | None = None) -> list[str]:
     """Only actions that CANNOT be wrong. A passive scan cannot tell you a server is safe to
     install, so this never says so — it suggests steps that are correct regardless of whether the
     server turns out to be benign."""
     acts: list[str] = []
-    if write_c:
+    if write_c and anonymous is not True:
+        # T6 (2026-09-25): not when the scan connected with no credential at all — there is no
+        # token to swap (CoinGecko keyless). Unknown (stdio, any header) keeps the advice.
         # D7 (2026-09-25): was `exfil_c or write_c`, so a server with no writes (contactfinder) was
         # told to drop write access it does not have. "Only actions that CANNOT be wrong."
         acts.append("If you don't need write access, connect with a read-only token instead.")
@@ -513,7 +524,14 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
     secrets = [s for s in (x.get("bounded_signals") or []) if (s.get("kind") or "").startswith("secret:")]
     phrase = cost_phrase(round(cost / n) if n else 0)
     expensive = _poor_value(n, cost)
-    concerns = _concerns(n, cost, write_c, exfil_c, ac, tools, heavy, injections, expensive, secrets)
+    # The dispatchers verify will not drive — the same rule the dispatch block's last line uses.
+    from .signals import verify_can_enumerate
+    undriven = frozenset(
+        name for s in (x.get("bounded_signals") or []) if (s.get("kind") or "").startswith("dispatch:")
+        for names in [[p.strip() for p in (s.get("tool") or "").split(",") if p.strip()]]
+        if not verify_can_enumerate(names) for name in names)
+    concerns = _concerns(n, cost, write_c, exfil_c, ac, tools, heavy, injections, expensive, secrets,
+                         undriven)
     cost_concern = is_cost_concern(x)
 
     empty = n == 0 and not x.get("prompt_count") and not x.get("resource_count")
@@ -528,7 +546,9 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
                    "sign-in-incomplete": "AUTH — SIGN-IN NOT COMPLETED (run again and approve)",
                    "access-denied": "AUTH — SIGNED IN, ACCESS REFUSED (HTTP 403)",
                    "login-unreadable": "AUTH — STORED SIGN-IN UNREADABLE (sign in again)",
-                   "registration-refused": "AUTH — REFUSES AUTOMATIC REGISTRATION"}.get(
+                   "registration-refused": "AUTH — REFUSES AUTOMATIC REGISTRATION",
+                   # It answered — "UNREACHABLE" was false for a web page (T1, 2026-09-25).
+                   "not-an-mcp-endpoint": "NOT AN MCP ENDPOINT"}.get(
             kind, "AUTH REQUIRED" if state == "auth-required" else "UNREACHABLE")
     elif empty:
         # Zoho, 2026-09-24: 0 tools rendered CLEAN. Nothing measured is not a clean bill.
@@ -577,7 +597,7 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
         # both render this, so they name the same tools with the same verdict. Gated on has_risk to
         # match exactly when the CLI shows the table; None when nothing can change or send data.
         "flagged": flagged_surface(tools) if has_risk else None,
-        "actions": _actions(exfil_c, write_c, ac, heavy, tools, cost),
+        "actions": _actions(exfil_c, write_c, ac, heavy, tools, cost, x.get("anonymous")),
         # Hedged and conditional, always: we only saw the tools the server chose to show us, and we
         # only pattern-match. It disappears entirely the moment anything is actually found.
         "cost_concern": cost_concern,
@@ -666,7 +686,12 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
             lines.append("      The endpoint is real — this is about signing in, not the URL.")
         elif x.get("error_kind") == "server-error":
             lines.append("      The address is right — the server answered with an error. Try again later.")
-        elif x.get("error_kind") in ("unreachable", "not-an-mcp-endpoint", None):
+        elif x.get("error_kind") == "not-an-mcp-endpoint":
+            # Something answered over HTTP, so a --stdio hint is beside the point here.
+            lines.append("      It answered, but not as an MCP server. A docs / repo / package URL is "
+                         "not one, and neither is a firewall's refusal.")
+            lines.append("      Use the MCP URL from the server's own documentation.")
+        elif x.get("error_kind") in ("unreachable", None):
             lines.append("      Is it a live MCP endpoint? A docs / repo / package URL is not one.")
             lines.append("      A local server needs:  mcpgawk scan --stdio \"<launch command>\"")
         # Any other kind: its headline already says what happened; a guessed hint would mislead.

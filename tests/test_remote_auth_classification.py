@@ -83,12 +83,14 @@ def test_kind_of_classifies_the_httpx2_error_the_sdk_actually_raises():
     from mcpgawk.probe import _kind_of
 
     request = httpx2.Request("GET", "https://example.test/sse")
-    for status, expected in ((401, "auth-required"), (403, "auth-required"),
-                             (404, "not-an-mcp-endpoint")):
+    challenge = {"WWW-Authenticate": 'Bearer resource_metadata="https://example.test/.well-known"'}
+    for status, headers, expected in ((401, {}, "auth-required"), (403, challenge, "auth-required"),
+                                      (403, {}, "not-an-mcp-endpoint"),
+                                      (404, {}, "not-an-mcp-endpoint")):
         err = httpx2.HTTPStatusError(
             f"Client error '{status}'", request=request,
-            response=httpx2.Response(status, request=request))
-        assert _kind_of(err) == expected, f"httpx2 {status} misread as {_kind_of(err)!r}"
+            response=httpx2.Response(status, headers=headers, request=request))
+        assert _kind_of(err) == expected, f"httpx2 {status} {headers} misread as {_kind_of(err)!r}"
 
 
 def test_real_401_is_classified_auth_required(walled_url):

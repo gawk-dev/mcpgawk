@@ -27,8 +27,63 @@ the gate. Any test asserting the REFUSAL clears this with monkeypatch first, and
 from __future__ import annotations
 
 import os
+import stat
 
 import pytest
+
+#: FOUNDER 2026-09-25, "why my keychain is being accessed by you": a public-suite run with only HOME
+#: redirected let the OAuth tests call `security add-generic-password` on the founder's login
+#: Keychain — the platform conftest forced the file key backend, this one never did. Two layers:
+#: the backend is forced to `file`, and a `security` that refuses and records sits first on PATH,
+#: so ANY path to the Keychain — a new call site, a subprocess CLI, a reset backend — fails the test
+#: that took it instead of touching the real one. The platform conftest imports these two fixtures.
+KEYCHAIN_CALL_LOG = "keychain-calls.log"
+_SYSTEM_ROOTS = "/System/Library/Keychains/SystemRootCertificates.keychain"
+_SYSTEM_STORE = "/Library/Keychains/System.keychain"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _never_the_real_keychain(tmp_path_factory):
+    shim = tmp_path_factory.mktemp("no-keychain")
+    log = shim / KEYCHAIN_CALL_LOG
+    log.write_text("")
+    exe = shim / "security"
+    # Two EXACT argv are answered without any Keychain: semgrep's CA loader (mirage/ca-certs) asks
+    # for the public trust anchors in the two SYSTEM stores, and every run before this guard read
+    # them. The root store is served from certifi's public CA bundle; the machine store answers
+    # empty. Anything else — a certificate read from the login Keychain included — is refused.
+    try:
+        import certifi
+        bundle = certifi.where()
+    except ImportError:                                  # no bundle: refuse like everything else
+        bundle = ""
+    served = (f'  "find-certificate -a -p {_SYSTEM_ROOTS}") [ -n "{bundle}" ] && exec cat "{bundle}" ;;\n'
+              f'  "find-certificate -a -p {_SYSTEM_STORE}") exit 0 ;;\n')
+    exe.write_text('#!/bin/sh\ncase "$*" in\n' + served + 'esac\n'
+                   f'printf "%s\\n" "$*" >> "{log}"\n'
+                   'echo "mcpgawk test suite: the real Keychain is off limits" >&2\nexit 1\n')
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    prior = {k: os.environ.get(k) for k in ("GAWK_OAUTH_KEY_BACKEND", "PATH")}
+    os.environ["GAWK_OAUTH_KEY_BACKEND"] = "file"
+    os.environ["PATH"] = f"{shim}{os.pathsep}{prior['PATH'] or ''}"
+    try:
+        yield log
+    finally:
+        for k, v in prior.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@pytest.fixture(autouse=True)
+def _a_keychain_call_fails_the_test(_never_the_real_keychain):
+    log = _never_the_real_keychain
+    before = log.read_text()
+    yield
+    new = log.read_text()[len(before):]
+    assert not new, ("this test reached the macOS Keychain (`security " + new.strip() + "`) — the "
+                     "suite refused it; force GAWK_OAUTH_KEY_BACKEND=file or fake subprocess.run")
 
 
 @pytest.fixture(scope="session", autouse=True)
