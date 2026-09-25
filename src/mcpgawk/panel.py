@@ -39,6 +39,14 @@ TABS = ("fleet", "runtime", "evidence", "decisions")
 
 
 
+
+def _dict_at(d: Any, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`d[key]` when it is a dict, else a FRESH default (`{}` unless given). Reads the key once — the
+    inline `d.get(k) if isinstance(d.get(k), dict) else {}` it replaces was correct at runtime but
+    left the type checker unable to see the narrowing (26 mypy errors in this file, 2026-09-25)."""
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, dict) else ({} if default is None else default)
+
 def _run_kind(r) -> str:
     """runlog.display_kind, imported lazily like every other runlog use in this module (D18)."""
     from . import runlog as _runlog_mod
@@ -249,7 +257,7 @@ def collect() -> dict[str, Any]:
                     # rows of "?" against the founder's real file. `candidate` is kept only as a
                     # fallback so an older report still parses.
                     cand = f.get("candidate") or {}
-                    ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+                    ev = _dict_at(f, "evidence")
                     where = [str(x) for x in (ev.get("egress") or ev.get("hosts") or [])][:4]
                     _hosts = [str(x) for x in ((f.get("evidence") or {}).get("egress")
                                                or (f.get("evidence") or {}).get("hosts") or [])]
@@ -294,7 +302,7 @@ def collect() -> dict[str, Any]:
         # never runs, so the common case costs one read rather than one read per server.
         _wrapped_names = {str(r.get("server")) for r in spool.read(limit=100000)
                           if r.get("adapter") == "wrap" and r.get("server")}
-        _store_w = data.get("store") if isinstance(data.get("store"), dict) else {"servers": {}}
+        _store_w = _dict_at(data, "store", {"servers": {}})
         for _k in (_store_w.get("servers") or {}) if _wrapped_names else ():
             try:
                 _names_k = {str(_k), history.display_name(_store_w, str(_k))} | {
@@ -330,7 +338,7 @@ def collect() -> dict[str, Any]:
     # 2026-09-07 the dashboard read only the engine's `suppressed` flag and /next read only the
     # store: a mute from /next left the Findings tab unchanged.
     try:
-        _st = data.get("store") if isinstance(data.get("store"), dict) else {"servers": {}}
+        _st = _dict_at(data, "store", {"servers": {}})
         for _rec in data["findings"]:
             _rec["muted"] = finding_id(_rec) in history.muted(
                 _st, history.resolve(_st, str(_rec.get("server") or "")))
@@ -383,7 +391,7 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
                 #
                 # The counts are MACHINE-WIDE — the spool records no per-client breakdown — so the
                 # wording says "on this machine" rather than implying it measured this agent.
-                act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+                act = _dict_at(d, "activity")
                 seen = act.get("calls") or 0
                 checked, deferred = act.get("checked"), act.get("deferred") or 0
                 if checked is None:
@@ -521,7 +529,7 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     asserted: a control that is off says off, and no row is ever a percentage.
     """
     from . import history as _h
-    store = d.get("store") if isinstance(d.get("store"), dict) else {"servers": {}}
+    store = _dict_at(d, "store", {"servers": {}})
     agents = _agent_rows(d)
     covered = sum(1 for _k, _l, st, _n, _det in agents if st == "on")
     pending = len(d.get("pending") or [])
@@ -565,7 +573,7 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
                  f"{_local_stamp(d.get('verify_at')) if d.get('verify_at') else 'never'}",
                  "warn" if pending else "ok"))
     # 5
-    act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+    act = _dict_at(d, "activity")
     calls = act.get("calls") or 0
     audit = bool(gw.get("audit_present"))
     rows.append(("Audit everything",
@@ -1023,11 +1031,9 @@ _TW = {"agent_w": 272, "srv_w": 300, "tool_w": 260, "call_w": 320, "h": 46,
        "pitch": 54, "gap": 44, "pad": 10}
 
 
-def _clip(text: str, n: int) -> str:
-    """SVG text does not wrap. A label that overruns its box would draw straight across the
-    connectors, so it is cut here rather than left to overlap the drawing."""
-    text = str(text)
-    return text if len(text) <= n else text[: n - 1] + "\u2026"
+# `_clip` (defined further down) also bounds the SVG labels here: SVG text does not wrap, so a label
+# that overruns its box would draw across the connectors. A second, character-cut `_clip` used to sit
+# here; the later definition replaced it at import, so it never ran (mypy no-redef, 2026-09-25).
 
 
 def _wrap(text: str, width: int, lines: int) -> list[str]:
@@ -2221,7 +2227,8 @@ def _api_store(store: dict, d: dict | None = None) -> dict:
         if not isinstance(se, dict):
             continue
         approved = se.get("approved") if isinstance(se.get("approved"), dict) else None
-        hist = se.get("history") if isinstance(se.get("history"), list) else []
+        _hist = se.get("history")
+        hist = _hist if isinstance(_hist, list) else []
         last = hist[-1] if hist and isinstance(hist[-1], dict) else None
         def _surface(rec):
             if not rec:
@@ -2534,7 +2541,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
     drawer = ""
-    srows = []
+    srows: list[str] = []
     #: Baseline-only servers render grouped under ONE band that states their shared fact once,
     #: instead of repeating it in every row's cells (panel UX pass, 24 Aug).
     bo_rows: list[str] = []
@@ -5531,6 +5538,7 @@ def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
         # report" (public suite, 2026-09-09). The alerts do not need this rule; only the per-server
         # line does. So an absent engine costs exactly the classification it can no longer make,
         # and nothing else.
+        never_succeeded: Any = None   # the paid engine's rule, or None on the free build
         try:
             from gawk_platform.monitor.status import never_succeeded
         except Exception:  # noqa: BLE001 — free build: no paid engine, so no tally to read
@@ -6660,7 +6668,7 @@ def run_pin(name: str | None) -> dict[str, Any]:
     rows, changed, failed = [], 0, []
     for path in paths:
         edit = configedit.plan_pin(path, name, spec, pinned)
-        res = configedit.apply_pin(edit) if edit.ok else {"ok": False, "changed": 0,
+        res: dict[str, Any] = configedit.apply_pin(edit) if edit.ok else {"ok": False, "changed": 0,
                                                           "message": edit.reason}
         # the banner's row shape is server/outcome/detail/level — anything else renders blank
         rows.append({"server": str(path).replace(str(Path.home()), "~"),
@@ -7491,7 +7499,7 @@ def signin_asks(entries: dict) -> list[str]:
 
 #: (identity, store) for the LAST store read by `_store_for_buttons`. Not a TTL cache: the key is
 #: the file's own identity, so a write invalidates it immediately and a stale render is impossible.
-_STORE_MEMO: tuple[tuple[str, int, int, int], dict[str, Any]] | None = None
+_STORE_MEMO: tuple[tuple[str, int, int, int, Any], dict[str, Any]] | None = None
 
 
 def _store_for_buttons() -> dict[str, Any]:
@@ -7778,8 +7786,8 @@ def fleet_verify_targets() -> tuple[dict[str, dict[str, Any]], dict[str, dict[st
         except Exception:  # noqa: BLE001 — no readable config = no through-gateway routing
             _gw_backends = set()
 
-    local = {}
-    gatewayed = {}
+    local: dict[str, dict[str, Any]] = {}
+    gatewayed: dict[str, dict[str, Any]] = {}
     for n, e in entries.items():
         if not (isinstance(e, dict) and e.get("command")):
             continue
@@ -8017,7 +8025,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                 for f in (s.get("findings") or []):
                     if f.get("suppressed"):
                         continue
-                    ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+                    ev = _dict_at(f, "evidence")
                     hosts = [str(x) for x in (ev.get("egress") or ev.get("hosts") or [])]
                     tool = str(f.get("tool") or (f.get("candidate") or {}).get("toolName") or "?")
                     if first_party(sname, hosts, all_targets.get(sname)):
@@ -8305,7 +8313,7 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
     the person set aside on this page load — URL state, nothing stored. Pure over `collect()`."""
     from . import decide as _decide
     from . import history as _h
-    store = d.get("store") if isinstance(d.get("store"), dict) else {"servers": {}}
+    store = _dict_at(d, "store", {"servers": {}})
     items: list[dict[str, Any]] = []
     try:
         pend = _decide.pending_decisions(store)
@@ -8376,7 +8384,7 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
             items.append({"kind": "unverified", "key": n, "name": n, "reasons": reasons[:3],
                           "status": str(v.get("status") or ""), "at": str(v.get("at") or "")})
     # 6 — approved servers with nothing re-checking them.
-    mon = d.get("monitor") if isinstance(d.get("monitor"), dict) else {}
+    mon = _dict_at(d, "monitor")
     approved_n = sum(1 for _n, _e, k, _t in fleet if k and _h.approved(store, k))
     if approved_n and not mon.get("running"):
         alerts = [a for a in (mon.get("alerts") or []) if isinstance(a, dict) and a.get("state") == "pending"]
@@ -8385,10 +8393,10 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
         items.append({"kind": "unwatched", "key": "monitor", "name": "monitor",
                       "approved": approved_n, "alerts": len(alerts), "last_check": last})
     # 7 — agents whose calls pass with no check: a hook point not installed, or none at all.
-    for client, label, state, n, det in _agent_rows(d):
+    for client, label, state, n_servers, det in _agent_rows(d):
         if state != "on":
             items.append({"kind": "unhooked", "key": client, "name": label, "state": state,
-                          "servers": n, "detail": det})
+                          "servers": n_servers, "detail": det})
     # 8 — servers this machine's AGENTS CALL that no config on it declares. Nothing here can
     #     launch them, so the item is terminal and sinks — but its absence was the loudest gap on
     #     the founder's machine: 1605 unchecked calls to a server that appeared on no screen.
@@ -9004,7 +9012,7 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             _nxt_word = {"blocked_vendor": "cannot be signed into from here",
                          "set_aside": "is set aside by you",
                          "signed_in": "is signed in"}.get(
-                             (nxt.get("signin") or {}).get("state"), _nxt_word)
+                             str((nxt.get("signin") or {}).get("state") or ""), _nxt_word)
         nxt_html = (f'<a class="mono" href="{_skip_url(it)}">Next: {_esc(nxt["name"])} '
                     f'{_nxt_word} ›</a>'
                     if nxt else '<span class="mono">Last one in the queue</span>')

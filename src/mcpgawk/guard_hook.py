@@ -506,6 +506,7 @@ def _deny(fmt: str, reason: str, human: str | None = None) -> dict:
     getting this right per agent is a security property, not formatting."""
     text = f"[mcpgawk guard] {reason}"
     mod = _load_sibling("agents")
+    payload: dict
     if mod is None:
         payload = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                           "permissionDecision": "deny",

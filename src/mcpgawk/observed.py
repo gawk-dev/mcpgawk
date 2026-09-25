@@ -97,7 +97,8 @@ def observe(store: dict[str, Any], key: str, spool_path: str | None = None) -> O
     rec_server = servers.get(key) or {}
     hist = [r for r in (rec_server.get("history") or []) if isinstance(r, dict)]
     latest = hist[-1] if hist else {}
-    tools = latest.get("tools") if isinstance(latest.get("tools"), dict) else {}
+    _tools = latest.get("tools")
+    tools = _tools if isinstance(_tools, dict) else {}
     transport = latest.get("transport") or "stdio"
     measured_at = latest.get("measured_at")
 

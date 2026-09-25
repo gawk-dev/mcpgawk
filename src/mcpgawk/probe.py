@@ -143,12 +143,12 @@ async def _snapshot(session: ClientSession, name: str, transport: str) -> Server
         # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
         # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
         protocol_version = init.protocol_version
-        server_info = (init.server_info.model_dump(by_alias=True, mode="json")
-                       if init.server_info else {})
+        _si = init.server_info
+        server_info = _si.model_dump(by_alias=True, mode="json") if _si else {}
         caps = getattr(init, "capabilities", None)
         try:
             capabilities = (caps.model_dump(by_alias=True, mode="json", exclude_none=True)
-                            if hasattr(caps, "model_dump") else dict(caps or {}))
+                            if caps is not None and hasattr(caps, "model_dump") else dict(caps or {}))
         except Exception:         # noqa: BLE001 — capabilities are evidence, never load-bearing
             capabilities = {}
     except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
@@ -340,7 +340,7 @@ def _oauth_failure(exc: BaseException) -> str | None:
     except ImportError:                                   # pragma: no cover - an mcp dep
         return None
     seen: set[int] = set()
-    stack = [exc]
+    stack: list[BaseException | None] = [exc]   # a missing cause is skipped below
     while stack:
         e = stack.pop()
         if e is None or id(e) in seen:

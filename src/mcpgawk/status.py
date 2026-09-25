@@ -267,6 +267,7 @@ def collect() -> dict:
     except Exception:                              # noqa: BLE001
         hook_health, guard_path = {}, None
 
+    agents_error: str | None
     try:
         from .discover import discover_servers
         found = discover_servers()

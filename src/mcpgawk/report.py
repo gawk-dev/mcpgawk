@@ -275,6 +275,7 @@ def _calls_summary() -> tuple[Section, str, str]:
     from .spool import recorder_health, summarise
 
     data: dict[str, Any] = {"summary": summarise()}
+    health: dict[str, Any] | str | None
     try:
         health = recorder_health()
     except Exception as exc:                                     # noqa: BLE001

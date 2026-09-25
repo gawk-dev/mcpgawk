@@ -65,7 +65,13 @@ def _headers(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
-class _NoMatchingServers(Exception):
+class _StopRun(Exception):
+    """`_run` stopped on a usage problem it has already explained on stderr. Raised, never returned:
+    `_run`'s contract is a 3-tuple its caller unpacks, and an int there crashed the CLI (--only in
+    2026-08, --oauth-client-secret-env until 2026-09-25, found by mypy). The caller exits 2."""
+
+
+class _NoMatchingServers(_StopRun):
     """`--only` named nothing that exists. Carries no message: `_run` has already told the user
     what it looked for and what was there. Exists so that outcome can leave `_run` without
     violating its 3-tuple return contract."""
@@ -210,7 +216,7 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
                     print(f"mcpgawk scan: --oauth-client-secret-env "
                           f"{args.oauth_client_secret_env} is not set in the environment",
                           file=sys.stderr)
-                    return 2
+                    raise _StopRun
                 _ruri = store_preregistered_client(
                     url, args.oauth_client_id, _secret,
                     getattr(args, "oauth_redirect_uri", None))
@@ -1123,9 +1129,9 @@ def _changes(args) -> int:
           f" across {len({f['key'] for f in found})} server"
           f"{'s' if len({f['key'] for f in found}) != 1 else ''}:")
     for f in found:
-        at = str(f["curr"].get("measured_at") or "?")[:16].replace("T", " ")
+        when = str(f["curr"].get("measured_at") or "?")[:16].replace("T", " ")
         before = str(f["prev"].get("measured_at") or "?")[:16].replace("T", " ")
-        head = f"\n    ⟳ {at}  {f['name']} changed  (previous snapshot {before}):"
+        head = f"\n    ⟳ {when}  {f['name']} changed  (previous snapshot {before}):"
         # Each tools-only block already carries its own "(prompts/resources were not
         # fingerprinted in the earlier snapshot)" line from `render`; the footer is for the
         # no-change path, where there is no block to carry it.
@@ -2099,8 +2105,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # the nothing-found message and default-deny consent before launching any discovered stdio server.
     try:
         snaps, entries, skipped = asyncio.run(_run(args))
-    except _NoMatchingServers:
-        return 2        # a typo at --only, already explained on stderr; not a tool failure
+    except _StopRun:
+        return 2        # a usage problem (--only typo, unset secret env), already explained on stderr
     measurements = [measure(sn) for sn in snaps]
     # Cross-server signals need all snapshots together; merge into each involved server's signals.
     # Two DISTINCT techniques, both requiring the whole inventory:

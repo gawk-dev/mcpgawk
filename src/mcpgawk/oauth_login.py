@@ -114,7 +114,7 @@ def _fit_auth_method_to_server(provider: OAuthClientProvider) -> OAuthClientProv
                     break
         return original(data, headers)
 
-    ctx.prepare_token_auth = prepare
+    ctx.prepare_token_auth = prepare  # type: ignore[method-assign]  # deliberate SDK wrap
     return provider
 
 
@@ -169,9 +169,10 @@ def lock_refreshes(provider: OAuthClientProvider, server_url: str) -> OAuthClien
         finally:
             _release()
 
-    provider._refresh_token = refresh_token
-    provider._handle_refresh_response = handle_refresh_response
-    provider._mcpgawk_refresh_lock = True
+    # Deliberate wraps of the SDK's refresh path (one refresh at a time, per server, across processes).
+    provider._refresh_token = refresh_token  # type: ignore[method-assign]
+    provider._handle_refresh_response = handle_refresh_response  # type: ignore[method-assign]
+    provider._mcpgawk_refresh_lock = True  # type: ignore[attr-defined]  # our marker on the SDK object
     return provider
 
 
@@ -529,7 +530,7 @@ def refresh_only_provider(server_url: str) -> Optional[OAuthClientProvider]:
         return None
     client_metadata = OAuthClientMetadata(
         redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],   # never used: no browser flow
-        token_endpoint_auth_method=("none" if not doc.get("preregistered")
+        token_endpoint_auth_method=("none" if not doc.get("preregistered")  # type: ignore[arg-type]
                                     else str(((doc.get("client_info") or {})
                                               .get("token_endpoint_auth_method")) or "none")),
         grant_types=["authorization_code", "refresh_token"],
@@ -560,6 +561,8 @@ def refresh_only_provider(server_url: str) -> Optional[OAuthClientProvider]:
               else 1.0)
 
     class _KnowsExpiry(OAuthClientProvider):
+        known_expiry: float | None = None
+
         async def _initialize(self) -> None:
             await super()._initialize()
             self.context.token_expiry_time = expiry
@@ -589,7 +592,7 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
             # RFC 9207 `iss`. Dropping it failed Linear, Sentry and Globalping (2026-09-24): they
             # advertise it, so the SDK refuses a redirect without it. None when absent, NEVER "":
             # the SDK reads any non-None value as present-and-must-match.
-            captured["iss"] = (qs.get("iss") or [None])[0]
+            captured["iss"] = qs["iss"][0] if qs.get("iss") else None
             captured["error"] = " — ".join(v[0] for k in ("error", "error_description")
                                            if (v := qs.get(k))) or None
             body = (b"<html><body style='font:16px system-ui;padding:3rem'>"
@@ -653,11 +656,12 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
             # a CIMD server will refuse it, which the flow reports rather than hides.
             server = HTTPServer(("127.0.0.1", 0), _Handler)
         redirect_uri = f"http://127.0.0.1:{server.server_port}/callback"
+    assert server is not None   # both branches above bind a server or raise
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     client_metadata = OAuthClientMetadata(
         redirect_uris=[AnyUrl(redirect_uri)],
-        token_endpoint_auth_method=(_pre.token_endpoint_auth_method
+        token_endpoint_auth_method=(_pre.token_endpoint_auth_method  # type: ignore[arg-type]
                                     if _pre is not None else "none"),  # public client + PKCE
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
