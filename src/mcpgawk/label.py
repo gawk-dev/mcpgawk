@@ -522,9 +522,11 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
         # A sign-in that broke, or a registration the server refused, is an auth problem on a LIVE
         # endpoint — never "unreachable" (RCA RC3, 2026-09-24). Same split as fleet.state_of.
         state = "auth-required" if kind in ("auth-required", "sign-in-failed", "registration-refused",
-                                            "login-unreadable", "sign-in-incomplete") else "unreachable"
+                                            "login-unreadable", "sign-in-incomplete",
+                                            "access-denied") else "unreachable"
         verdict = {"sign-in-failed": "AUTH — SIGN-IN FAILED (may be mcpgawk's fault)",
                    "sign-in-incomplete": "AUTH — SIGN-IN NOT COMPLETED (run again and approve)",
+                   "access-denied": "AUTH — SIGNED IN, ACCESS REFUSED (HTTP 403)",
                    "login-unreadable": "AUTH — STORED SIGN-IN UNREADABLE (sign in again)",
                    "registration-refused": "AUTH — REFUSES AUTOMATIC REGISTRATION"}.get(
             kind, "AUTH REQUIRED" if state == "auth-required" else "UNREACHABLE")
@@ -655,6 +657,8 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
             # is really an MCP endpoint would be absurd here — there is no URL, and the server ran.
             lines.append("      The server started and then failed — the message above is its own.")
             lines.append("      Fix what it reports, then re-scan; the launch command itself is fine.")
+        elif x.get("error_kind") == "access-denied":
+            lines.append("      The sign-in worked — the server refuses this account. Its reason is above.")
         elif x.get("error_kind") in ("sign-in-incomplete", "sign-in-failed", "registration-refused",
                                      "login-unreadable"):
             # The endpoint answered and asked for a sign-in: the URL was right. Until 2026-09-25 these

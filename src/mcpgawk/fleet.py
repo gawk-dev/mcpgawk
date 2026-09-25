@@ -86,6 +86,8 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         if x.get("error_kind") == "sign-in-failed":
             # Not the server's fault until shown otherwise (RCA RC3): say so, and where to look.
             return "AUTH", "sign-in failed — may be mcpgawk's fault; `mcpgawk report` has the details"
+        if x.get("error_kind") == "access-denied":
+            return "AUTH", "signed in, but the server refused this account (HTTP 403) — see its reason"
         if x.get("error_kind") == "server-error":
             # An existing state on purpose: the VS Code FleetState union is closed.
             return "UNREACHABLE", "the server is answering with errors (HTTP 5xx) — try later"

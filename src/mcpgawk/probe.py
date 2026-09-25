@@ -71,6 +71,7 @@ class ServerSnapshot:
     # "command-missing" (a stdio entry whose program is not on disk — see probe(), and note this is
     # a DIFFERENT user action from "unreachable": the entry is stale, not the server down),
     # "server-error" (the endpoint answered HTTP 5xx — up but failing; try later, the URL is right),
+    # "access-denied" (a 403 answering a request that carried a credential — signed in, not allowed),
     # and the sign-in kinds "sign-in-failed" / "sign-in-incomplete" / "registration-refused" /
     # "login-unreadable". None when there is no error.
     error_kind: str | None = None
@@ -216,11 +217,24 @@ def _status_recorder() -> tuple[dict[str, int | None], Any]:
     server is indistinguishable from a dead host unless we record the status at the moment it
     arrives. (The SSE client does raise the real status error; this is the streamable path's gap.)
     """
-    seen: dict[str, int | None] = {"status": None, "refused": None}
+    seen: dict[str, Any] = {"status": None, "refused": None, "denied": None}
 
     async def hook(response) -> None:
         code = response.status_code
         seen["status"] = code
+        # 0.1.58 RC (Axiom, 2026-09-25): a 403 answering a request that CARRIED a credential is
+        # "signed in, not allowed" — not "needs credentials". Keep the server's own short reason:
+        # the streamable client replaces it with "Server returned an error response".
+        if code == 403 and "authorization" in {k.lower() for k in response.request.headers}:
+            reason = ""
+            ctype = (response.headers.get("content-type") or "").lower()
+            if ctype.startswith(("text/", "application/json")) or not ctype:
+                try:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    reason = " ".join(body.split())[:300]
+                except Exception:  # noqa: BLE001 — a reason we cannot read is simply absent
+                    reason = ""
+            seen["denied"] = reason or True
         # D12 (2026-09-25): the 2026-08-13 discover fallback sends a SECOND request after a refused
         # initialize, and its 400 used to overwrite the 401 — agentic-news read as "no MCP endpoint".
         # Keep the refusal apart from the last status; any 2xx clears it, because the sign-in flow's
@@ -229,6 +243,7 @@ def _status_recorder() -> tuple[dict[str, int | None], Any]:
             seen["refused"] = code
         elif 200 <= code < 300:
             seen["refused"] = None
+            seen["denied"] = None
 
     return seen, hook
 
@@ -537,7 +552,12 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
                     snap = await _snapshot(session, name, "http")
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
-    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["refused"] or seen["status"])
+    snap = await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["refused"] or seen["status"])
+    if snap.error and seen["denied"] and snap.error_kind == "auth-required":
+        snap.error_kind = "access-denied"
+        if isinstance(seen["denied"], str):
+            snap.error += f' — the server says: "{seen["denied"]}"'
+    return snap
 
 
 async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
@@ -623,6 +643,8 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         kind = "sign-in-incomplete"
     elif "sign-in-failed" in kinds:
         kind = "sign-in-failed"
+    elif "access-denied" in kinds:
+        kind = "access-denied"
     elif "auth-required" in kinds:
         kind = "auth-required"
         try:
@@ -663,7 +685,7 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
              for label, snap in attempts]
     if skipped:
         why = ("endpoint found, it needs credentials" if kind in ("auth-required", "sign-in-failed",
-                                                                   "sign-in-incomplete",
+                                                                   "sign-in-incomplete", "access-denied",
                                                                    "registration-refused",
                                                                    "login-unreadable")
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
@@ -685,6 +707,9 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     elif kind == "auth-required":
         head = ("authentication required — the endpoint is live but refused this scan; "
                 "retry with `--login` or `--header \"Authorization: Bearer …\"`")
+    elif kind == "access-denied":
+        head = ("signed in, but the server refused access (HTTP 403) — the credential was accepted "
+                "and this account is not allowed in; the server's own reason follows")
     elif kind == "server-error":
         head = ("the server is answering with errors (HTTP 5xx) — it is up but failing; the URL is "
                 "right, try again later")
