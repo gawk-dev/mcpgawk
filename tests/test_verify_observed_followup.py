@@ -27,16 +27,16 @@ def test_incomplete_server_wrap_observed_gets_the_observed_pointer(tmp_path):
     sp = _spool(tmp_path, [{"adapter": "wrap", "server": "kite", "tool": "get_profile", "decision": "allow"}])
     report = {"servers": [{"server": "kite", "status": "INCOMPLETE", "incompleteReasons": ["please sign in"]}]}
     lines = observed_followup(report, _store(), spool_path=sp)
-    assert any("wrap has observed it" in l for l in lines)
-    assert any("OBSERVED via wrap" in l for l in lines)
-    assert any("not reproduction" in l for l in lines)  # honesty carried through
+    assert any("wrap has observed it" in ln for ln in lines)
+    assert any("OBSERVED via wrap" in ln for ln in lines)
+    assert any("not reproduction" in ln for ln in lines)  # honesty carried through
 
 
 def test_incomplete_auth_server_without_wrap_data_gets_the_install_hint(tmp_path):
     sp = _spool(tmp_path, [])
     report = {"servers": [{"server": "kite", "status": "INCOMPLETE", "incompleteReasons": ["waiting for sign-in"]}]}
     lines = observed_followup(report, _store(), spool_path=sp)
-    assert any("mcpgawk wrap install kite" in l for l in lines)
+    assert any("mcpgawk wrap install kite" in ln for ln in lines)
 
 
 def test_a_completed_server_is_left_alone(tmp_path):

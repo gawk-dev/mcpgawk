@@ -686,7 +686,7 @@ def test_an_older_projection_without_seen_keeps_the_name_only_verdict(tmp_path):
 def _calls(store: Path) -> list[dict]:
     hits = list(store.parent.rglob("calls.jsonl"))
     assert hits, "no calls.jsonl beside the redirected store"
-    return [json.loads(l) for l in hits[0].read_text().splitlines() if l.strip()]
+    return [json.loads(ln) for ln in hits[0].read_text().splitlines() if ln.strip()]
 
 
 def test_a_deny_tells_the_person_in_one_line_and_records_why(tmp_path):

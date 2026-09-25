@@ -191,8 +191,10 @@ def test_a_sub_agents_call_survives_projection_to_the_api():
 def test_observed_hosts_come_from_the_newest_run_that_contains_the_server(tmp_path, monkeypatch):
     """Slice 7: a single-server verify must not blank the rest of the fleet's evidence."""
     runs = tmp_path / "verify-runs"
-    older = runs / "2026-09-01T00-00-00Z"; newer = runs / "2026-09-02T00-00-00Z"
-    older.mkdir(parents=True); newer.mkdir()
+    older = runs / "2026-09-01T00-00-00Z"
+    newer = runs / "2026-09-02T00-00-00Z"
+    older.mkdir(parents=True)
+    newer.mkdir()
     (older / "audit.jsonl").write_text("\n".join([
         json.dumps({"type": "raw-observation", "server": "alpha", "tool": "fetch", "attempt": 1,
                     "egress": [{"host": "api.alpha.io:443", "hostname": "api.alpha.io", "allowed": True},

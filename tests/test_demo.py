@@ -119,7 +119,7 @@ def test_the_demo_sandbox_can_actually_be_verified(tmp_path):
         p = _sp.run([_sys.executable, str(box.fixture)],
                     input="".join(_json.dumps(m) + "\n" for m in msgs),
                     capture_output=True, text=True, timeout=30)
-        lines = [l for l in p.stdout.splitlines() if l.strip()]
+        lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
         return _json.loads(lines[-1])
 
     clean = call("read_notes")

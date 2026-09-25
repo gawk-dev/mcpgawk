@@ -187,7 +187,7 @@ def test_the_on_row_claims_the_behavioural_tier_without_overclaiming_it():
 # --------------------------------------------------------------------------- slice 4: status --json
 
 def test_to_json_mirrors_the_rendered_facts_and_routes_the_panel_rows(monkeypatch):
-    from mcpgawk import panel, status
+    from mcpgawk import status
     fixture = {
         "errors": {}, "discovery_problems": [], "unscannable": [], "pending": ["mcp:notion"],
         "activity": {"calls": 3, "checked": 1, "deferred": 2, "denied": 0, "sessions": 1,

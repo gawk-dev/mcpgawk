@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .node_runtime import find_node, install_hint
+
 if TYPE_CHECKING:
     from typing import TextIO
 
@@ -100,7 +102,6 @@ def _print_observed_followup(stream: "TextIO | None" = None) -> None:
     except Exception:  # noqa: BLE001
         return
 
-from .node_runtime import find_node, install_hint
 
 #: Where the compiled engine lives once installed. A checkout's dev build wins over it — see
 #: `resolve_cli_js`.
