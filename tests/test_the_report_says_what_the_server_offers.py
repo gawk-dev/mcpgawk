@@ -87,3 +87,19 @@ def test_verbose_keeps_its_own_table_and_does_not_repeat_the_list():
     out = render_cli(_label([_tool("get_forecast")]), verbose=True)
     assert "all tools (heaviest first):" in out
     assert "Its tools" not in out
+
+
+def test_a_declared_destructive_tool_wears_one_word_everywhere():
+    """FOUNDER 2026-09-26, "unify to destructive": the flagged table said `destructive` for a
+    tool whose server declares destructiveHint, while the list and the verbose table said `write`
+    — one tool, two words in one report."""
+    lab = _label([_tool("delete_note", "Delete a note",
+                        annotations={"destructiveHint": True, "readOnlyHint": False}),
+                  _tool("get_note")])
+    out = render_cli(lab)
+    assert "delete_note (destructive)" in "\n".join(_block(out))
+    flagged_row = next(ln for ln in out.splitlines() if ln.strip().startswith("· delete_note"))
+    assert flagged_row.rstrip().endswith("destructive")
+    verbose_row = next(ln for ln in render_cli(lab, verbose=True).splitlines()
+                       if ln.strip().startswith("· delete_note"))
+    assert "destructive" in verbose_row and "write" not in verbose_row

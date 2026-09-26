@@ -2426,7 +2426,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # ambient credentials the moment anything starts them, so both count towards that warning.
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
                      + sum(1 for _, e in skipped if e.get("command")))
-    if not lead_view or any(drift_reports) or any_error:
+    # A first sighting renders in full, so its summary does too: the first successful scan of a
+    # local server is exactly when a new developer needs to see what it inherits (walk, 2026-09-26).
+    first_sighting = any(lab["name"] in new_baselines or lab["name"] in reidentified
+                         for lab in labels)
+    if not lead_view or any(drift_reports) or any_error or first_sighting:
         print("\n" + render_summary(labels, local_servers=local_servers) + "\n")
     else:
         print()

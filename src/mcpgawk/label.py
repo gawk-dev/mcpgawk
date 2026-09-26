@@ -646,9 +646,12 @@ def display_name(label: dict[str, Any]) -> str:
 
 
 def _tool_tags(t: dict[str, Any]) -> list[str]:
-    """What our reading found in one tool — the verbose table and the default list share it."""
+    """What our reading found in one tool — the verbose table and the default list share it.
+    A write the server itself declares destructive says `destructive`, as the flagged table does
+    (FOUNDER 2026-09-26: one tool, one word in one report)."""
     _ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
-    return [c for c, on in (("write", t["write"]), (_ex, t["exfil_capable"])) if on]
+    wr = "destructive" if t.get("destructive") else "write"
+    return [c for c, on in ((wr, t["write"]), (_ex, t["exfil_capable"])) if on]
 
 
 def _declared_read_only(t: dict[str, Any]) -> bool:
