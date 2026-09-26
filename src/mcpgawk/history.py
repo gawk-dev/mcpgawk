@@ -615,6 +615,8 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     # the baseline this function returns. Masking only on the way to disk would diff a raw `current`
     # against a masked baseline and report a rename on every scan of a credentialled server.
     redact_record(rec)
+    if alias and _is_adhoc_target(alias):
+        alias = adhoc_target(alias)      # at the write, so no caller can store a key in a URL
     with locked(path):
         store = load(path)
         adopted = _migrate(store, key, migrate_from, alias)
@@ -849,7 +851,10 @@ def resolve_all(store: dict[str, Any], wanted: str) -> list[str]:
         # `cli-stdio` on a single record would otherwise single-match, and `approve cli-stdio`
         # would move a baseline the operator never named.
         return []
-    return [key for key, entry in servers.items() if wanted in (entry.get("aliases") or [])]
+    # An ad-hoc alias is stored masked (`adhoc_target`); the person may paste the raw URL.
+    names = {wanted, adhoc_target(wanted)} if _is_adhoc_target(wanted) else {wanted}
+    return [key for key, entry in servers.items()
+            if names & set(entry.get("aliases") or [])]
 
 
 def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str | None:
@@ -881,6 +886,22 @@ def _is_adhoc_target(alias: str) -> bool:
         return True
     head = alias.split()[0] if alias.split() else ""
     return "/" in head or (head in _LAUNCHERS and len(alias.split()) > 1)
+
+
+def adhoc_target(target: str) -> str:
+    """The form an AD-HOC target (a URL or command you typed) is stored and printed in.
+
+    Credential shapes masked, everything else kept: this is an identity, so the host, path, package
+    and version must survive (the diagnostics masker `report_redact.redact_command` drops them). A
+    raw `?apiKey=` URL used to land verbatim in history.json as an alias, and now also forms the key
+    of a nameless server, which the drift block prints as the `approve` command (2026-09-26)."""
+    from .redact import redact, redact_url, redact_urls_in_text
+    if "://" in target and " " not in target.strip():
+        return redact(redact_url(target) or target) or target
+    # A COMMAND gets only its URLs masked (`mcp-remote <url?key=…>`, the credential shape seen in
+    # launch lines). `redact()` reads `name@version` as an address: `npx -y a@1.0.0` and
+    # `npx -y b@2.0.0` both became `npx -y [REDACTED]`, one key for two servers again.
+    return redact_urls_in_text(target) or target
 
 
 def display_name(store: dict[str, Any], key: str) -> str:
@@ -1065,6 +1086,12 @@ def _may_adopt(record: dict[str, Any], old_key: str, alias: str | None) -> bool:
     genuinely conflated pre-upgrade record does (every `--track` scan records `alias=sn.name`); a
     stranger's live record does not.
     """
+    if old_key.split(":", 1)[-1] in SYNTHETIC_NAMES:
+        # `http:cli-http` was the key of EVERY nameless ad-hoc target, so one record can hold
+        # several servers' history (bureau's tools "removed", inference's "added", 2026-09-26).
+        # Reclaim it only when this target is the one server it ever answered to.
+        names = {adhoc_target(a) for a in (record.get("aliases") or []) if isinstance(a, str)}
+        return bool(alias) and names == {alias}
     if not old_key.startswith("mcp:"):
         return True
     return bool(alias) and alias in (record.get("aliases") or [])
@@ -1079,7 +1106,7 @@ def should_record(snap: ServerSnapshot) -> bool:
     return not snap.error
 
 
-def key_for(snap: ServerSnapshot) -> str:
+def key_for(snap: ServerSnapshot, target: str | None = None) -> str:
     """Stable identity for a server across config edits.
 
     Prefers what the server asserts about itself in `initialize` (`serverInfo.name`), so renaming an
@@ -1103,6 +1130,12 @@ def key_for(snap: ServerSnapshot) -> str:
         # A nameless server already keys by its CONFIG name (`transport:name`), which is distinct
         # per entry — the conflation is only possible under a shared asserted name.
         return f"{key}#{snap.credential_fingerprint}" if snap.credential_fingerprint else key
+    if target and snap.name in SYNTHETIC_NAMES:
+        # A NAMELESS AD-HOC TARGET is keyed by what was typed. Its label is a placeholder shared by
+        # every `--http` (or `--stdio`) scan, so `transport:name` put every such server on ONE record
+        # and the second reported the first's tools as drift. Every server on the 2026-07-28
+        # revision is nameless: `server/discover` carries no serverInfo (probe._snapshot).
+        return f"{snap.transport}:{adhoc_target(target)}"
     return legacy_key_for(snap)
 
 

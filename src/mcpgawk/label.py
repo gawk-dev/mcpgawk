@@ -630,7 +630,7 @@ def lead_concern(labels: list[dict[str, Any]]) -> tuple[str, str] | None:
     return ranked[0][3], ranked[0][4]
 
 
-def display_name(label: dict[str, Any]) -> str:
+def display_name(label: dict[str, Any], target: str | None = None) -> str:
     """The name a PERSON reads for this server. An ad-hoc scan is labelled `cli-stdio` / `cli-http`
     for the run, and that label is deliberately never an identity (history.SYNTHETIC_NAMES), so the
     report showed a word `approve` refuses. Where the server asserts its own name, show that: it is
@@ -642,6 +642,11 @@ def display_name(label: dict[str, Any]) -> str:
         asserted = (label.get("serverInfo") or {}).get("name")
         if isinstance(asserted, str) and asserted.strip():
             return asserted.strip()
+        if target:
+            # NAMELESS (every 2026-07-28 server is: `server/discover` has no serverInfo). Show what
+            # was typed, masked as the store keys it, or two such servers both read `cli-http`.
+            from .history import adhoc_target
+            return adhoc_target(target)
     return name
 
 
@@ -689,7 +694,7 @@ def _tool_list(tools: list[dict[str, Any]], n: int, visible_only: bool = False) 
     return out
 
 
-def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
+def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None = None) -> str:
     x = label["x-mcpgawk"]
     ts = x["trust_surface"]
     tools = x["tools"]
@@ -708,7 +713,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     failed = nar["state"] in ("unreachable", "auth-required")
     has_dispatch = nar["dispatch"]
 
-    lines = [f"● {display_name(label)}   [{label['transport']}]   {verdict}"]
+    lines = [f"● {shown or display_name(label)}   [{label['transport']}]   {verdict}"]
 
     if failed:
         detail = nar["failure"]["detail"]
@@ -731,6 +736,10 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
                          "remove this entry:")
             lines.append("      until then, any process that binds the port answers as this server "
                          "to every client that trusts the name.")
+        elif x.get("error_kind") == "host-not-found":
+            # Nothing answered, so nothing can have been "a docs page": the name itself is the issue.
+            lines.append("      Check the host name's spelling. If it is right, your network, DNS or a")
+            lines.append("      company VPN (an internal host resolves only on it) is the next place to look.")
         elif x.get("error_kind") == "server-failed":
             # It launched and printed a reason (already in `detail` above). Asking whether the URL
             # is really an MCP endpoint would be absurd here — there is no URL, and the server ran.

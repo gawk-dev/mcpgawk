@@ -121,6 +121,8 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             # so anything that later appears at that path is executed without being asked about
             # again. That is a standing invitation, not a dead link.
             return "UNREACHABLE", "its program no longer exists — still configured, so anything at that path would run"
+        if x.get("error_kind") == "host-not-found":
+            return "UNREACHABLE", "its host name does not resolve — check the spelling, DNS or VPN"
         if x.get("error_kind") == "nothing-listening":
             # The loopback twin of command-missing, and the worse one: a missing program needs a
             # file planted at a known path before anything runs; a free loopback port needs only a

@@ -1740,7 +1740,7 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
     # load()/save() pair, two concurrent scans each diff against a baseline the other has already
     # replaced, and one server's drift history is silently lost.
     current = drift.build_record(sn, m, measured_at=now)
-    asserted = history.key_for(sn)
+    asserted = history.key_for(sn, target=alias)
     key = history.legacy_key_for(sn) if asserted in collided else asserted
     store = history.load()
     # `migrate_from` carries every key this server could already be recorded under — the legacy
@@ -2301,7 +2301,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         if new_baselines:
             n = len(new_baselines)
             print(f"\n  ✓ Baseline recorded for {n} server{'s' if n > 1 else ''}: "
-                  f"{', '.join(sorted(new_baselines))}")
+                  f"{', '.join(sorted(display_name(lab, _adhoc_name(lab['name'], entries.get(lab['name']))) for lab in labels if lab['name'] in new_baselines))}")
             print("    From now on a scan reports what CHANGED — the one thing looking at your "
                   "machine today can never tell you.")
         print()
@@ -2355,12 +2355,13 @@ def _dispatch(argv: list[str] | None = None) -> int:
     lead_view = args.track and not (args.full or args.verbose or args.detail)
     for lab in labels:
         name = lab["name"]
-        shown = display_name(lab)     # what a person reads; `name` stays the join key
+        # what a person reads; `name` stays the join key
+        shown = display_name(lab, _adhoc_name(name, entries.get(name)))
         caveats = bool(lab["x-mcpgawk"].get("caveats"))
         any_error = any_error or caveats
         rep = drift_reports.get(name)
         if not lead_view:
-            print("\n" + render_cli(lab, verbose=args.verbose))
+            print("\n" + render_cli(lab, verbose=args.verbose, shown=shown))
             if rep:
                 print(drift.render(shown, rep))
                 _print_accept(drift_keys.get(name))
@@ -2369,7 +2370,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print(f"\n  ⛔ {shown} now identifies itself as a DIFFERENT server "
                   f"(was {reidentified[name]}). Its baseline does not carry over — treat it "
                   f"as unreviewed.")
-            print("\n" + render_cli(lab, verbose=False))
+            print("\n" + render_cli(lab, verbose=False, shown=shown))
         elif rep:
             # The change IS the report. What it gained/lost is quoted in the drift block; the
             # rest of the surface — unchanged since approval — stays behind --full.
@@ -2378,9 +2379,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
         elif name in new_baselines:
             print(f"\n  ✓ {shown}: first scan — baseline recorded. Scan it again later and "
                   f"mcpgawk tells you if anything changed. What it can do:")
-            print("\n" + render_cli(lab, verbose=False))
+            print("\n" + render_cli(lab, verbose=False, shown=shown))
         elif caveats:
-            print("\n" + render_cli(lab, verbose=False))   # a failure is never summarised away
+            print("\n" + render_cli(lab, verbose=False, shown=shown))   # a failure is never summarised away
         else:
             n = lab["x-mcpgawk"]["tool_count"]
             signals = lab["x-mcpgawk"].get("bounded_signals") or []
@@ -2399,7 +2400,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 print(f"\n  ⚠ {shown}: no change since your baseline, but it was never clean — "
                       f"{len(live)} live finding{'s' if len(live) != 1 else ''} still "
                       f"{'stand' if len(live) != 1 else 'stands'}:")
-                print("\n" + render_cli(lab, verbose=False))
+                print("\n" + render_cli(lab, verbose=False, shown=shown))
             else:
                 muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
                     if muted_n else ""

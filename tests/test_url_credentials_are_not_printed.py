@@ -119,6 +119,7 @@ def test_the_panel_action_banner_masks_a_url_in_a_failure_message(tmp_path, monk
 
     monkeypatch.setattr(panel, "_run_login_cli", times_out)
     panel._ACTION.update(running=False, label="", message="", rows=[], at="")
+    panel._QUEUED.clear()    # a press queued by an earlier test would run after ours and overwrite the banner
 
     panel._run_action_bg("login", "wrapped")
     for _ in range(600):

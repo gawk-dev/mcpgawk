@@ -426,9 +426,32 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
         if isinstance(exc, (FileNotFoundError, PermissionError)):
             return "command-missing"
         return "server-failed"
+    if _host_not_found(exc):
+        return "host-not-found"
     if _connect_failed(exc):
         return "connect-failed"
     return "unreachable"
+
+
+def _host_not_found(exc: BaseException) -> bool:
+    """Did the host NAME fail to resolve? A `socket.gaierror` in the cause chain, by type: the SDK
+    raises httpx2.ConnectError <- httpcore2.ConnectError <- gaierror (measured 2026-09-26), the same
+    outer type as a refused connection. Nothing was contacted, so "no MCP endpoint found" and the
+    docs-URL hint were guesses about a server nobody reached (docfork, sweep 2026-09-25)."""
+    import socket
+    seen: set[int] = set()
+
+    def _walk(e: BaseException | None) -> bool:
+        if e is None or id(e) in seen:
+            return False
+        seen.add(id(e))
+        if isinstance(e, socket.gaierror):
+            return True
+        if isinstance(e, BaseExceptionGroup) and any(_walk(sub) for sub in e.exceptions):
+            return True
+        return _walk(e.__cause__) or _walk(e.__context__)
+
+    return _walk(exc)
 
 
 def _connect_failed(exc: BaseException) -> bool:
@@ -756,6 +779,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         # trusts the name. No planted file, no privilege, a free port. A dangling COMMAND at least
         # needs a file written at a known path; this needs nothing. Named so the row can say it.
         kind = "nothing-listening"
+    elif kinds == {"host-not-found"}:
+        # Every attempt failed to resolve the name. One host is tried, so a mix means something
+        # did answer, and the rules above decide.
+        kind = "host-not-found"
     else:
         kind = "unreachable"
 
@@ -804,6 +831,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         where = urlsplit(url or "").netloc or "its loopback address"
         head = (f"nothing is listening on {where} — every attempt was refused. The entry is still "
                 f"configured, so whatever binds that port next answers as this server")
+    elif kind == "host-not-found":
+        from urllib.parse import urlsplit
+        where = urlsplit(url or "").hostname or "its host"
+        head = f"the host name {where} does not resolve — nothing was contacted"
     else:
         head = (f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
                 f"{'s' if len(attempts) != 1 else ''}")
