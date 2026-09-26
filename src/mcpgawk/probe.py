@@ -708,6 +708,17 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     lie by omission — the user needs to see that we tried the other transport and the other paths,
     or they will chase a "server down" that is really a typo (and vice versa)."""
     kinds = {s.error_kind for _, s in attempts}
+    # What the URL the user GAVE did, apart from the paths we guessed. Labels are "<transport>
+    # <redacted url>" (transport.Candidate.label).
+    given: set = set()
+    if url:
+        from .redact import redact_url
+        mine = {url, redact_url(url) or url}
+        given = {s.error_kind for label, s in attempts if label.split(" ", 1)[-1] in mine}
+    # THE USER'S OWN URL TIMING OUT outranks a guessed path's web page (30-server rescan,
+    # 2026-09-26): bureau's /mcp timed out once, `/` and `/sse` answered 405/404/HTML, and the
+    # report said NOT AN MCP ENDPOINT, "It answered" — about paths nobody named. A re-run was CLEAN.
+    own_url_timed_out = "timed-out" in given and "not-an-mcp-endpoint" not in given
     # Most specific, most actionable kind wins — each one sends the user somewhere different.
     if "registration-refused" in kinds:
         kind = "registration-refused"
@@ -730,7 +741,7 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         # Above not-an-mcp-endpoint: one path answering 5xx says the service is there and failing;
         # the other paths' 404s say nothing about that.
         kind = "server-error"
-    elif "not-an-mcp-endpoint" in kinds:
+    elif "not-an-mcp-endpoint" in kinds and not own_url_timed_out:
         kind = "not-an-mcp-endpoint"
     elif "timed-out" in kinds:
         # Above "unreachable" for the same reason as the two before it: a candidate that ACCEPTED

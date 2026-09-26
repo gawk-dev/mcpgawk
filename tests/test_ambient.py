@@ -145,3 +145,31 @@ def test_the_module_performs_no_network_or_process_work():
     src = inspect.getsource(ambient)
     for forbidden in ("requests", "urllib", "httpx", "socket", "subprocess", "Popen", "system("):
         assert forbidden not in src, f"ambient.py references {forbidden}"
+
+
+# --- The variable is NAMED (new-developer walk, 2026-09-26) ------------------------------------
+# "1 credential-shaped environment variable" left the reader to guess which one. The names are
+# already in hand (never the values), so the line says them.
+
+def test_the_line_names_the_variables_never_their_values():
+    exposure = detect_ambient(home=None, environ={"GITHUB_TOKEN": "ghp_realvalue",
+                                                  "OPENAI_API_KEY": "sk-realvalue",
+                                                  "EDITOR": "vim"})
+    joined = "\n".join(summarize(exposure, launched=1, exfil_capable=0))
+    assert "2 credential-shaped environment variables:\n      GITHUB_TOKEN, OPENAI_API_KEY" in joined
+    assert "ghp_realvalue" not in joined and "sk-realvalue" not in joined
+    assert "EDITOR" not in joined
+
+
+def test_a_long_list_is_capped_to_fit_the_fleet_row():
+    """The fleet view prefixes these lines with two spaces and holds an 80-column rule, so the
+    line itself stays within 78 — every name that fits, then a count of the rest. The names sit on
+    their own line: after the count there is no room for even one long name."""
+    env = {f"SERVICE_NUMBER_{i:02d}_API_KEY": "v" for i in range(20)}
+    lines = summarize(detect_ambient(home=None, environ=env), launched=1, exfil_capable=0)
+    assert all(len(ln) <= 78 for ln in lines), lines
+    line = lines[lines.index(next(ln for ln in lines if "credential-shaped" in ln)) + 1]
+    assert len(line) <= 78, line
+    assert "SERVICE_NUMBER_00_API_KEY" in line
+    shown = line.count("SERVICE_NUMBER_")
+    assert line.endswith(f"+{20 - shown} more"), line

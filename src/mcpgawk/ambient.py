@@ -93,6 +93,28 @@ def detect_ambient(home: Path | None = None, environ: dict[str, str] | None = No
     return AmbientExposure(files=files, env_names=env_names)
 
 
+#: The fleet view prefixes each line with two spaces and holds an 80-column rule.
+_LINE_MAX = 78
+
+
+def _env_lines(names: list[str]) -> list[str]:
+    """The count, then the NAMES on the line below — never the values, which this module never
+    reads. A count alone left the reader to guess which variable it meant (new-developer walk,
+    2026-09-26). Every name that fits one line, then "+N more": a shell full of keys must not wrap
+    into soup."""
+    n = len(names)
+    head = f"    {n} credential-shaped environment variable{'s' if n != 1 else ''}:"
+    shown: list[str] = []
+    for i, name in enumerate(names):
+        rest = n - i - 1
+        tail = f", +{rest} more" if rest else ""
+        if shown and len(f"      {', '.join([*shown, name])}{tail}") > _LINE_MAX:
+            break
+        shown.append(name)
+    rest = n - len(shown)
+    return [head, f"      {', '.join(shown)}" + (f", +{rest} more" if rest else "")]
+
+
 def summarize(exposure: AmbientExposure, launched: int, exfil_capable: int) -> list[str]:
     """Report lines, or [] when there is nothing worth saying.
 
@@ -114,8 +136,7 @@ def summarize(exposure: AmbientExposure, launched: int, exfil_capable: int) -> l
     for path, grants in exposure.files:
         lines.append(f"    {path} — {grants}")
     if exposure.env_names:
-        n = len(exposure.env_names)
-        lines.append(f"    {n} credential-shaped environment variable{'s' if n != 1 else ''}")
+        lines += _env_lines(exposure.env_names)
     if exfil_capable:
         lines.append(f"    {exfil_capable} of their tools can send data outward.")
     return lines

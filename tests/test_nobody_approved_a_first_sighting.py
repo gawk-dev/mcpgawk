@@ -67,3 +67,24 @@ def test_approve_list_prints_the_exact_command_per_server(tmp_path, monkeypatch,
     assert "changed since their baseline" in out
     assert f"mcpgawk approve {shlex.quote(key)}" in out, out
     assert "approve <name>" not in out
+
+
+def test_an_adhoc_server_is_shown_by_the_name_it_asserts():
+    # Re-walk, 2026-09-26: the report said "cli-stdio" (which approve refuses) and status showed a
+    # whole temp-path command line. Both now show the server's own name, which approve resolves.
+    from mcpgawk.label import display_name as label_name
+    lab = {"name": "cli-stdio", "serverInfo": {"name": "tiny-weather"}}
+    assert label_name(lab) == "tiny-weather"
+    assert label_name({"name": "cli-stdio", "serverInfo": None}) == "cli-stdio"
+    assert label_name({"name": "notes", "serverInfo": {"name": "other"}}) == "notes"
+    store = {"servers": {
+        "mcp:tiny-weather": {"aliases": ["/tmp/x/venv/bin/python /tmp/x/tiny/server.py"]},
+        "mcp:docs": {"aliases": ["https://mcp.example.com/mcp"]},
+        "mcp:notes-pro": {"aliases": ["notes"]},
+        "mcp:bare": {"aliases": ["/opt/bin/bare-server"]},
+    }}
+    assert history.display_name(store, "mcp:tiny-weather") == "tiny-weather"
+    assert history.display_name(store, "mcp:docs") == "docs"
+    assert history.display_name(store, "mcp:notes-pro") == "notes"      # a config name stays
+    assert history.display_name(store, "mcp:bare") == "bare"
+    assert history.resolve(store, "tiny-weather") == "mcp:tiny-weather"

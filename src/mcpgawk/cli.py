@@ -25,7 +25,7 @@ from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_report
-from .label import build_label, lead_concern, render_cli, render_summary
+from .label import build_label, display_name, lead_concern, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
 from .probe import ServerSnapshot, probe, probe_stdio, probe_url
@@ -2355,27 +2355,28 @@ def _dispatch(argv: list[str] | None = None) -> int:
     lead_view = args.track and not (args.full or args.verbose or args.detail)
     for lab in labels:
         name = lab["name"]
+        shown = display_name(lab)     # what a person reads; `name` stays the join key
         caveats = bool(lab["x-mcpgawk"].get("caveats"))
         any_error = any_error or caveats
         rep = drift_reports.get(name)
         if not lead_view:
             print("\n" + render_cli(lab, verbose=args.verbose))
             if rep:
-                print(drift.render(name, rep))
+                print(drift.render(shown, rep))
                 _print_accept(drift_keys.get(name))
             continue
         if name in reidentified:
-            print(f"\n  ⛔ {name} now identifies itself as a DIFFERENT server "
+            print(f"\n  ⛔ {shown} now identifies itself as a DIFFERENT server "
                   f"(was {reidentified[name]}). Its baseline does not carry over — treat it "
                   f"as unreviewed.")
             print("\n" + render_cli(lab, verbose=False))
         elif rep:
             # The change IS the report. What it gained/lost is quoted in the drift block; the
             # rest of the surface — unchanged since approval — stays behind --full.
-            print("\n" + drift.render(name, rep))
+            print("\n" + drift.render(shown, rep))
             _print_accept(drift_keys.get(name))
         elif name in new_baselines:
-            print(f"\n  ✓ {name}: first scan — baseline recorded. Scan it again later and "
+            print(f"\n  ✓ {shown}: first scan — baseline recorded. Scan it again later and "
                   f"mcpgawk tells you if anything changed. What it can do:")
             print("\n" + render_cli(lab, verbose=False))
         elif caveats:
@@ -2395,7 +2396,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 # any_error). The old line even named findings you had MUTED while omitting the
                 # live ones, which is the asymmetry that gives the game away.
                 any_error = True
-                print(f"\n  ⚠ {name}: no change since your baseline, but it was never clean — "
+                print(f"\n  ⚠ {shown}: no change since your baseline, but it was never clean — "
                       f"{len(live)} live finding{'s' if len(live) != 1 else ''} still "
                       f"{'stand' if len(live) != 1 else 'stands'}:")
                 print("\n" + render_cli(lab, verbose=False))
@@ -2404,10 +2405,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
                     if muted_n else ""
                 if name in pin_notes:
                     # NOT a clean tick: the comparison ran without its exact anchor.
-                    print(f"\n  ⚠ {name}: nothing itemised changed "
+                    print(f"\n  ⚠ {shown}: nothing itemised changed "
                           f"({n} tool{'s' if n != 1 else ''}{muted_note}), but {pin_notes[name]}")
                 else:
-                    print(f"\n  ✓ {name}: no change since your baseline "
+                    print(f"\n  ✓ {shown}: no change since your baseline "
                           f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
     # A ROW WITHOUT A LABEL STILL RENDERS. The narrative above walks `labels`, and a server we
     # declined to launch (or a capability no local scan can reach) has no label — it only has a
@@ -2440,7 +2441,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         print("  Whether your agents are checking these servers could not be determined — the "
               "guard probe failed. Run `mcpgawk guard status`.\n")
     elif not _installed:
-        print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
+        # "`mcpgawk` turns that on" read as circular right after `mcpgawk scan` (re-walk,
+        # 2026-09-26). Bare `mcpgawk` is still the command: it enables every agent with a hook.
+        print("  Your agents are not checking these servers yet. To turn that on, run `mcpgawk` "
+              "with no arguments.\n")
     _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
 

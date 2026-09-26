@@ -871,6 +871,18 @@ def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str |
     return None
 
 
+_LAUNCHERS = frozenset({"npx", "uvx", "bunx", "pnpm", "yarn", "node", "deno", "bun", "python",
+                        "python3", "uv", "docker", "podman"})
+
+
+def _is_adhoc_target(alias: str) -> bool:
+    """A URL or a command line (what `_adhoc_name` records), as opposed to a config entry's name."""
+    if "://" in alias:
+        return True
+    head = alias.split()[0] if alias.split() else ""
+    return "/" in head or (head in _LAUNCHERS and len(alias.split()) > 1)
+
+
 def display_name(store: dict[str, Any], key: str) -> str:
     """What the USER calls this server — the name in their own config, not our internal key.
 
@@ -887,6 +899,14 @@ def display_name(store: dict[str, Any], key: str) -> str:
     servers = store.get("servers") or {}
     entry = servers.get(key) or {}
     aliases = [a for a in (entry.get("aliases") or []) if a]
+    # AN AD-HOC TARGET IS NOT A NAME. `scan --stdio "<cmd>"` / `--http <url>` records the command
+    # line or URL as the alias (cli._adhoc_name) so `approve` can match what was typed; shown as
+    # the name, `status` printed a whole temp-path command line (new-developer re-walk,
+    # 2026-09-26). Where the server asserted a name and every alias is such a target, show the
+    # asserted name: `approve <it>` resolves through the `mcp:` form.
+    asserted = key[len("mcp:"):].split("#", 1)[0] if key.startswith("mcp:") else ""
+    if asserted and aliases and all(_is_adhoc_target(a) for a in aliases):
+        return asserted
     if not aliases:
         return key
     primary = aliases[0]

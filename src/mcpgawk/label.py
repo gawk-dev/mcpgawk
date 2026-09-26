@@ -630,6 +630,62 @@ def lead_concern(labels: list[dict[str, Any]]) -> tuple[str, str] | None:
     return ranked[0][3], ranked[0][4]
 
 
+def display_name(label: dict[str, Any]) -> str:
+    """The name a PERSON reads for this server. An ad-hoc scan is labelled `cli-stdio` / `cli-http`
+    for the run, and that label is deliberately never an identity (history.SYNTHETIC_NAMES), so the
+    report showed a word `approve` refuses. Where the server asserts its own name, show that: it is
+    what the store keys it by (`mcp:<name>`), so `mcpgawk approve <name>` finds it (new-developer
+    walk, 2026-09-26). `label["name"]` itself is unchanged: it is the join key and the JSON field."""
+    from .history import SYNTHETIC_NAMES
+    name = label.get("name") or ""
+    if name in SYNTHETIC_NAMES:
+        asserted = (label.get("serverInfo") or {}).get("name")
+        if isinstance(asserted, str) and asserted.strip():
+            return asserted.strip()
+    return name
+
+
+def _tool_tags(t: dict[str, Any]) -> list[str]:
+    """What our reading found in one tool — the verbose table and the default list share it."""
+    _ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
+    return [c for c, on in (("write", t["write"]), (_ex, t["exfil_capable"])) if on]
+
+
+def _declared_read_only(t: dict[str, Any]) -> bool:
+    """NO TAG IS NOT A CLEAN BILL. Untagged means our heuristics stayed quiet, which is a fact
+    about us, not about the tool. Only the server's own readOnlyHint earns the words "read-only" —
+    three tools on a real fleet ("restore_folder", "restore_video", "translate_video") declared
+    nothing, matched no write verb, and were printed read-only on the strength of our own silence."""
+    return (t.get("annotations") or {}).get("readOnlyHint") is True
+
+
+#: The default list stops here; a 90-tool server would otherwise bury the report.
+_TOOL_LIST_CAP = 30
+
+
+def _safe_name(name: str) -> str:
+    """Tool names are server-controlled and nothing cleans them at ingest. An escape sequence or a
+    newline must reach the terminal as a visible `?`, not as a command to it or a forged line."""
+    return "".join(c if c.isprintable() else "?" for c in str(name))[:64]
+
+
+def _tool_list(tools: list[dict[str, Any]], n: int, visible_only: bool = False) -> list[str]:
+    """Every tool by name, marked only where something is known: our reading (write / exfil /
+    wording?) or the server's declaration (read-only, declared). Silence stays unmarked."""
+    items = []
+    for t in tools[:_TOOL_LIST_CAP]:
+        tags = _tool_tags(t)
+        mark = ", ".join(tags) if tags else ("read-only, declared" if _declared_read_only(t) else "")
+        items.append(f"{_safe_name(t['name'])} ({mark})" if mark else _safe_name(t["name"]))
+    what = "visible tools" if visible_only else "tools"
+    out = ["", f"    Its {what}, as the server lists them (unmarked: no signal either way):"]
+    out += textwrap.wrap(", ".join(items), width=94, initial_indent="      ",
+                         subsequent_indent="      ", break_on_hyphens=False, break_long_words=False)
+    if n > _TOOL_LIST_CAP:
+        out.append(f"      + {n - _TOOL_LIST_CAP} more · --verbose for all {n}")
+    return out
+
+
 def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     x = label["x-mcpgawk"]
     ts = x["trust_surface"]
@@ -649,7 +705,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
     failed = nar["state"] in ("unreachable", "auth-required")
     has_dispatch = nar["dispatch"]
 
-    lines = [f"● {label['name']}   [{label['transport']}]   {verdict}"]
+    lines = [f"● {display_name(label)}   [{label['transport']}]   {verdict}"]
 
     if failed:
         detail = nar["failure"]["detail"]
@@ -753,21 +809,19 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
             lines.append("")
             lines += _wrap(nar["reassurance"], "    ")
 
+    # What the server offers — every tool, in the server's own order (new-developer walk,
+    # 2026-09-26: a clean report named no tool at all, so "see what it can do" needed --verbose).
+    # Verbose has its own full table below, so the list would only repeat it there.
+    if not verbose and tools:
+        lines += _tool_list(tools, n, visible_only=has_dispatch)
+
     # Tool detail: verbose shows every tool; default surfaces only the ones that can bite,
     # scariest first (can both change data AND send it out), capped.
     if verbose:
         lines.append("    all tools (heaviest first):")
         for t in sorted(tools, key=lambda t: -t["tokens"]):
-            _ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
-            tags = [c for c, on in (("write", t["write"]), (_ex, t["exfil_capable"]),
-                                    ("no-annotation", not (t.get("annotations") or {}))) if on]
-            # NO TAG IS NOT A CLEAN BILL. Untagged means our heuristics stayed quiet, which is a
-            # fact about us, not about the tool. Only the server's own readOnlyHint earns the words
-            # "read-only" — three tools on a real fleet ("restore_folder", "restore_video",
-            # "translate_video") declared nothing, matched no write verb, and were printed read-only
-            # on the strength of our own silence.
-            quiet = ("read-only (declared)" if (t.get("annotations") or {}).get("readOnlyHint") is True
-                     else "no signal")
+            tags = _tool_tags(t) + (["no-annotation"] if not (t.get("annotations") or {}) else [])
+            quiet = "read-only (declared)" if _declared_read_only(t) else "no signal"
             lines.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {', '.join(tags) or quiet}")
 
     # Bounded heuristic signals — one actionable line each. Each KIND is a DISTINCT finding and must
