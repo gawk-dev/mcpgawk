@@ -26,8 +26,12 @@ the gate. Any test asserting the REFUSAL clears this with monkeypatch first, and
 """
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 import stat
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -113,3 +117,97 @@ def _no_real_signin_child(monkeypatch):
                              f"patch panel._run_signin_cli with a fake")
 
     monkeypatch.setattr(panel, "_run_signin_cli", _refuse)
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_agent_configs(request, tmp_path_factory):
+    """No test reads the developer's real agent configs unless it says so (`@pytest.mark.real_home`).
+
+    THE CLASS (2026-09-26o): the store redirects above cover mcpgawk's OWN files, not discovery.
+    41 `panel.collect()` calls in 11 test files swept the real ~/.claude.json, Cursor, VS Code, Zed
+    and Claude Desktop configs, so a test passed or failed by what the machine had installed — one
+    read "no server named 'Revolut X'" from a queued action run against the real fleet.
+
+    Two reach points, because HOME alone does not move all of them:
+      * HOME (and USERPROFILE): every `Path.home()` / `expanduser` resolved at CALL time —
+        discover_report, detect_unscannable, skills, ambient, wrap, the panel's config globs.
+      * import-time constants: `agents.ADAPTERS[*].config` and `guard.CLAUDE_USER_SETTINGS` were
+        fixed to the real home when the module loaded, and `collect()` reads the hook configs.
+
+    NOT the working directory. discover_report also sweeps project-scope files (.mcp.json,
+    .vscode/mcp.json, ...) under `Path.cwd()`, but moving the cwd of 4300 tests is a wider change
+    than this class needs, and the repo root holds none today. Instead,
+    test_a_test_never_reads_the_real_agent_configs fails if the working dir ever holds one.
+
+    Function-scoped on purpose: the session tripwire snapshots the REAL ~/.gawk and ~/.mcpgawk
+    before any of this applies, and a test that sets HOME itself still overrides it.
+
+    Its OWN MonkeyPatch, not the test's `monkeypatch`: a test that calls `monkeypatch.undo()`
+    mid-way (test_platform_credential_writers_are_owner_safe does) would otherwise put the real
+    home back for the rest of that test.
+
+    Yields the temp home (None when opted out) so the platform conftest can re-seed its
+    home-bound licence cache there."""
+    if request.node.get_closest_marker("real_home"):
+        yield None
+        return
+    home = tmp_path_factory.mktemp("home")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HOME", str(home))
+        mp.setenv("USERPROFILE", str(home))
+        _repoint_import_time_paths(mp, home)
+        yield home
+
+
+def _repoint_import_time_paths(mp: pytest.MonkeyPatch, home: Path) -> None:
+    try:
+        from mcpgawk import agents, guard
+    except Exception:                              # noqa: BLE001 — a partial checkout may lack them
+        return
+    for key, adapter in agents.ADAPTERS.items():
+        rel = _relative_to_real_home(adapter.config)
+        if rel is not None:
+            mp.setitem(agents.ADAPTERS, key, dataclasses.replace(adapter, config=home / rel))
+    rel = _relative_to_real_home(guard.CLAUDE_USER_SETTINGS)
+    if rel is not None:
+        mp.setattr(guard, "CLAUDE_USER_SETTINGS", home / rel)
+
+
+#: The home the suite started under, read at import — before any test redirects HOME.
+_REAL_HOME = Path.home()
+
+
+def _relative_to_real_home(path: Path) -> Path | None:
+    try:
+        return path.relative_to(_REAL_HOME)
+    except ValueError:                             # already somewhere else (a test's own patch)
+        return None
+
+
+#: Where the fixture fleet lives, relative to the (temp) home — a Cursor config, the plainest shape.
+SEEDED_FLEET_CONFIG = Path(".cursor") / "mcp.json"
+
+
+@pytest.fixture
+def seeded_fleet(request):
+    """A small fleet in the temp home, for tests that used to read whatever THIS machine had.
+
+    Before the redirect, test_panel_state_payload and two user-journey cases ran against the
+    developer's real agent configs, and a real `mcpgawk scan` launched real servers; on an empty
+    home they now skipped every time. Three entries cover the states they need: one launchable
+    stdio server (our own fixture), one whose binary does not exist, one whose host cannot resolve.
+    Returns the server names."""
+    home = request.getfixturevalue("_never_the_real_agent_configs")
+    assert home is not None, "seeded_fleet needs the temp home; do not combine it with real_home"
+    assert not home.resolve().is_relative_to(_REAL_HOME.resolve()), "refusing to write the real home"
+    here = Path(__file__).resolve().parent
+    fleet = {
+        "fleet-fixture": {"command": sys.executable,
+                          "args": [str(here / "fixtures" / "annotated_mcp_server.py")]},
+        "fleet-not-launched": {"command": "/nonexistent/fleet-binary", "args": []},
+        "fleet-unresolvable": {"url": "https://mcp.example.invalid/mcp"},
+    }
+    cfg = home / SEEDED_FLEET_CONFIG
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"mcpServers": fleet}))
+    return sorted(fleet)

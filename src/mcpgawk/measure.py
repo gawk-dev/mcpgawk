@@ -47,14 +47,16 @@ _WRITE_VERBS = (
     "login", "authenticate",
     # D1 (2026-09-26): "trigger" and "replay" were considered and REJECTED. "trigger" is a noun in
     # every automation server's reads ("Get a trigger by id"); "replay" would block session-replay
-    # reads in TS safe mode. So resend's replay-webhook-event, which matched only via "does not
-    # schedule" before the negation rule below, is now MISSED — like duplicate-template.
+    # reads in TS safe mode. resend's replay-webhook-event, which matched only via "does not
+    # schedule" before the negation rule below, is caught instead by "Queue" leading a sentence
+    # (_WRITE_SENTENCE, [FOUNDER 2026-09-26]).
     # 2026-09-24: "launch", "translate" and "duplicate" were considered (three misses in the Laya
     # evaluation's hand labels) and REJECTED — none is unambiguous in isolation ("launch date",
     # "find duplicate contacts", a translate_text tool that only returns text), and classify.ts
     # must carry every verb here as a NAME token, where each would make a read uncallable in safe
     # mode. Three of the four tools they would catch declare readOnlyHint: false, which
-    # `_is_write` now reads; resend's duplicate-template stays missed.
+    # `_is_write` now reads; resend's duplicate-template is caught by its second sentence
+    # ("Creates a new draft copy", _WRITE_SENTENCE).
 )
 
 
@@ -96,10 +98,52 @@ _WRITE_LEADING = re.compile(
 # "cannot delete"), and a verb that starts a hyphen compound ("write-ups"). A verb that ENDS one
 # still counts: "soft-delete", "hard-delete", "bulk-update" and "auto-create" are writes. The NAME
 # keeps the bare pattern: hyphens separate words in names (`create-webhook`), so the compound rule
-# would blind every kebab-case tool. Participles and nouns ("a record set on a name", hood;
-# "pre-trade" and "before entering a trade", agentberg) are NOT handled — telling them from a verb
-# needs grammar this regex does not have.
+# would blind every kebab-case tool.
 _NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bcannot|\bno\s+longer)\s+(?:\w+ly\s+)?$", re.I)
+
+# [FOUNDER 2026-09-26] Two words in the list are also a participle and a noun, and each shape is
+# dropped in the DESCRIPTION only (names keep "set_x" and "trade"; classify.ts, which reads only
+# names, is untouched). "set" followed by on/by/in/to/of is a participle: hood's resolve_text reads
+# "a text record ... set on a .hood name". "trade" after a/the/each, or ending "pre-", is a noun:
+# agentberg's query_network_brief reads "pre-trade consensus ... before entering a trade". Each
+# rests on ONE live description. MEASURED over 465 corpus + fixture tools: each flips exactly that
+# tool, and no write is lost. "Set the flag to true" still counts ("set" is followed by "the").
+_SET_PARTICIPLE = re.compile(r"^\s+(?:on|by|in|to|of)\b", re.I)
+_TRADE_NOUN = re.compile(r"(?:\b(?:a|the|each)\s+|pre-)$", re.I)
+
+# [FOUNDER 2026-09-26] _WRITE_LEADING looks only at the first word of the description, so a write
+# stated in a LATER sentence was missed: resend's duplicate-template ("Duplicate an existing email
+# template. Creates a new draft copy ...") and browserstack's addPercySnapshotCommands. The same
+# grammar argument holds per sentence — a third-person verb LEADS a sentence — so the -s form also
+# counts after ".", "!", "?", ":" (closing markdown/quote/bracket allowed: "**Purpose:** Queue") or
+# a newline. "Queue"/"Queues" counts ONLY in that position:
+# resend's replay-webhook-event reads "**Purpose:** Queue one more delivery"; bare "queue" is
+# a noun everywhere else ("items in the queue", `get_queue`), which is why it is NOT in
+# _WRITE_VERBS (that would put it in the bare prose pattern and, by the parity test, in
+# classify.ts as a name token). "runs" is left out here only because of revolut's grid_optimize
+# ("... no live orders. Runs a backtest ..."), a simulation — a one-example carve; at position 0
+# _WRITE_LEADING still accepts it. MEASURED over 465 tools through `_is_write`: 2 reads -> write
+# (duplicate-template, replay-webhook-event), 0 false. browserstack's addPercySnapshotCommands
+# also leads "Adds" but declares readOnlyHint: true, and a declared read wins — unchanged.
+# Accepted risk: a colon before a plural noun ("Returns: Updates since ...") would flag; 0 in corpus.
+_SENTENCE_START = r"(?:^|[.!?:][*_)\]\"']*\s+|\n\s*)\W*(?:it\s+|this\s+tool\s+)?"
+_WRITE_SENTENCE = re.compile(
+    _SENTENCE_START + r"(" + "|".join(_third_person(v) for v in _WRITE_VERBS if v != "run")
+    + r"|queues?)\b", re.I)
+
+
+# NAMES ARE TOKENISED, the way classify.ts reads them. `_WRITE` uses \b, and "_" is a word
+# character, so the name arm matched only kebab-case: `create_file`, `place_order` and
+# `placeOrder` with no description all read as reads (found 2026-09-26; the comment here claimed
+# "create_file" matched). Split on non-alphanumerics and lower->Upper boundaries, then look each
+# token up. "issue" is left out of NAME tokens for the reason classify.ts records: in a name it is
+# overwhelmingly the noun (`get_issue`, `list_issues`). MEASURED over 465 tools: see the commit.
+_NAME_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+_NAME_WRITE_VERBS = frozenset(v for v in _WRITE_VERBS if v != "issue")
+
+
+def _name_is_write(name: str) -> bool:
+    return any(t.lower() in _NAME_WRITE_VERBS for t in _NAME_SPLIT.split(name) if t)
 
 
 def _describes_write(description: str) -> bool:
@@ -107,8 +151,13 @@ def _describes_write(description: str) -> bool:
         before, after = description[:mt.start()], description[mt.end():]
         if _NEGATED.search(before) or re.match(r"-[A-Za-z]", after):
             continue
+        word = mt.group(1).lower()
+        if word == "set" and _SET_PARTICIPLE.match(after):
+            continue
+        if word == "trade" and _TRADE_NOUN.search(before):
+            continue
         return True
-    return False
+    return bool(_WRITE_SENTENCE.search(description))
 
 #: Parameter-name words that mean "the CALLER chooses a destination". This is the STRUCTURAL half
 #: of exfil detection and the stronger half: whoever controls that argument controls where data
@@ -406,10 +455,10 @@ def _is_write(tool: dict[str, Any], ann: dict[str, Any], demote: bool | None = N
     if "readOnlyHint" not in ann and ("destructiveHint" in ann or "idempotentHint" in ann):
         return True
     description = (tool.get("description") or "").strip()
-    # Bare verb in the name ("create_file") or in the prose ("will delete the row", minus the
-    # negated and compound uses — see _describes_write), OR a third-person verb leading the
-    # description ("Creates a file") — see _WRITE_LEADING for why the second one is anchored.
-    return (bool(_WRITE.search(tool.get("name", ""))) or _describes_write(description)
+    # A verb token in the name ("create_file", "placeOrder", "create-webhook") or in the prose
+    # ("will delete the row", minus the negated and compound uses — see _describes_write), OR a
+    # third-person verb leading the description ("Creates a file") — see _WRITE_LEADING.
+    return (_name_is_write(tool.get("name", "")) or _describes_write(description)
             or bool(_WRITE_LEADING.match(description)))
 
 

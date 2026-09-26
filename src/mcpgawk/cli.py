@@ -2344,6 +2344,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                                          for r in refreshed.values())
             any_error = any_error or any(s.reidentified_from or (s.report and s.report.any)
                                          for s in late.values())
+        _protection_nudge(bool(rows))
         _behavioural_capability_note()
         return 1 if (any_error or failed) else 0
 
@@ -2435,13 +2436,23 @@ def _dispatch(argv: list[str] | None = None) -> int:
         print("\n" + render_summary(labels, local_servers=local_servers) + "\n")
     else:
         print()
-    # Scanning is not protection. A report with no next step is how the author finished a scan on
-    # his own machine and stayed unprotected — the hook existed, worked, and was never installed
-    # because nothing ever mentioned it. Only shown when it is actually actionable.
     # Only with servers to check: with none, "these servers" named nothing and "`mcpgawk` turns
     # that on" told a user who had just run `mcpgawk` to run it again (new-developer walk,
     # 2026-09-26). The empty case already printed how to check a server before adding it.
-    _installed = _guard_is_installed() if (labels or unlabelled or skipped) else True
+    _protection_nudge(bool(labels or unlabelled or skipped))
+    _behavioural_capability_note()
+    return 1 if (any_error or failed) else 0
+
+
+def _protection_nudge(has_servers: bool) -> None:
+    """Scanning is not protection. A report with no next step is how the author finished a scan on
+    his own machine and stayed unprotected — the hook existed, worked, and was never installed
+    because nothing ever mentioned it. Only shown when it is actually actionable.
+
+    ONE helper for both report paths: the fleet-table path returned without it (found 2026-09-26
+    when the journey test first ran on a seeded fleet), so every machine that got the table — any
+    fleet with an unreachable server — was never told how to turn checking on."""
+    _installed = _guard_is_installed() if has_servers else True
     if _installed is None:
         print("  Whether your agents are checking these servers could not be determined — the "
               "guard probe failed. Run `mcpgawk guard status`.\n")
@@ -2450,8 +2461,6 @@ def _dispatch(argv: list[str] | None = None) -> int:
         # 2026-09-26). Bare `mcpgawk` is still the command: it enables every agent with a hook.
         print("  Your agents are not checking these servers yet. To turn that on, run `mcpgawk` "
               "with no arguments.\n")
-    _behavioural_capability_note()
-    return 1 if (any_error or failed) else 0
 
 
 def _print_accept(key: str | None) -> None:
