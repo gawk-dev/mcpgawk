@@ -9432,7 +9432,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 # would be asked to mute its way past it. Not drawing the button is not enforcement.
                 from . import baseline as _bl
                 blocked = _bl.approval_blocked_reason()
-                if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
+                if blocked:
                     _ACTION.update(message=f"mute refused — {blocked}", rows=[], level="bad", at=_now())
                     self.send_response(303)
                     self.send_header("Location", _back)
@@ -9455,7 +9455,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 # same hole closed in the CLI on 2026-07-27, reopened by the GUI.
                 from . import baseline as _bl
                 blocked = _bl.approval_blocked_reason()
-                if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
+                if blocked:
                     _ACTION.update(message=f"approve refused — {blocked}", at=_now())
                     self.send_response(303)
                     self.send_header("Location", _back)

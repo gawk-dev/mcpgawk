@@ -103,7 +103,8 @@ AGENT_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AI_AGENT", "CURSOR
 
 #: The deliberate escape hatch for CI, which legitimately has no TTY and no human. Deliberately NOT
 #: mentioned in any blocked-call message: the whole point is that an agent reading a denial cannot
-#: learn the bypass from it.
+#: learn the bypass from it. It waives ONLY the missing terminal, never an agent-session marker:
+#: an agent with a shell can set an env var as easily as a pipeline can (founder 2026-09-27).
 APPROVE_OVERRIDE_ENV = "MCPGAWK_APPROVE_NONINTERACTIVE"
 
 
@@ -140,13 +141,16 @@ def approval_blocked_reason() -> str | None:
     same write without it.
     """
     agent = [m for m in AGENT_ENV_MARKERS if os.environ.get(m)]
-    if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
-        return None
+    # The agent check comes FIRST and the CI hatch cannot waive it. Until 2026-09-27 the hatch was
+    # read first, so `MCPGAWK_APPROVE_NONINTERACTIVE=1 mcpgawk approve` from inside an agent
+    # session moved the baseline — one env var, settable by the very agent this gate exists to stop.
     if agent:
         return (f"this looks like an agent session ({', '.join(agent)} set). Moving the trusted "
                 f"baseline is a decision for the person at the keyboard, not for the assistant — "
                 f"a blocked tool call is exactly when an agent would be asked to approve its way "
                 f"past one. Run this yourself in your own terminal.")
+    if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
+        return None
     if not sys.stdin.isatty():
         return ("no interactive terminal. Approving a changed server is a trust decision and needs "
                 "a human present; refusing rather than assuming consent.")

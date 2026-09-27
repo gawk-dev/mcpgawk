@@ -370,7 +370,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
     Refuses in an agent session for the same reason `approve` does: this screen exists to put a
     HUMAN in front of the decision, and an agent that can start it can drive it."""
     blocked = baseline.approval_blocked_reason()
-    if blocked and os.environ.get(baseline.APPROVE_OVERRIDE_ENV) != "1":
+    if blocked:
         log(f"mcpgawk decide: refusing — {blocked}")
         return 4
 

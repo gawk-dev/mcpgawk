@@ -92,15 +92,21 @@ def _a_keychain_call_fails_the_test(_never_the_real_keychain):
 
 @pytest.fixture(scope="session", autouse=True)
 def _the_suite_is_the_documented_ci_override():
-    prior = os.environ.get("MCPGAWK_APPROVE_NONINTERACTIVE")
+    # The hatch never waives an agent-session marker, so clear the launching agent's: CI has none.
+    from mcpgawk.history import AGENT_ENV_MARKERS
+    names = ("MCPGAWK_APPROVE_NONINTERACTIVE",) + AGENT_ENV_MARKERS
+    prior = {k: os.environ.get(k) for k in names}
+    for k in AGENT_ENV_MARKERS:
+        os.environ.pop(k, None)
     os.environ["MCPGAWK_APPROVE_NONINTERACTIVE"] = "1"
     try:
         yield
     finally:
-        if prior is None:
-            os.environ.pop("MCPGAWK_APPROVE_NONINTERACTIVE", None)
-        else:
-            os.environ["MCPGAWK_APPROVE_NONINTERACTIVE"] = prior
+        for k, v in prior.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @pytest.fixture(autouse=True)

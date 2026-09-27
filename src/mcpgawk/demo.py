@@ -163,7 +163,9 @@ class _Sandbox:
         self.mode.write_text(mode)
 
     def env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        # The sandbox's own children are not the caller's agent: the CI hatch below no longer
+        # waives an agent-session marker, and the demo must still run from inside Claude Code.
+        env = {k: v for k, v in os.environ.items() if k not in history.AGENT_ENV_MARKERS}
         env.update({
             "HOME": str(self.home),
             history.STORE_ENV: str(self.history),
