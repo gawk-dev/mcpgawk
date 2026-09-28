@@ -1844,6 +1844,95 @@ def _banner_is_stale(action: dict | None, max_age_s: int = _BANNER_MAX_AGE_S) ->
     return (datetime.now(timezone.utc) - when).total_seconds() > max_age_s
 
 
+def _calls_chart(series: list[dict]) -> str:
+    """Calls per day as stacked bars — checked and allowed (green), blocked (red), NOT checked (amber).
+
+    FOUNDER 2026-09-28, adopting Opik's volume chart: "very importantly the chart or graph". The series
+    comes from spool.calls_by_day, which uses summarise's rule, so the bars always add up to the
+    headline beside them. Inline SVG (the panel's CSP allows no script); every segment carries its own
+    count in a <title>, and the figure a sentence for screen readers. No calls in the window says so
+    in words — an empty grid must never read as "all clear"."""
+    if not series:
+        return ""
+    tot = {k: sum(d[k] for d in series) for k in ("allowed", "blocked", "not_checked", "total")}
+    first, last = series[0]["day"], series[-1]["day"]
+    if not tot["total"]:
+        return (f'<div class="cchart empty">No MCP calls recorded from {_esc(first)} to {_esc(last)} — '
+                f'nothing checked and nothing blocked, because nothing was seen.</div>')
+    peak = max(d["total"] for d in series)
+    step = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000, 10**9)
+                if peak / s <= 4)
+    top = step * -(-peak // step)
+    W, H, L, B, T = 720, 200, 40, 26, 10
+    pw, ph = W - L - 6, H - B - T
+    slot = pw / len(series)
+    bw = min(slot * 0.62, 36)
+    y = lambda v: T + ph - v / top * ph
+    parts = []
+    for g in range(0, top + 1, step):
+        parts.append(f'<line class="grid" x1="{L}" y1="{y(g):.1f}" x2="{W - 6}" y2="{y(g):.1f}"></line>'
+                     f'<text class="ax" x="{L - 6}" y="{y(g) + 4:.1f}" text-anchor="end">{g}</text>')
+    for i, d in enumerate(series):
+        x = L + i * slot + (slot - bw) / 2
+        base = 0
+        for key, cls, word in (("allowed", "ok", "checked and allowed"), ("blocked", "bad", "blocked"),
+                               ("not_checked", "warn", "not checked")):
+            v = d[key]
+            if v:
+                parts.append(f'<rect class="{cls}" x="{x:.1f}" y="{y(base + v):.1f}" width="{bw:.1f}" '
+                             f'height="{y(base) - y(base + v):.1f}" rx="2"><title>{_esc(d["day"])}: {v} {word}'
+                             f'</title></rect>')
+                base += v
+        parts.append(f'<text class="ax" x="{x + bw / 2:.1f}" y="{H - B + 16}" text-anchor="middle">'
+                     f'{_esc(d["day"][8:10])}</text>')
+    label = (f'Calls per day, {first} to {last}: {tot["allowed"]} checked and allowed, {tot["blocked"]} blocked, '
+             f'{tot["not_checked"]} not checked.')
+    return (f'<figure class="cchart"><svg viewBox="0 0 {W} {H}" role="img" aria-label="{_esc(label)}">'
+            + "".join(parts) + '</svg><figcaption>'
+            f'<span><i class="ok"></i>Checked and allowed ({tot["allowed"]:,})</span>'
+            f'<span><i class="bad"></i>Blocked ({tot["blocked"]:,})</span>'
+            f'<span><i class="warn"></i>Not checked — no approved baseline ({tot["not_checked"]:,})</span>'
+            f'<span class="dim">{_esc(first)} → {_esc(last)}, per UTC day</span></figcaption></figure>')
+
+
+def _today_tiles(series: list[dict], unscannable: object, changed: int = 0) -> str:
+    """Today's at-a-glance tiles (FOUNDER 2026-09-28, adopting Opik's Insights tiles).
+
+    The chart's own series and window, so tiles, chart and Activity headline agree. Colour only for
+    status and only when non-zero. "Not checked" carries its remedy split the way the Activity
+    headline splits it: a browser host no scan can baseline is never told to "run a scan"."""
+    if not series:
+        return ""
+    tot = {k: sum(d[k] for d in series) for k in ("total", "checked", "blocked", "not_checked")}
+    unsc = {str(u.get("name")) for u in (unscannable or []) if isinstance(u, dict)}
+    by_server: dict[str, int] = {}
+    if tot["not_checked"]:
+        from . import spool as _sp
+        first = series[0]["day"]
+        for r in _sp.read(limit=200_000):
+            if r.get("decision") == "defer" and str(r.get("ts") or "")[:10] >= first:
+                k = str(r.get("server") or "?")
+                by_server[k] = by_server.get(k, 0) + 1
+    notes = []
+    for name, n in sorted(by_server.items(), key=lambda kv: -kv[1])[:3]:
+        why = ("a browser host no scan can baseline" if name in unsc else "run a scan to cover them")
+        notes.append(f"{n:,} to {_esc(name)} — {why}")
+
+    def tile(label: str, value: int, cls: str = "", note: str = "", wide: bool = False) -> str:
+        c = (f" {cls}" if cls and value else "") + (" wide" if wide else "")
+        n = f'<div class="tn">{note}</div>' if note else ""
+        return f'<div class="tile{c}"><div class="tl">{label}</div><div class="tv">{value:,}</div>{n}</div>'
+
+    pct = f"{tot['checked'] / tot['total']:.0%} of calls" if tot["total"] else ""
+    return ('<div class="ttiles">'
+            + tile("Calls seen", tot["total"], note="last 14 days")
+            + tile("Checked against your baseline", tot["checked"], "ok", pct)
+            + tile("Not checked", tot["not_checked"], "warn", " · ".join(notes), wide=bool(notes))
+            + tile("Blocked", tot["blocked"], "bad")
+            + tile("Changed since you approved", changed, "bad")
+            + '</div>')
+
+
 def _activity_headline(summary: object) -> str:
     """seen / checked / DECLINED — never a single number labelled "checked".
 
@@ -3107,6 +3196,12 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     if counts.get("baseline"):
         _grp_lines += (f'<tr class="tgrp"><td colspan="5">at baseline, quiet '
                        f'({counts["baseline"]}) <a href="{_tierurl("baseline")}">show</a></td></tr>')
+    # The calls-per-day series, shared by Today and Activity (FOUNDER 2026-09-28: the chart matters most).
+    try:
+        from . import spool as _spool_mod
+        _calls_series = _spool_mod.calls_by_day(14)
+    except Exception:                              # noqa: BLE001 — a view must not crash on its data
+        _calls_series = []
     _mon_live = bool((d.get("monitor") or {}).get("running") or (d.get("monitor") or {}).get("servers"))
     today_pane = f"""<section class="pane" id="p9">
     <div class="card">
@@ -3117,7 +3212,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
           <span class="tsub">{len(classified) - _ghosts} servers{_ghost_note} · {_watched_sum} of {_tools_sum} exposed
           tools exercised{' · monitor live' if _mon_live else ''}</span>
           <span class="bradar">{_radar}</span></div>
+        {_today_tiles(_calls_series, d.get("unscannable"), len(pending or []))}
         <div class="asks">{_asks_html}</div>
+        {_calls_chart(_calls_series)}
         <div class="fhead2">Fleet · worst first</div>
         <table class="ttable">{"".join(_trows) or
           '<tr><td class="dim" style="padding:10px 4px">No server needs attention right now.</td></tr>'}
@@ -3266,20 +3363,66 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<div class="fdetail">{_esc(f.get("evidence") or "")}</div>'
                 if _is_cfg(f) else "")
 
+    def _frow(f: dict) -> str:
+        return ((_SEL_TR if tl == _tl_key(f) else "<tr>")
+                + f'<td class="nm">{_esc(f.get("server"))}{_age_note(f)}</td>'
+                f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
+                f'<td>{_esc(f.get("class") or f.get("code") or "?")}{_foldnote(f)}{_cfg_detail(f)}</td>'
+                f'<td><span class="chip {_fchip(f)}">{_esc(f.get("severity") or "?")}</span></td>'
+                f'<td class="dim ev">{_esc("—" if _is_cfg(f) else (f.get("evidence") or "—"))}</td>'
+                f'<td class="dim">{_esc(f.get("repro"))} {_tl_link(f)}</td></tr>'
+                + (_timeline_row(f) if tl == _tl_key(f) else ""))
+
+    # ISSUES, NOT ROWS (FOUNDER 2026-09-28, adopting Opik's Diagnostics grouping): the same finding on
+    # one server is ONE issue however many tools carry it — six browserstack "undeclared-egress" rows
+    # were one fact. A group of one keeps its exact row; a larger group lists its tools (each with its
+    # own trail link) in a no-script <details>, the union of hosts, and its worst severity. A group
+    # whose trail is open is expanded, so opening a timeline never hides it.
+    _groups: dict[tuple, list[dict]] = {}
+    for f in _f_all:
+        _groups.setdefault((str(f.get("server")), str(f.get("class") or f.get("code") or "?"),
+                            bool(f.get("first_party"))), []).append(f)
+
+    def _grow(fs: list[dict]) -> str:
+        if len(fs) == 1:
+            return _frow(fs[0])
+        worst = min(fs, key=lambda f: _sev_rank.get(str(f.get("severity")).lower(), 9))
+        hosts: list[str] = []
+        for f in fs:
+            for h in str(f.get("evidence") or "").replace(";", ",").split(","):
+                h = h.strip()
+                if h and h != "—" and h not in hosts:
+                    hosts.append(h)
+        opened = any(tl == _tl_key(f) for f in fs)
+        tools = "".join(f'<li><span class="nm">{_esc(f.get("tool") or "—")}</span> '
+                        f'<span class="dim">{_esc(f.get("repro"))}</span> {_tl_link(f)}</li>' for f in fs)
+        row = ((_SEL_TR if opened else '<tr class="igrp">')
+               + f'<td class="nm">{_esc(worst.get("server"))}{_age_note(worst)}</td>'
+               f'<td class="nm">{len(fs)} tools</td>'
+               f'<td>{_esc(worst.get("class") or worst.get("code") or "?")}{_foldnote(worst)}'
+               f'<div class="dt">one issue · {len(fs)} findings</div></td>'
+               f'<td><span class="chip {_fchip(worst)}">{_esc(worst.get("severity") or "?")}</span></td>'
+               f'<td class="dim ev" title="{_esc(", ".join(hosts))}">{_esc(", ".join(hosts[:3]) or "—")}'
+               f'{f" +{len(hosts) - 3} more" if len(hosts) > 3 else ""}</td>'
+               f'<td class="dim">{len(fs)} tools</td></tr>'
+               # The tool list gets the full width beneath its issue: in the narrow tool column the
+               # names broke mid-word ("check_auth_s / tatus", live 2026-09-28).
+               f'<tr class="ilist"><td colspan="6"><details class="itools"{" open" if opened else ""}>'
+               f'<summary>the {len(fs)} tools · each with its own trail</summary><ul>{tools}</ul>'
+               f'</details></td></tr>')
+        return row + "".join(_timeline_row(f) for f in fs if tl == _tl_key(f))
+
     frows = "".join(
-        (_SEL_TR if tl == _tl_key(f) else "<tr>")
-        + f'<td class="nm">{_esc(f.get("server"))}{_age_note(f)}</td>'
-        f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
-        f'<td>{_esc(f.get("class") or f.get("code") or "?")}{_foldnote(f)}{_cfg_detail(f)}</td>'
-        f'<td><span class="chip {_fchip(f)}">{_esc(f.get("severity") or "?")}</span></td>'
-        f'<td class="dim ev">{_esc("—" if _is_cfg(f) else (f.get("evidence") or "—"))}</td>'
-        f'<td class="dim">{_esc(f.get("repro"))} {_tl_link(f)}</td></tr>'
-        + (_timeline_row(f) if tl == _tl_key(f) else "")
-        for f in sorted(_f_all, key=lambda f: (bool(f.get("first_party")),
-                                               _sev_rank.get(str(f.get("severity")).lower(), 9),
-                                               str(f.get("server"))))) or \
+        _grow(fs) for _k, fs in sorted(
+            _groups.items(),
+            key=lambda kv: (kv[0][2],
+                            min(_sev_rank.get(str(f.get("severity")).lower(), 9) for f in kv[1]),
+                            kv[0][0]))) or \
         ('<tr><td colspan="6" class="dim">No verify has run yet. An empty table here is not a clean '
          'bill of health.</td></tr>')
+    _issue_n = len(_groups)
+    _issue_note = (f" · {_issue_n} issue{'s' if _issue_n != 1 else ''} — the same finding on one server counts once"
+                   if _f_all else "")
 
     _nba_text, _nba_tier = next_best_action(d)
     nba = (f'<div class="nba {_nba_tier}"><b>Next:</b> {_esc(_nba_text)}</div>')
@@ -3704,13 +3847,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
    grey track, one white card per view, filter row with a right-aligned count, uppercase heads on
    a tinted row, two-line primary cell, fully-rounded tinted tags. Royal blue #2A33C2 stays ours.
    No script — the CSP is `default-src 'none'` and the tabs are pure CSS. */
-/* Palette per the founder's reference (2026-08-15, chosen over Observatory dark): warm
-   sage/cream field, white floating cards, ink-navy type, ONE hot orange accent used sparingly.
-   Danger is deepened to crimson so an alarm never reads as the brand colour. */
-:root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;--line-strong:#C2CCBB;
---ink:#1D2A30;--mut:#5C6B66;--fai:#626D66;--acc:#E8502B;--accent:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;
---ok:#157A40;--ok-bg:#E9F3EA;--warn:#96590A;--warn-bg:#FBF1E3;
---bad:#B3261E;--bad-bg:#F9E9E7;--unv:#707B74;--unv-bg:#EDF0EB;
+/* Palette ([FOUNDER] 2026-09-28, superseding 2026-08-15's sage/cream + hot orange): gawk.dev's light
+   theme — paper and ink greys — and colour ONLY for status: green = checked/OK, amber = not
+   checked/warning, red = blocked/needs you. The --acc* tokens keep their names (rules and a test
+   read them) but are ink now: emphasis is weight, underline and ink, never a hue. Tokens measured
+   from gawk.dev's own CSS (--paper/--ink/--hair, --op/--out; amber from its Tailwind scale). */
+:root{{--page:#FAFAF6;--card:#FFF;--rail:#F2F1EA;--line:#E7E6DE;--line-strong:#D8D7CC;
+--ink:#16160F;--mut:#6B6B5E;--fai:#6B6B5E;--acc:#16160F;--accent:#16160F;--acc-ink:#16160F;--acc-soft:#F2F1EA;
+--ok:#157A40;--ok-bg:#EAF4EE;--warn:#B75000;--warn-bg:#FFFBEB;
+--bad:#C0392B;--bad-bg:#FBEAE8;--unv:#6B6B5E;--unv-bg:#F2F1EA;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
 --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
 --ease:cubic-bezier(.23,1,.32,1);
@@ -3811,6 +3956,36 @@ color:var(--fai);margin:0 0 6px}}
 .ttable .id{{font-family:var(--mono);font-size:11px;color:var(--fai);display:block}}
 .ttable .tact{{text-align:right}}
 .ttable .tact a{{color:var(--acc-ink);font-weight:600;font-size:12.5px;text-decoration:none}}
+/* Links are ink now (palette 2026-09-28), so the underline carries the affordance colour used to. */
+body .brief .bask,body .ask.calm a,body .ttable .tact a,body .tgrp a,body .tll,body .clearf,body .whysum{{text-decoration:underline;text-underline-offset:2px}}
+/* Calls per day (panel._calls_chart). Colour only for status: green checked, red blocked, amber not checked. */
+.cchart{{margin:6px 0 16px;padding:12px 14px 10px;border:1px solid var(--line);border-radius:12px;background:var(--card)}}
+.cchart svg{{display:block;width:100%;height:auto}}
+.cchart .grid{{stroke:var(--line);stroke-width:1}}
+.cchart .ax{{font:11px var(--mono);fill:var(--mut)}}
+.cchart rect.ok{{fill:var(--ok)}} .cchart rect.bad{{fill:var(--bad)}} .cchart rect.warn{{fill:#E39B3A}}
+.cchart figcaption{{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:6px;font-size:12px;color:var(--ink)}}
+.cchart figcaption span{{display:inline-flex;align-items:center;gap:6px}}
+.cchart figcaption i{{width:11px;height:11px;border-radius:3px;display:inline-block}}
+.cchart figcaption i.ok{{background:var(--ok)}} .cchart figcaption i.bad{{background:var(--bad)}} .cchart figcaption i.warn{{background:#E39B3A}}
+.cchart figcaption .dim{{color:var(--mut)}}
+.cchart.empty{{color:var(--mut);font-size:13px}}
+/* Findings grouped into issues (panel frows): a group lists its tools in a no-script disclosure. */
+.itools summary{{cursor:pointer;font-weight:600;text-decoration:underline;text-underline-offset:2px}}
+.itools ul{{margin:8px 0 2px;padding-left:18px;font-size:12.5px;line-height:1.8;columns:3 220px;column-gap:28px}}
+.itools li{{break-inside:avoid}} .itools li .nm{{white-space:nowrap}}
+tr.ilist>td{{padding-top:0;border-top:none}} tr.igrp>td{{border-bottom:none}}
+/* Today's at-a-glance tiles (panel._today_tiles): status colour only, and only when non-zero. */
+.ttiles{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:12px 0 14px}}
+.tile{{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--card);min-width:0}}
+.tile.wide{{grid-column:span 2}}
+.tile .tl{{font-size:12px;color:var(--mut)}}
+.tile .tv{{font-size:26px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}}
+.tile .tn{{font-size:12px;color:var(--mut);margin-top:2px}}
+.tile.ok .tv{{color:var(--ok)}}
+.tile.warn{{background:var(--warn-bg);border-color:#F2DDB0}} .tile.warn .tv,.tile.warn .tl,.tile.warn .tn{{color:var(--warn)}}
+.tile.bad{{background:var(--bad-bg);border-color:#EFC3BD}} .tile.bad .tv,.tile.bad .tl{{color:var(--bad)}}
+@media (max-width:1100px){{.ttiles{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}
 .tgrp td{{background:var(--rail);font-family:var(--mono);font-size:11px;letter-spacing:.05em;
 text-transform:uppercase;color:var(--mut);padding:6px 10px}}
 .tgrp a{{color:var(--acc-ink);font-family:var(--sans);font-weight:600;text-transform:none;
@@ -3823,8 +3998,11 @@ margin:0 0 14px;padding:8px 12px;border:1px solid var(--line);border-radius:10px
 background:var(--card)}}
 .jchip{{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);
 padding:3px 10px;border-radius:99px;cursor:pointer}}
-.jchip:hover{{background:var(--srow)}}
-.jchip .jdot{{width:7px;height:7px;border-radius:50%;background:var(--bad)}}
+.jchip:hover{{background:var(--rail)}}
+/* Unfinished setup is not an alarm (palette 2026-09-28): later steps are neutral, the next one
+   amber, done green. Red is for blocked / needs you, never for "not done yet". */
+.jchip .jdot{{width:7px;height:7px;border-radius:50%;background:var(--line-strong)}}
+.jchip.now .jdot{{background:var(--warn)}}
 .jchip.done .jdot{{background:var(--ok)}}
 .jchip.done{{color:var(--fai)}}
 details.cwrap{{margin-top:14px}}
@@ -3858,7 +4036,7 @@ font-family:var(--mono);font-size:14px;font-weight:700;
 background:var(--acc-soft);color:var(--acc-ink)}}
 .mmark.ok{{background:var(--ok-bg);color:var(--ok)}}
 .mmark.warn{{background:var(--warn-bg);color:var(--warn)}}
-.mmark.bad{{background:var(--acc-soft);color:var(--acc-ink)}}
+.mmark.bad{{background:var(--bad-bg);color:var(--bad)}}
 .mmark.unv{{background:var(--rail);color:var(--mut)}}
 .mmark.obs{{background:var(--rail);color:var(--mut);border:1px dashed var(--line-strong)}}
 .mclose{{width:30px;height:30px;border-radius:50%;flex:none;display:grid;place-items:center;
@@ -3968,8 +4146,8 @@ overflow-wrap:anywhere}}
    in Chrome: table 659px in a 558px box). `anywhere` lets the token break and the table fit. */
 .arows .fixit{{overflow-wrap:anywhere}}
 .arows td.nm{{font-family:var(--mono);white-space:nowrap;width:1%}}
-.fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--acc);
-background:var(--acc-soft);color:var(--ink);font-size:12px;line-height:1.5}}
+.fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--warn);
+background:var(--warn-bg);color:var(--ink);font-size:12px;line-height:1.5}}
 .nba{{display:flex;gap:8px;align-items:baseline;margin:0 16px 13px;padding:11px 13px;
 border-radius:10px;font-size:13.5px;border:1px solid var(--line);background:var(--card)}}
 .nba.ok{{border-color:var(--ok);background:var(--ok-bg);color:var(--ok)}}
@@ -4059,7 +4237,7 @@ color:var(--warn);background:var(--warn-bg)}}
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
 .act-sm:active{{transform:scale(.97)}}
-.act-sm.warn{{border-color:var(--acc);color:var(--acc);margin-left:6px}}
+.act-sm.warn{{border-color:var(--warn);color:var(--warn);margin-left:6px}}
 .bars{{padding:2px 16px 16px}}
 .bar{{display:flex;height:9px;border-radius:999px;overflow:hidden;background:var(--rail);
 margin:2px 0 10px}}
@@ -4260,12 +4438,12 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
          founder read a 25-minute-old process three times and reported "nothing changed" —
          correctly, because that process predated the changes. -->
     <span class="bsub" title="when the code being served was last modified, and when this process started">
-      local · this machine only · code {_esc(_CODE_AT)} · started {_esc(_STARTED)}</span></div></div>
+      local · this machine only · code {_esc(_CODE_AT)} · started {_esc(_STARTED)}</span></div>
   {'' if token else
    '<div class="ronote">Read-only view — this page holds the state but none of the controls. '
    'The action buttons live only on the tokened link (ending <code>?t=…</code>) that '
    '<code>mcpgawk panel</code> printed in your terminal. Reopen from there to act. '
-   'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}
+   'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}</div>
   <div class="rail">
     <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct{" alert" if _asks_alarm else ""}">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
     <label class="pill" for="n4"><span class="dot"></span><span class="pw"><span class="prow">History</span><span class="pdesc">every call, run and decision, newest first</span></span></label>
@@ -4334,7 +4512,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
     <div class="card">
       <div class="chead"><h1>Findings</h1>
         <div class="tools"><a class="gbtn" href="/export/findings.csv">Export .csv</a></div></div>
-      <div class="filters"><span class="count" style="margin-left:0">{fcount}</span></div>
+      <div class="filters"><span class="count" style="margin-left:0">{fcount}{_issue_note}</span></div>
       <div class="note">First-party egress — a server reaching its own vendor API — is listed and
         folded, not hidden. 42 of 42 findings on a real fleet were that; a detector that fires on
         normal traffic teaches you to ignore it.</div>
@@ -4435,6 +4613,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
           <a class="gbtn" href="/export/calls.csv">Export .csv</a></div></div>
       <div class="filters"><span class="count" style="margin-left:0">{_activity_headline(act_summary)}
         · {len(notable)} denied · {_esc(_span)}</span></div>
+      {_calls_chart(_calls_series)}
       <h2>Needs your attention — blocked calls, with the full reason</h2>
       <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
       <th>basis</th><th>why (verbatim)</th></tr></thead><tbody>{acts_notable}</tbody></table></div>
@@ -8498,8 +8677,8 @@ def _next_diff(report) -> str:
 
 
 _NEXT_CSS = """
-:root{--page:#ECEFEA;--card:#FFF;--line:#D8DFD3;--line-strong:#C2CCBB;--ink:#1D2A30;--mut:#5C6B66;
---fai:#626D66;--acc:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;--bad:#B3261E;--bad-bg:#F9E9E7;
+:root{--page:#FAFAF6;--card:#FFF;--line:#E7E6DE;--line-strong:#D8D7CC;--ink:#16160F;--mut:#6B6B5E;
+--fai:#6B6B5E;--acc:#16160F;--acc-ink:#16160F;--acc-soft:#F2F1EA;--bad:#C0392B;--bad-bg:#FBEAE8;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);
 font:14px/1.5 system-ui,-apple-system,"Segoe UI",Inter,sans-serif}

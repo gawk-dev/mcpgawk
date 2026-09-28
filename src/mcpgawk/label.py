@@ -16,6 +16,7 @@ from .measure import Measurement, is_structural_basis
 from .signals import is_instruction_finding
 from .probe import ServerSnapshot
 from .servercard import compare_to_reality
+from .supplychain import YOUNG_DAYS as _YOUNG_DAYS
 
 LABEL_SCHEMA = "mcpgawk/label@0.1"
 
@@ -542,13 +543,17 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
         state = "auth-required" if kind in ("auth-required", "sign-in-failed", "registration-refused",
                                             "login-unreadable", "sign-in-incomplete",
                                             "access-denied") else "unreachable"
+        if kind == "not-launched":
+            state = "not-launched"      # refused before launch — nothing was tried, so not "unreachable"
         verdict = {"sign-in-failed": "AUTH — SIGN-IN FAILED (may be mcpgawk's fault)",
                    "sign-in-incomplete": "AUTH — SIGN-IN NOT COMPLETED (run again and approve)",
                    "access-denied": "AUTH — SIGNED IN, ACCESS REFUSED (HTTP 403)",
                    "login-unreadable": "AUTH — STORED SIGN-IN UNREADABLE (sign in again)",
                    "registration-refused": "AUTH — REFUSES AUTOMATIC REGISTRATION",
                    # It answered — "UNREACHABLE" was false for a web page (T1, 2026-09-25).
-                   "not-an-mcp-endpoint": "NOT AN MCP ENDPOINT"}.get(
+                   "not-an-mcp-endpoint": "NOT AN MCP ENDPOINT",
+                   # Refused before launch: the registry says the package does not exist.
+                   "not-launched": "NOT LAUNCHED — PACKAGE DOES NOT EXIST"}.get(
             kind, "AUTH REQUIRED" if state == "auth-required" else "UNREACHABLE")
     elif empty:
         # Zoho, 2026-09-24: 0 tools rendered CLEAN. Nothing measured is not a clean bill.
@@ -694,6 +699,44 @@ def _tool_list(tools: list[dict[str, Any]], n: int, visible_only: bool = False) 
     return out
 
 
+_ECOSYSTEM_NAME = {"npm": "npm", "pypi": "PyPI"}
+
+
+def _supply_chain_lines(sc: dict[str, Any] | None) -> list[str]:
+    """The opt-in `--supply-chain` result. Four outcomes that must never be confused: not checked,
+    could not check (no answer), MISSING (the registry answered: no such name) and checked."""
+    if sc is None:
+        return []
+    if sc.get("checked") is False:
+        return [f"    supply-chain: {sc['reason']}"]
+    eco, pkg = sc.get("ecosystem", "?"), sc.get("package", "?")
+    registry = _ECOSYSTEM_NAME.get(eco, eco)
+    if sc.get("error"):
+        return [f"    supply-chain: {eco}:{pkg} — could not check the {registry} registry "
+                f"({sc['error']}). Not checked is not clean."]
+    if sc.get("missing"):
+        return [f"    supply-chain: {eco}:{pkg}  ✗ NOT ON {registry.upper()} — hallucinated or not "
+                f"yet registered; nothing to trust yet. Do not launch it."]
+    flags = []
+    if sc.get("deprecated"):
+        flags.append("⚠ DEPRECATED/YANKED" + (f" — {sc['detail']}" if sc.get("detail") else ""))
+    if sc.get("young"):
+        age, n = sc.get("age_days"), sc.get("release_count")
+        releases = f"{n} release{'' if n == 1 else 's'}" if n is not None else None
+        if age is not None and age < _YOUNG_DAYS:
+            flags.append(f"⚠ young name — first published {sc['first_published']} "
+                         f"({age} day{'' if age == 1 else 's'} ago)"
+                         + (f", {releases}" if releases else "")
+                         + " — a young name is exactly what a squatter registers")
+        else:
+            flags.append(f"⚠ thin history — only {releases} since {sc.get('first_published')} "
+                         f"— a thin history is exactly what a squatter registers")
+    head = f"    supply-chain: {eco}:{pkg}@{sc.get('version')}  "
+    if not flags:
+        return [head + "ok"]
+    return [head + flags[0], *(f"      {f}" for f in flags[1:])]
+
+
 def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None = None) -> str:
     x = label["x-mcpgawk"]
     ts = x["trust_surface"]
@@ -710,13 +753,19 @@ def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None =
     nar = x.get("narrative") or build_narrative(label)
     concerns = [(c["title"], c["body"]) for c in nar["concerns"]]
     verdict = nar["verdict"]
-    failed = nar["state"] in ("unreachable", "auth-required")
+    failed = nar["state"] in ("unreachable", "auth-required", "not-launched")
     has_dispatch = nar["dispatch"]
 
     lines = [f"● {shown or display_name(label)}   [{label['transport']}]   {verdict}"]
 
     if failed:
         detail = nar["failure"]["detail"]
+        if x.get("error_kind") == "not-launched":
+            # Not a failure to scan: a refusal to RUN. "could not scan" would read as something to
+            # retry; the registry line below says why it must not be.
+            lines.append(f"    ✗ {detail}. Nothing was run; this did NOT pass.")
+            lines.extend(_supply_chain_lines(x.get("supply_chain")))
+            return "\n".join(lines)
         lines.append(f"    ✗ could not scan — {detail}. This did NOT pass; it was not measured.")
         # The next-step hint must match the KIND of failure. Telling someone whose endpoint answered
         # 401 that "a docs URL is not an MCP endpoint" sends them to debug a URL that was right.
@@ -763,6 +812,9 @@ def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None =
             lines.append("      Is it a live MCP endpoint? A docs / repo / package URL is not one.")
             lines.append("      A local server needs:  mcpgawk scan --stdio \"<launch command>\"")
         # Any other kind: its headline already says what happened; a guessed hint would mislead.
+        # The supply-chain line still prints: `npx -y <a name that does not exist>` FAILS to launch,
+        # and the registry's answer is the one line that says why.
+        lines.extend(_supply_chain_lines(x.get("supply_chain")))
         return "\n".join(lines)
 
     if has_dispatch:
@@ -868,16 +920,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None =
 
     if verbose:
         lines.append(f"    coverage: {x['tool_count']} tools, {x['prompt_count']} prompts, {x['resource_count']} resources")
-    sc = x.get("supply_chain")
-    if sc is not None:
-        if sc.get("error"):
-            lines.append(f"    supply-chain: {sc['ecosystem']}:{sc['package']} — lookup failed ({sc['error']})")
-        elif sc.get("checked") is False:
-            lines.append(f"    supply-chain: {sc['reason']}")
-        else:
-            flag = "⚠ DEPRECATED/YANKED" if sc["deprecated"] else "ok"
-            lines.append(f"    supply-chain: {sc['ecosystem']}:{sc['package']}@{sc['version']}  {flag}"
-                         + (f" — {sc['detail']}" if sc.get("detail") else ""))
+    lines.extend(_supply_chain_lines(x.get("supply_chain")))
     if "oauth_scopes" in x:
         os_ = x["oauth_scopes"]
         if os_ is None:
@@ -917,8 +960,14 @@ def render_summary(labels: list[dict[str, Any]], local_servers: int = 0) -> str:
     else:
         body = (f"{servers}{f' ({failed} not measured)' if failed else ''} · {tools} tool{'s' if tools != 1 else ''} · "
                 f"{toks:,} tokens loaded into every session · {flagged} can change or send data.")
-    out = ("─" * 64 + f"\n{body}\n"
-           "Scanned locally — your server inventory never left this machine.")
+    # The local-only line must stay TRUE. With --supply-chain, package names went to the npm/PyPI
+    # registry, and "never left this machine" beside that would be the one claim a sceptical reader
+    # can disprove by watching the network (found by the pre-launch gate slice, 2026-09-28).
+    _sent = any((lab.get("x-mcpgawk") or {}).get("supply_chain") for lab in all_labels)
+    _local = ("Scanned locally. --supply-chain sent only package names and pinned versions to the npm/PyPI "
+              "registry — never your tools or configs." if _sent
+              else "Scanned locally — your server inventory never left this machine.")
+    out = ("─" * 64 + f"\n{body}\n" + _local)
     # What those local servers inherit but no config declares. Only ever printed when there is both
     # something to inherit and something to inherit it — see ambient.summarize.
     ambient_lines = summarize(detect_ambient(), local_servers, exfil)

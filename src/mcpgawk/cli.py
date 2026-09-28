@@ -189,6 +189,13 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         # variable and the same shape, rather than mypy inferring `Sequence[str]` from whichever
         # branch it saw first and then rejecting the other one's headers dict.
         entry: dict[str, Any] = {"command": parts[0], "args": parts[1:]}
+        if getattr(args, "supply_chain", False):
+            # The "check a server before you add it" flow the empty-fleet message recommends:
+            # the same pre-launch registry gate as the config path below, not a label added after
+            # the server already ran.
+            entry, refused_snap = _registry_gate("cli-stdio", entry)
+            if refused_snap is not None:
+                return [refused_snap], {"cli-stdio": entry}, []
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}, []
     if (args.http or args.sse) and (routed := _configured_as(args.http or args.sse, args)):
         # Scanning a configured server BY URL is still scanning that server. Say so, then let the
@@ -307,6 +314,24 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     if is_discovery:
         for line in _discovery_problems(sources):
             print(f"mcpgawk: ⚠ {line}", file=sys.stderr)
+    # THE REGISTRY CHECK GATES THE LAUNCH. It ran in `_label_for`, AFTER probe() had started the
+    # server — so `npx -y <a hallucinated name>` fetched and ran whatever squatted that name, then
+    # printed "Do not launch it." Asked first, and a name the registry says does not exist is never
+    # launched, never even offered at the consent prompt: there is nothing to consent to. Only with
+    # --supply-chain (opt-in egress; name + pinned version only). Could-not-check and young names
+    # go on to consent exactly as before — the check only moved earlier. The answer rides on the
+    # entry so `_label_for` reuses it instead of asking the registry twice.
+    refused: dict[str, tuple[ServerSnapshot, dict]] = {}
+    if getattr(args, "supply_chain", False):
+        checked_targets = []
+        for n, e in targets:
+            if e.get("command"):
+                e, refused_snap = _registry_gate(n, e)
+                if refused_snap is not None:
+                    refused[n] = (refused_snap, e)
+                    continue
+            checked_targets.append((n, e))
+        targets = checked_targets
     # Default-deny consent before LAUNCHING any discovered/configured stdio server (spawning runs its
     # code). Explicit --stdio never reaches here; remote servers aren't spawned so they always pass.
     approved = gate_stdio_consent(targets, assume_yes=getattr(args, "yes", False))
@@ -326,7 +351,39 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         held_snaps = _measure_through_signin(approved)
     snaps = await asyncio.gather(*(probe(e, n) for n, e in approved if n not in held_snaps))
     out = list(snaps) + [held_snaps[n] for n, _ in approved if n in held_snaps]
-    return out, {n: e for n, e in approved}, skipped
+    out += [snap for snap, _ in refused.values()]
+    return out, {**{n: e for n, e in approved}, **{n: e for n, (_, e) in refused.items()}}, skipped
+
+
+def _registry_gate(name: str, entry: dict) -> tuple[dict, ServerSnapshot | None]:
+    """Ask the registry about a stdio entry BEFORE it is launched — ONE gate for the config path
+    and `--stdio`. Returns the entry carrying the answer (so `_label_for` reuses it rather than
+    asking twice) and, when the registry says the package does not exist, the not-launched
+    snapshot that replaces the launch. Could-not-check, young and thin names return None: they go
+    on to launch (and, on the config path, to consent) exactly as before."""
+    finding = check_supply_chain(entry["command"], entry.get("args") or [])
+    entry = {**entry, "_supply_chain": _supply_chain_record(finding)}
+    if finding is not None and finding.missing:
+        return entry, _not_launched_snapshot(name, finding)
+    return entry, None
+
+
+def _supply_chain_record(finding) -> dict:
+    """The supply-chain field as the label carries it — ONE definition for the pre-launch gate and
+    `_label_for`, so the reused answer and a fresh one cannot drift apart."""
+    return (asdict(finding) if finding else
+            {"checked": False, "reason": "package not recognised from the launch command"})
+
+
+def _not_launched_snapshot(name: str, finding) -> ServerSnapshot:
+    """A server we REFUSED to launch because its registry says the package does not exist. A
+    failure snapshot (never CLEAN, never recorded as a baseline) with its own kind, so no renderer
+    calls it "could not scan" or "launch failed": nothing was run, by design."""
+    registry = {"npm": "npm", "pypi": "PyPI"}.get(finding.ecosystem, finding.ecosystem)
+    return ServerSnapshot(
+        name=name, transport="stdio", protocol_version=None, tools=[],
+        error=f"not launched — `{finding.package}` is not on {registry}",
+        error_kind="not-launched")
 
 
 def _measure_through_signin(approved: list[tuple[str, dict]]) -> dict[str, ServerSnapshot]:
@@ -447,10 +504,11 @@ def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = N
     # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a credential the
     # user already supplied (no egress, but still consent-gated).
     if args.supply_chain and entry.get("command"):
-        finding = check_supply_chain(entry["command"], entry.get("args") or [])
+        # Already asked before the launch (see `_run`) on the config path: reuse that answer — one
+        # registry call per server. The explicit --stdio path and the sign-in re-scan still ask here.
         label["x-mcpgawk"]["supply_chain"] = (
-            asdict(finding) if finding else {"checked": False,
-                                             "reason": "package not recognised from the launch command"})
+            entry["_supply_chain"] if "_supply_chain" in entry else
+            _supply_chain_record(check_supply_chain(entry["command"], entry.get("args") or [])))
     if args.oauth_scopes:
         label["x-mcpgawk"]["oauth_scopes"] = inspect_oauth_scopes(entry.get("headers"))
     return label
@@ -573,8 +631,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the full narrative report for EVERY server instead of the fleet "
                         "status list (the list is the default when more than one server is scanned)")
     s.add_argument("--supply-chain", action="store_true",
-                   help="opt-in: query the public npm/PyPI registry for the launched package's "
-                        "deprecation/yank status (network egress — package name+version only)")
+                   help="opt-in: looks up the package name (and pinned version) of every stdio "
+                        "server on npm/PyPI before anything launches — including servers you then "
+                        "decline — so a made-up or brand-new name is caught, and one the registry "
+                        "does not have is never launched; nothing else is sent")
     s.add_argument("--oauth-scopes", action="store_true",
                    help="opt-in: locally decode a supplied Bearer JWT's scope claim (no network; "
                         "reads a credential you already provided)")
@@ -2424,10 +2484,13 @@ def _dispatch(argv: list[str] | None = None) -> int:
     unlabelled = [r for r in rows if r.name not in {lab["name"] for lab in labels}]
     if unlabelled:
         print("\n" + fleet.render_fleet(unlabelled))
-    # Local (stdio) servers — launched this run or merely configured. Both inherit the same
-    # ambient credentials the moment anything starts them, so both count towards that warning.
-    local_servers = (sum(1 for e in entries.values() if e.get("command"))
-                     + sum(1 for _, e in skipped if e.get("command")))
+    # Local (stdio) servers — launched this run or merely configured. Both inherit the same ambient
+    # credentials the moment anything starts them (your IDE starts a server you declined HERE), so
+    # both count, as 4dd441f decided. The one exception is a package the registry says does not
+    # exist (error_kind "not-launched"): nothing can start it anywhere, so it inherits nothing.
+    not_run = {s.name for s in snaps if s.error_kind == "not-launched"}
+    local_servers = (sum(1 for n, e in entries.items() if e.get("command") and n not in not_run)
+                     + sum(1 for n, e in skipped if e.get("command") and n not in not_run))
     # A first sighting renders in full, so its summary does too: the first successful scan of a
     # local server is exactly when a new developer needs to see what it inherits (walk, 2026-09-26).
     first_sighting = any(lab["name"] in new_baselines or lab["name"] in reidentified
@@ -2439,7 +2502,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # Only with servers to check: with none, "these servers" named nothing and "`mcpgawk` turns
     # that on" told a user who had just run `mcpgawk` to run it again (new-developer walk,
     # 2026-09-26). The empty case already printed how to check a server before adding it.
-    _protection_nudge(bool(labels or unlabelled or skipped))
+    # ...and never when every server was refused as non-existent: "turn checking on for these
+    # servers" is wrong advice about a package that does not exist (gate slice, 2026-09-28).
+    _named = ({lab["name"] for lab in labels} | {r.name for r in unlabelled} | {n for n, _ in skipped})
+    _protection_nudge(bool(_named - not_run))
     _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
 

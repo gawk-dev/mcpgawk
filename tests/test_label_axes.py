@@ -94,6 +94,68 @@ def test_supply_chain_unrecognised_launch_renders_reason_not_silence():
     assert "not recognised" in out
 
 
+def _sc(**kw):
+    base = {"ecosystem": "npm", "package": "some-postgres-mcp", "version": None,
+            "deprecated": False, "detail": None, "error": None}
+    base.update(kw)
+    return base
+
+
+def test_supply_chain_missing_package_says_do_not_launch():
+    label = _label([{"name": "a", "description": "b"}])
+    label["x-mcpgawk"]["supply_chain"] = _sc(missing=True)
+    out = render_cli(label)
+    assert "NOT ON NPM" in out and "hallucinated or not yet registered" in out
+    assert "Do not launch it" in out
+    assert "could not check" not in out
+
+
+def test_supply_chain_network_error_says_could_not_check_never_missing():
+    label = _label([{"name": "a", "description": "b"}])
+    label["x-mcpgawk"]["supply_chain"] = _sc(error="TimeoutError: registry unreachable")
+    out = render_cli(label)
+    assert "could not check" in out
+    assert "NOT ON NPM" not in out and "Do not launch" not in out
+
+
+def test_supply_chain_young_name_renders_date_and_age():
+    label = _label([{"name": "a", "description": "b"}])
+    label["x-mcpgawk"]["supply_chain"] = _sc(version="0.0.1", young=True, first_published="2026-09-20",
+                                             age_days=8, release_count=1)
+    out = render_cli(label)
+    assert "first published 2026-09-20 (8 days ago)" in out
+    assert "a young name is exactly what a squatter registers" in out
+
+
+def test_supply_chain_thin_history_names_the_release_count():
+    label = _label([{"name": "a", "description": "b"}])
+    label["x-mcpgawk"]["supply_chain"] = _sc(version="1.0.1", young=True, first_published="2021-01-01",
+                                             age_days=2096, release_count=2)
+    out = render_cli(label)
+    assert "2 releases" in out and "squatter" in out
+
+
+def test_supply_chain_young_and_deprecated_both_show():
+    label = _label([{"name": "a", "description": "b"}])
+    label["x-mcpgawk"]["supply_chain"] = _sc(version="0.0.1", deprecated=True, detail="gone",
+                                             young=True, first_published="2026-09-20",
+                                             age_days=8, release_count=1)
+    out = render_cli(label)
+    assert "DEPRECATED/YANKED" in out and "young name" in out
+
+
+def test_supply_chain_shows_on_a_failed_launch():
+    """The flagship case: `npx -y <hallucinated>` fails to launch. The failed-scan branch returned
+    before the supply-chain block, so the one line that explains WHY never printed."""
+    snap = ServerSnapshot(name="t", transport="stdio", protocol_version=None, tools=[],
+                          error="npm error 404 Not Found - some-postgres-mcp", error_kind="server-failed")
+    label = build_label(snap, measure(snap))
+    label["x-mcpgawk"]["supply_chain"] = _sc(missing=True)
+    out = render_cli(label)
+    assert "could not scan" in out
+    assert "NOT ON NPM" in out and "Do not launch it" in out
+
+
 def test_oauth_scopes_present_vs_absent_are_distinguishable():
     label_no_flag = _label([{"name": "a", "description": "b"}])
     assert "oauth scopes" not in render_cli(label_no_flag)

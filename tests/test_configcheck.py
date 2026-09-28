@@ -319,3 +319,25 @@ def test_a_reachable_declined_server_still_reports_its_config():
                                       "args": ["-m", "example", "--allow-build"], "env": {}})
     assert row.state == "SKIPPED"
     assert "install scripts allowed" in row.detail
+
+
+@pytest.mark.parametrize("entry", [
+    {"command": "uv", "args": ["run", "server.py"]},
+    {"command": "uv", "args": ["--directory", "/x", "run", "foo"]},
+    {"command": "npm", "args": ["run", "start"]},
+    {"command": "npx", "args": ["./local/server.js"]},
+    {"command": "uvx", "args": ["--from", "git+https://github.com/o/r", "cmd"]},
+])
+def test_unpinned_uses_the_registry_resolution_not_the_first_token(entry):
+    """`uv run server.py` flagged "`run` has no version pin" — the older extractor took the first
+    positional as a package. Same resolution as the registry check: not a package, no finding."""
+    assert [f for f in check("s", entry) if f.kind == "config:unpinned-package"] == []
+
+
+def test_unpinned_resolves_through_runner_flags():
+    fs = [f for f in check("s", {"command": "npx", "args": ["-y", "postmark-mcp"]})
+          if f.kind == "config:unpinned-package"]
+    assert len(fs) == 1 and "`postmark-mcp`" in fs[0].evidence and "postmark-mcp shipped" in fs[0].evidence
+    fs = [f for f in check("s", {"command": "uvx", "args": ["--python", "3.12", "some-pkg"]})
+          if f.kind == "config:unpinned-package"]
+    assert len(fs) == 1 and "`some-pkg`" in fs[0].evidence

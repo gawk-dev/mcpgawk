@@ -63,6 +63,10 @@ class FleetRow:
     # from the user's own config (an `env` API key), so it is never in the default fleet-json — see
     # `--with-spec`, which only the local web UI requests, in-process, over loopback.
     spec: dict[str, Any] | None = None
+    # SKIPPED by refusal (the registry says its package does not exist), not by withheld consent —
+    # so the "re-run with --yes" next step, which would not launch it, is never offered for it.
+    # Terminal-only: not part of the fleet-json payload (its `detail` already says why).
+    refused: bool = False
 
     @property
     def needs_auth(self) -> bool:
@@ -102,6 +106,13 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             return "AUTH", "stored sign-in can't be decrypted (its key changed) — sign in again"
         if x.get("error_kind") == "registration-refused":
             return "AUTH", "refuses automatic registration — sign in with --oauth-client-id"
+        if x.get("error_kind") == "not-launched":
+            # SKIPPED, not a new state: STATES is pinned by the IDE extension (FLEET_SCHEMA). It WAS
+            # skipped — deliberately — and the detail says why, which --yes does not change.
+            sc = x.get("supply_chain") or {}
+            registry = {"npm": "npm", "pypi": "PyPI"}.get(sc.get("ecosystem"), "its registry")
+            return "SKIPPED", (f"not launched — `{sc.get('package', '?')}` is not on {registry} "
+                               f"(hallucinated or not yet registered)")
         if x.get("error_kind") == "misconfigured":
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
@@ -244,7 +255,8 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
         entry = entries.get(lab["name"]) or {}
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
                              clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
-                             spec=_spec_of(entry) if with_spec else None))
+                             spec=_spec_of(entry) if with_spec else None,
+                             refused=lab["x-mcpgawk"].get("error_kind") == "not-launched"))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
         if with_spec:
@@ -365,8 +377,12 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
         # follow-up that is actually true for the run it's in.
         out.append(f"  {n_auth} {'needs' if n_auth == 1 else 'need'} credentials before "
                    f"{'it' if n_auth == 1 else 'they'} can be scanned.")
-    elif counts["SKIPPED"]:
+    elif any(r.state == "SKIPPED" and not r.refused for r in rows):
         out.append("  Local servers were not launched. Re-run with --yes to scan them too.")
+    elif counts["SKIPPED"]:
+        # Only refusals are skipped: --yes would not launch them, so never suggest it.
+        out.append("  A server names a package its registry does not have — it was not launched. "
+                   "Check the name before you trust it.")
     elif counts["REVIEW"] or counts["INCOMPLETE"]:
         out.append("  Look closer at one:  mcpgawk scan --only <name> --detail")
     return "\n".join(out)

@@ -379,3 +379,29 @@ def summarise(limit: int = 5000, path: str | None = None, window_days: int = 7) 
         # and that gap must be countable rather than a silent null in each row.
         "no_session": sum(1 for r in rows if not r.get("session")),
     }
+
+
+def calls_by_day(days: int = 14, path: str | None = None, now=None, limit: int = 200_000) -> list[dict]:
+    """The daily series behind the panel's calls chart, oldest day first, empty days included as zeros.
+
+    Same rule as `summarise`, so the chart and the headline beside it can never disagree: `allow` and
+    `deny` were checked against an approved baseline (`deny` is the block), `defer` was NOT checked.
+    A record with any other decision, or a timestamp that is not an ISO date, is left out rather than
+    guessed into a bar. Days are UTC calendar days ending on `now` (injectable, so no test depends on
+    the real clock)."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    order = [(now.date() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+    series = {d: {"day": d, "allowed": 0, "blocked": 0, "not_checked": 0, "checked": 0, "total": 0} for d in order}
+    field = {"allow": "allowed", "deny": "blocked", "defer": "not_checked"}
+    for r in read(limit=limit, path=path):
+        key = field.get(r.get("decision"))
+        day = str(r.get("ts") or "")[:10]
+        if key is None or day not in series:
+            continue
+        b = series[day]
+        b[key] += 1
+        b["total"] += 1
+        if key != "not_checked":
+            b["checked"] += 1
+    return [series[d] for d in order]

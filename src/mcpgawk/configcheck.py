@@ -35,7 +35,7 @@ from typing import Any
 
 from .ambient import _CREDENTIAL_NAME
 from .signals import Finding, _credential_line
-from .supplychain import _split_npm_spec, extract_package
+from .supplychain import _split_npm_spec, registry_target
 
 #: Registry of every kind this module may emit — the canary test walks it both ways (every kind
 #: literal below is registered; every registered kind has a firing fixture).
@@ -64,9 +64,9 @@ def _unpinned_package(name: str, entry: dict[str, Any]) -> list[Finding]:
     command = entry.get("command") or ""
     if not command:
         return []                                   # remote servers have no launch spec
-    pkg = extract_package(command, entry.get("args") or [])
+    pkg = registry_target(command, entry.get("args") or [])
     if not pkg:
-        return []                                   # bare local binary — supplychain's own rule: skip, never guess
+        return []                                   # not a registry package (a path, a script, `uv run`, a git URL) — skip, never guess
     eco, spec = pkg
     if eco == "npm":
         _, pin = _split_npm_spec(spec)
