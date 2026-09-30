@@ -30,6 +30,12 @@ person per month for up to 3 machines: start a free 7-day trial at https://mcp.g
 install fetches the paid engine and turns those on — one more command, nothing else to set up.
 
 <p align="center">
+  <a href="https://mcp.gawk.dev/#watch"><img src="https://mcp.gawk.dev/assets/video/mcpgawk-launch-poster.jpg" width="720"
+       alt="mcpgawk in 64 seconds: a tool you approved changes in an update, and mcpgawk refuses the call until you decide. Watch the video."></a>
+</p>
+<p align="center"><sub><b>Watch: mcpgawk in 64 seconds.</b> A tool you approved changes in an update; mcpgawk refuses the call until you decide.</sub></p>
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif"
        alt="mcpgawk demo: a server is approved, changes afterwards, and the guard blocks the tool that appeared">
 </p>
