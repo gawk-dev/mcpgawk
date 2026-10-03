@@ -196,7 +196,7 @@ def _wants_source_audit(argv: list[str]) -> bool:
 _AUDIT_NEEDS_PLATFORM = (
     "mcpgawk verify --audit-source: source audit is a mcpgawk Platform capability and the Platform "
     "isn't installed in this environment.\n"
-    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "  7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "Behavioural verification itself is free: re-run without --audit-source / --source-dir."
 )
 

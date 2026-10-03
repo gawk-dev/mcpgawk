@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.gawk-dev/mcpgawk",
+  "title": "mcpgawk",
+  "description": "Measure MCP servers, pin the approved tool surface, refuse calls to tools that changed. Local-first.",
+  "websiteUrl": "https://mcp.gawk.dev",
+  "repository": {
+    "url": "https://github.com/gawk-dev/mcpgawk",
+    "source": "github"
+  },
+  "version": "0.1.68",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcpgawk",
+      "version": "0.1.68",
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "run the MCP server over stdio"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

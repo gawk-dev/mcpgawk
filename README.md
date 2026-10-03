@@ -7,6 +7,7 @@
 <p align="center"><em>One gateway in the path. On your machine.</em></p>
 
 # mcpgawk
+<!-- mcp-name: io.github.gawk-dev/mcpgawk -->
 
 [![PyPI](https://img.shields.io/pypi/v/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
 [![Python](https://img.shields.io/pypi/pyversions/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
@@ -24,8 +25,8 @@ you approved, and blocks the ones that changed. It runs on your machine and uplo
 The same engine powers **mcpgawk Platform**: `mcpgawk enforce` puts one endpoint in front of the
 whole fleet with a key per caller, policy on every call and a hash-chained audit log, and
 `mcpgawk monitor` watches the servers you approved around the clock and tells you when one drifts.
-This free layer is the seeing and the blocking underneath it. mcpgawk Platform is £29 per
-person per month for up to 3 machines: start a free 7-day trial at https://mcp.gawk.dev/trial.html
+This free layer is the seeing and the blocking underneath it. mcpgawk Platform is one subscription
+per person for up to 3 machines: start a free 7-day trial at https://mcp.gawk.dev/trial.html
 (no card) or subscribe at https://mcp.gawk.dev/subscribe. Then `mcpgawk login <key>` on this same
 install fetches the paid engine and turns those on — one more command, nothing else to set up.
 
@@ -96,6 +97,8 @@ request, used or not.
 uv tool install --force mcpgawk      # or: pipx install --force mcpgawk
 mcpgawk                              # finds every agent config on the machine itself
 ```
+
+Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
 
 **Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
 

@@ -1867,7 +1867,8 @@ def _calls_chart(series: list[dict]) -> str:
     pw, ph = W - L - 6, H - B - T
     slot = pw / len(series)
     bw = min(slot * 0.62, 36)
-    y = lambda v: T + ph - v / top * ph
+    def y(v):
+        return T + ph - v / top * ph
     parts = []
     for g in range(0, top + 1, step):
         parts.append(f'<line class="grid" x1="{L}" y1="{y(g):.1f}" x2="{W - 6}" y2="{y(g):.1f}"></line>'

@@ -526,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Free, and included here:\n"
             "  verify    run a server in a sandbox and watch what it actually does\n"
             "  decide    review and approve servers that changed since you trusted them\n\n"
-            "mcpgawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
+            "mcpgawk Platform — continuous protection (https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
             + "Run `mcpgawk <capability>` once subscribed. Scanning, behavioural verification\n"
             + "and the runtime guard stay free and open-source.\n\n"
@@ -862,6 +862,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="use this directory for the sandbox instead of a fresh temp one")
     d.add_argument("--clean", action="store_true",
                    help="delete the sandbox on exit (default: keep it so you can inspect it)")
+
+    # The same server `mcpgawk-mcp` runs, reachable through the one binary so a registry entry or
+    # a client config can say `uvx mcpgawk mcp` without a second console script. Routed AFTER
+    # argparse on purpose: the server ignores argv and blocks on stdin, so an early intercept
+    # (as `verify` has) would turn `mcpgawk mcp --help` — which the doc build runs for every
+    # listed command — into a hang.
+    sub.add_parser(
+        "mcp",
+        help="run mcpgawk as an MCP server over stdio (what `mcpgawk-mcp` runs)",
+        description="Run mcpgawk as an MCP server over stdio — the same server the `mcpgawk-mcp` "
+                    "console script starts. Read-only tools (scan_mcp_fleet, scan_mcp_server); "
+                    "no flags. Example client entry: `uvx mcpgawk mcp`.")
 
     # DISCOVERY ONLY — these never reach argparse at runtime. `_dispatch` intercepts `verify` and
     # the account commands before the parser is built, because each owns its own flags and the free
@@ -1417,7 +1429,7 @@ PLATFORM_COMMANDS = {
 _PLATFORM_COMMAND_UNAVAILABLE = (
     "mcpgawk {cmd}: {desc}.\n"
     "This is a mcpgawk Platform command and the Platform isn't installed in this environment.\n"
-    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "  7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
 )
 
@@ -1450,7 +1462,7 @@ PLATFORM_CAPABILITIES = {
 _PLATFORM_UNAVAILABLE = (
     "mcpgawk {cap}: {desc}.\n"
     "This is a mcpgawk Platform capability and it isn't installed in this environment.\n"
-    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "  7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "  Already have a key? It is in your subscription or trial email.\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
 )
@@ -2119,6 +2131,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if args.cmd == "demo":
         from .demo import run_demo
         return run_demo(sandbox=args.sandbox, clean=args.clean)
+
+    if args.cmd == "mcp":
+        from .mcp_server import main as mcp_main
+        return mcp_main([])
 
     if args.cmd == "panel":
         from .panel import serve as panel_serve
