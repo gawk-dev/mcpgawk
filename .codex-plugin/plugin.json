@@ -1,0 +1,25 @@
+{
+  "name": "mcpgawk",
+  "version": "0.1.0",
+  "description": "Measure the MCP servers your agent calls, record the tool surface you approved, and refuse a changed tool until a person has looked. Local-first.",
+  "author": { "name": "Nativerse", "email": "hello@nativerse-ventures.com", "url": "https://nativerse-ventures.com" },
+  "homepage": "https://mcp.gawk.dev",
+  "repository": "https://github.com/gawk-dev/mcpgawk",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "security", "supply-chain", "drift", "agent", "skill"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "mcpgawk",
+    "shortDescription": "Know what your MCP servers can do, and be told when they change.",
+    "longDescription": "mcpgawk measures every MCP server your agent can reach, records the tool surface you approved, reports any change after that, and with the guard installed refuses a changed tool before the call runs. Approval stays with the person at the keyboard. Nothing is uploaded.",
+    "developerName": "Nativerse",
+    "category": "Security",
+    "capabilities": ["Read", "Execute"],
+    "websiteURL": "https://mcp.gawk.dev",
+    "defaultPrompt": [
+      "Check what this MCP server can do before I add it.",
+      "What can my MCP servers do and what do they cost?",
+      "Did any of my MCP servers change since I approved them?"
+    ]
+  }
+}

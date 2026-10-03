@@ -1,65 +1,88 @@
 ---
 name: mcpgawk
-description: Check what an MCP server can actually do BEFORE trusting it, and catch it changing afterwards. Use whenever the user adds, installs, updates or upgrades an MCP server; asks what their MCP servers can do, cost or risk; mentions MCP 2 / protocol upgrade; or asks whether a server changed. Runs locally — nothing leaves the machine.
+description: Check what an MCP server can actually do before trusting it, record the tool surface you approved, and catch it changing afterwards. Use whenever the user adds, installs, updates or upgrades an MCP server, asks what their MCP servers can do or cost, or wants a changed tool refused until they have looked. Local-first; nothing is uploaded.
 ---
 
-# mcpgawk — measure, approve, and watch MCP servers
+# /mcpgawk — measure, approve, and watch the MCP servers your agent calls
 
-A local CLI. Install once: `uv tool install mcpgawk` (or `pipx install mcpgawk && pipx ensurepath`).
-Verify with `mcpgawk --version`. Nothing is uploaded anywhere; state lives in `~/.mcpgawk` and `~/.gawk`.
+mcpgawk is a local CLI. It records what each MCP tool said when the user approved it, reports any
+change after that, and with the guard installed it refuses a call to a changed tool before it runs.
+State lives in `~/.mcpgawk` and `~/.gawk`. Nothing leaves the machine.
 
-## When the user ADDS or INSTALLS an MCP server
+Install once (ask before running an installer):
 
-Before they wire it into their agent config, measure it:
+    uv tool install --force mcpgawk      # or: pipx install --force mcpgawk
+    mcpgawk --version
 
-    mcpgawk scan --stdio "<command the server runs with>"     # or --http <url>
+## Rules for you, the agent
 
-Read the report to the user honestly: how many tools, the token cost per message, which tools can
-write or reach the network, and any findings. If the server is already in their agent's config, a
-bare `mcpgawk` scans the whole fleet — it will ASK before launching local servers; relay that
-consent question to the user, never answer it for them.
+1. **Never run `mcpgawk approve` or `mcpgawk decide`.** Both refuse to run inside an agent session,
+   on purpose: accepting a changed tool surface is the person's decision. Print the exact command
+   and let the user run it in their own terminal.
+2. Relay consent questions verbatim. A bare `mcpgawk` asks before it launches a local server;
+   `mcpgawk verify` launches servers in a sandbox and says so. Do not answer for the user.
+3. Report coverage statements exactly as printed. mcpgawk distinguishes "clean" from "not checked";
+   that distinction is the point. Never summarise a partial picture as a clean one.
+4. If a call is refused with a `[mcpgawk guard] SECURITY BLOCK` message: stop, do not retry, do not
+   reach the same result through another tool, and do not run any mcpgawk command to change the
+   baseline. Tell the user what was blocked and that `mcpgawk decide` in their own terminal shows
+   the change.
 
-Then pin what they accepted:
+## When the user adds or installs an MCP server
 
-    mcpgawk scan --track        # records the baseline
-    mcpgawk approve <server>    # marks THIS surface as the trusted one
+Measure it before it goes into any agent config:
 
-## When a server UPDATES — including the MCP-2 (2026-07-28) upgrade wave
+    mcpgawk scan --http <url>                    # a remote server
+    mcpgawk scan --stdio "<command the server runs with>"
 
-An upgraded server re-presents its whole surface while claiming to be the same server. That is
-exactly the shape of a rug-pull, so audit the upgrade instead of re-trusting it blind:
+Read the report to the user plainly: how many tools, the token cost at connect, which tools can
+write or reach the network, and any findings. The first scan records the server's baseline. Then
+hand over the approval:
 
-    mcpgawk scan --track        # BEFORE upgrading: baseline
-    # ... user upgrades the server ...
-    mcpgawk scan --track        # AFTER: mcpgawk diffs against the approved baseline
+    mcpgawk approve <server>                     # the USER runs this, not you
 
-Anything that changed is reported as drift — new tools, changed descriptions, changed schemas.
-Walk the user through the diff; `mcpgawk decide` records their verdict. Only `approve` moves the
-baseline; a drifted server stays flagged until a human decides.
+## When the user asks what their servers can do, or what they cost
 
-## When the user asks "what can my MCP servers do / what do they cost?"
+    mcpgawk                                      # every server in every agent config on this machine
+    mcpgawk panel                                # the local control panel (a tokened 127.0.0.1 URL)
 
-    mcpgawk               # fleet report in the terminal
-    mcpgawk panel         # local web panel (tokened 127.0.0.1 URL)
+## When a server updates, or the user suspects it changed
 
-## When the user wants behavioural proof, not just declarations
+    mcpgawk scan                                 # re-scans; prints DRIFT against the approved baseline
+    mcpgawk changes <server>                     # what the server's tools did over time
 
-    mcpgawk verify        # launches each server in a sandbox and watches what it actually does
+A changed description, a changed input schema, a tool added or removed: each is printed with the
+old and new text. Walk the user through the diff. Only `mcpgawk approve` moves the baseline, and
+only the user runs it. A drifted server stays flagged until a person decides.
 
-Verify launches servers (it says so and asks). Report its coverage statements verbatim — it
-distinguishes "clean" from "not checked", and that distinction is the point. Note: servers that
-speak ONLY the 2026-07-28 revision cannot be behaviourally verified yet (upstream TypeScript SDK);
-`verify` reports this as no-coverage rather than pretending.
+## When the user wants the refusal to happen automatically
 
-## Ongoing protection
+    mcpgawk guard install                        # one pre-execution hook; checks every MCP tool call
+    mcpgawk guard status
 
-    mcpgawk protect       # installs a pre-call guard hook into the user's agent
+Six clients expose a hook point today (Claude Code, Codex, Cursor, Gemini CLI, Windsurf, Kimi); the
+docs list the rest and what covers them. After install, a tool that changed since approval, or a
+tool that appeared after approval, is refused at call time with a reason the agent can read.
 
-After this, a tool that appears post-approval is blocked at call time with a clear reason.
+## When the user wants behaviour, not declarations
 
-## Rules for the agent using this skill
+    mcpgawk verify <config.json>                 # runs local servers in a no-egress sandbox and watches
 
-- Never launch a server without relaying mcpgawk's consent prompt to the user first.
-- Never summarise a finding away: report tool counts, token costs and drift verbatim.
-- `mcpgawk demo` shows the whole story in a throwaway sandbox (`mcpgawk demo --clean` removes it) —
-  offer it when the user wants to see the point before trusting their own fleet to it.
+Remote (http/sse) servers cannot be sandboxed; verify says so and runs output checks only. Report
+that limit as printed.
+
+## Try it on a server that changes on purpose
+
+A public test server flips its tool surface every ten minutes, harmless by construction:
+
+    mcpgawk scan --http https://mcpgawk-testserver.vercel.app/rugpull/mcp
+
+Scan, let the user approve, wait for the flip, scan again, and the change is reported. With the
+guard installed, the changed tool's call is refused. Walkthrough: https://mcp.gawk.dev/docs/rugpull.html
+
+## Run mcpgawk as an MCP server
+
+Any MCP client can call mcpgawk's own scan tools: `mcpgawk-mcp` over stdio (from 0.1.68 also
+`mcpgawk mcp`). Useful when the agent should audit the servers it is sitting next to.
+
+Docs: https://mcp.gawk.dev/docs/ · Source: https://github.com/gawk-dev/mcpgawk (Apache-2.0)

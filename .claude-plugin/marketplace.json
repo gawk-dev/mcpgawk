@@ -1,0 +1,12 @@
+{
+  "name": "mcpgawk",
+  "description": "A local checkpoint between your coding agent and the MCP servers it calls. A tool that changed after you approved it is refused until you decide.",
+  "owner": { "name": "Nativerse", "email": "hello@nativerse-ventures.com", "url": "https://github.com/gawk-dev" },
+  "plugins": [
+    {
+      "name": "mcpgawk",
+      "source": "./",
+      "description": "Measure MCP servers, record the approved tool surface, and refuse a changed tool until a person has looked."
+    }
+  ]
+}

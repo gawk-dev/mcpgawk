@@ -1,0 +1,10 @@
+{
+  "name": "mcpgawk",
+  "description": "Measure the MCP servers your agent calls, record the tool surface you approved, and refuse a changed tool until a person has looked. Local-first.",
+  "version": "0.1.0",
+  "author": { "name": "Nativerse", "email": "hello@nativerse-ventures.com" },
+  "license": "Apache-2.0",
+  "homepage": "https://mcp.gawk.dev",
+  "repository": "https://github.com/gawk-dev/mcpgawk",
+  "keywords": ["mcp", "security", "supply-chain", "drift", "agent", "skill"]
+}
