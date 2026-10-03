@@ -9,6 +9,10 @@
   "license": "Apache-2.0",
   "homepage": "https://mcp.gawk.dev",
   "repository": "https://github.com/gawk-dev/mcpgawk",
+  "documentationUrl": "https://mcp.gawk.dev/docs/",
+  "privacyPolicyUrl": "https://mcp.gawk.dev/privacy.html",
+  "termsOfServiceUrl": "https://mcp.gawk.dev/terms.html",
+  "supportUrl": "https://github.com/gawk-dev/mcpgawk/issues",
   "icon": "assets/brand/icon.png",
   "keywords": [
     "mcp",
