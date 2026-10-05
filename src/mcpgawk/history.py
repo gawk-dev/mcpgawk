@@ -446,6 +446,27 @@ PROJECTION_NAME = "guard-baseline.json"
 PROJECTION_SCHEMA = "gawk.guard-projection/2"
 
 
+def _permission_growth(approved: dict[str, Any], last: dict[str, Any]) -> dict[str, list[str]]:
+    """`{tool: [what grew]}` between the approved record and the last sighting, by
+    `drift.DriftReport.permission_changes`. Empty when nothing grew or the records cannot be
+    compared — never a guess."""
+    from . import drift
+    try:
+        report = drift.compare(approved, last)
+    except Exception:                                  # noqa: BLE001 — a projection must still write
+        return {}
+    if report is None:
+        return {}
+    keys = dict.fromkeys(list(report.annotation_changed) + list(report.schema_changed))
+    out: dict[str, list[str]] = {}
+    for key in keys:
+        if isinstance(key, str) and key.startswith("tool."):
+            grown = report.permission_changes(key)
+            if grown:
+                out[key[len("tool."):]] = grown
+    return out
+
+
 def projection_path(path: str | None = None) -> str:
     return os.path.join(os.path.dirname(path or default_path()), PROJECTION_NAME)
 
@@ -507,6 +528,13 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
                     measured = last.get("measured_at")
                     if isinstance(measured, str):
                         row["seen_at"] = measured
+                    # PERMISSION GROWTH since approval, judged by scan's own `compare` so the guard
+                    # refuses exactly what scan reports as an escalation or a new destination
+                    # parameter (FOUNDER 2026-10-06). `seen` carries the description only; without
+                    # this, a dropped read-only or a new `forward_to` was allowed (measured).
+                    grown = _permission_growth(rec, last)
+                    if grown:
+                        row["permission_changes"] = grown
                 else:
                     row["seen_not_compared"] = drift.TOOLS_NOT_COMPARED.format(server=key)
             # The APPROVED parameter names per tool, so the hook can catch the smuggled-field

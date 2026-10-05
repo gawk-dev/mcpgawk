@@ -120,3 +120,56 @@ def test_two_servers_rewritten_to_one_name_are_ambiguous_and_strict_refuses(tmp_
     pulled = {"mcp:a.b": _approved(["a.b"], pulled=True), "mcp:a b": _approved(["a b"])}
     assert _denied(_call(_save(tmp_path / "p", pulled, strict=False), "a_b")), \
         "either candidate's rug pull must refuse the call"
+
+
+# ── 0.1.71 false block (MEASURED 2026-10-06): the rewrite is Claude Code's, not every agent's ──────
+
+def _windsurf(path, server, tool):
+    """Windsurf supplies the RAW config name (agents._parse_windsurf composes mcp__<raw>__<tool>)."""
+    event = {"tool_info": {"mcp_server_name": server, "mcp_tool_name": tool,
+                           "mcp_tool_arguments": {}}}
+    output, *_rest = guard_hook._decide(event, path, "windsurf")
+    return output
+
+
+def _collision(tmp_path, *, strict=False):
+    return _save(tmp_path, {
+        "mcp:a_b": _approved(["a_b"], tools={"read": "aaaaaaaaaaaa", "extra": "cccccccccccc"}),
+        "mcp:a.b": _approved(["a.b"]),
+    }, strict=strict)
+
+
+def test_a_raw_name_is_not_judged_against_a_server_whose_name_merely_rewrites_to_it(tmp_path):
+    """Windsurf's `a_b` IS `a_b`: `a.b`'s baseline has no say over it. 0.1.71 denied a_b's own
+    approved tool `extra` because a.b lacks it."""
+    path = _collision(tmp_path)
+    assert _windsurf(path, "a_b", "extra") is None, "a false block on a_b's own approved tool"
+    assert _windsurf(path, "a_b", "read") is None
+
+
+def test_a_raw_dotted_name_is_still_guarded_by_its_own_baseline(tmp_path):
+    path = _save(tmp_path, {"mcp:dot.server": _approved(["dot.server"], pulled=True)}, strict=False)
+    # Windsurf denies by exit code, so any output from the hook is the deny.
+    assert _windsurf(path, "dot.server", "read") is not None, "a rug pull reached through Windsurf passed"
+
+
+def test_a_collision_deny_names_the_server_whose_baseline_refused(tmp_path):
+    """Claude Code really cannot tell `a.b` from `a_b`, so refusing is right; saying a_b's baseline
+    lacks `extra` is not — it is a.b's."""
+    path = _collision(tmp_path)
+    output = _call(path, "a_b", "extra")
+    assert _denied(output)
+    reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "approved baseline for MCP server 'a_b'" not in reason, reason
+    assert "'a.b'" in reason, reason
+    # Neither server "added" anything: the truth is that two servers share one name in the agent.
+    assert "added a tool" not in reason, reason
+    assert "cannot tell which" in reason, reason
+    # The true sentence is kept — it is what the spool and panel classify the deny by.
+    assert "'extra' is not in the approved baseline for MCP server 'a.b'" in reason, reason
+    from mcpgawk import decision
+    assert decision.reason_code(reason) == decision.REASON_TOOL_ADDED, reason
+    assert reason.count("SECURITY BLOCK") == 1 and reason.count("[mcpgawk guard]") <= 1, reason
+    human = output.get("systemMessage") or ""
+    assert "was not there when you approved" not in human, human
+    assert "a_b" in human and "a.b" in human, human

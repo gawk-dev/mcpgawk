@@ -463,11 +463,40 @@ class DriftReport:
                 out.append(f"gained {hint}")
         return out
 
+    def permission_changes(self, key: str) -> list[str]:
+        """What this item can now do that the person never approved: an annotation escalation, or
+        a new parameter that names a destination. The guard REFUSES on these (FOUNDER 2026-10-06,
+        "Block permission growth"); every other schema change waits for sign-off without blocking
+        (FOUNDER 2026-08-15). One rule, read by scan and by the guard projection."""
+        return (self.escalations(key)
+                + [f"new destination parameter {p}" for p in self.gained_params(key)
+                   if destination_param(p)])
+
     def of_kind(self, kind: str) -> dict[str, list[str]]:
         """Split the typed `{kind}.{name}` keys back out for rendering."""
         pre = f"{kind}."
         return {field: [k[len(pre):] for k in getattr(self, field) if k.startswith(pre)]
                 for field in ("added", "removed", "changed")}
+
+
+#: Name tokens that make a NEW parameter a destination: somewhere the call can send, write or
+#: upload to. Measured on every parameter the top servers added across 86 real releases (live probe,
+#: 2026-10-04): flags exactly `url`, `filePath`, `extraHttpHeaders`, `filePaths` — each a real new
+#: capability — and none of `target`, `pageId`, `connectionId`. `output` is deliberately absent
+#: (`outputFormat` is not a destination). Pinned by tests/test_guard_permission_growth.py.
+DESTINATION_TOKENS = frozenset({
+    "url", "urls", "uri", "endpoint", "webhook", "callback", "host", "hostname", "domain",
+    "recipient", "recipients", "to", "cc", "bcc", "email", "emails", "forward", "destination",
+    "dest", "sink", "upload", "save", "path", "paths", "filepath", "filepaths", "file", "files",
+    "dir", "directory", "folder", "header", "headers"})
+
+
+def destination_param(name: str) -> bool:
+    """True when a parameter's NAME says it is somewhere the call sends, writes or uploads to."""
+    if not isinstance(name, str):
+        return False
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+    return bool({t for t in re.split(r"[^a-z0-9]+", snake) if t} & DESTINATION_TOKENS)
 
 
 def _pin_basis_of(rec: dict[str, Any]) -> int | None:
@@ -878,7 +907,8 @@ def render_headline(names: list[str], hostile: list[str] | None = None,
         if esc:
             lines.append((f"  ⛔ {n} {what} CHANGED, and " if not inj else "     Also: ")
                          + f"{', '.join(esc)} now DECLARES MORE POWER than you approved "
-                         f"(a tool marked itself destructive or open-world).")
+                         f"(a tool stopped declaring read-only or idempotent, or started "
+                         f"declaring destructive or open-world).")
             lines.append("     Do NOT approve until you have read what it gained below.")
         return "\n".join(lines)
     return (f"{head}\n"

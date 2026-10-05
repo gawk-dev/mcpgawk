@@ -310,7 +310,8 @@ def _record_from_projection(server: str,
     """`(approved record, note)` — the public-facing half of `_lookup`, kept with this signature so
     `approved_for` / `approved_for_detail` / `tools_comparable` (the paid gateway's contract) are
     unchanged. The strict-mode refusal flag and the full candidate set are only used by `_decide`."""
-    record, note, _refuse, others = _lookup(server, store_path)
+    # The gateway names servers by its own config: raw names, never an agent's rewrite.
+    record, note, _refuse, others = _lookup(server, store_path, rewritten=False)
     if record is None and len(others) == 1:
         # The gateway enforces ONE surface. When `resolve`'s record has no baseline but a single
         # approved record answers to the name, enforcing that one is the more restrictive reading
@@ -327,6 +328,13 @@ def _record_from_projection(server: str,
 _AGENT_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
+#: Agents whose hook payload carries the RAW configured server name, so the name the hook sees is
+#: never a rewrite: Windsurf supplies `mcp_server_name` separately (agents._parse_windsurf). For
+#: these the rewritten-name step would only add false candidates — 0.1.71 denied `a_b`'s own
+#: approved tool because a different server, `a.b`, lacked it (measured 2026-10-06).
+RAW_SERVER_NAME_FORMATS = frozenset({"windsurf"})
+
+
 def agent_server_name(configured: str) -> str:
     """The server segment an agent puts in the tool name for a server configured as `configured`."""
     return _AGENT_UNSAFE.sub("_", configured)
@@ -337,6 +345,19 @@ def _rewritten_to(server: str, names) -> bool:
     the call may be reaching that server even though no name matches verbatim."""
     return any(isinstance(n, str) and n != server and agent_server_name(n) == server
                for n in names)
+
+
+def _candidate_label(server: str, key: str, row: dict) -> str:
+    """The name a candidate record is JUDGED and REPORTED under: the called name when the record
+    answers to it as configured, else its own configured name — so a deny reads "not in the
+    approved baseline for MCP server 'a.b'", never a_b's (0.1.71 said a_b's)."""
+    aliases = row.get("aliases") if isinstance(row.get("aliases"), list) else []
+    if server in aliases:
+        return server
+    for name in _record_names(key, aliases):
+        if isinstance(name, str) and agent_server_name(name) == server:
+            return name
+    return key
 
 
 def _record_names(key: str, aliases) -> list:
@@ -358,8 +379,8 @@ def _could_be_adhoc_target(name: str) -> bool:
     return "/" in name or any(c.isspace() for c in name)
 
 
-def _lookup(server: str,
-            store_path: Path) -> tuple[dict | None, str | None, bool, list[tuple[str, dict]]]:
+def _lookup(server: str, store_path: Path, *,
+            rewritten: bool = True) -> tuple[dict | None, str | None, bool, list[tuple[str, dict]]]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
     `history.json` itself. This hook used to hold its own second reader of the store, kept honest
     only by a test; now it consumes an artefact `history.save` produced, so the two cannot drift.
@@ -422,14 +443,15 @@ def _lookup(server: str,
     identities = raw.get("identities")
     placeholders = raw.get("placeholder_names")
     if isinstance(identities, dict) and isinstance(placeholders, list):
-        record, note, refuse = _resolve_over_identities(server, servers, identities, placeholders)
+        record, note, refuse = _resolve_over_identities(server, servers, identities, placeholders,
+                                                        rewritten=rewritten)
     else:
         record, note, refuse = _resolve_over_approved_only(server, servers)
     others = [(key, row) for key, row in sorted(servers.items())
               if isinstance(row, dict) and row is not record and not row.get("unreadable")
               and isinstance(row.get("tools"), dict)
               and (server in (row.get("aliases") or [])
-                   or _rewritten_to(server, _record_names(key, row.get("aliases"))))]
+                   or (rewritten and _rewritten_to(server, _record_names(key, row.get("aliases")))))]
     return record, note, refuse, others
 
 
@@ -449,8 +471,8 @@ def _approved_row(server: str, servers: dict, key: str) -> tuple[dict | None, st
     return record, None, False
 
 
-def _resolve_over_identities(server: str, servers: dict, identities: dict,
-                             placeholders: list) -> tuple[dict | None, str | None, bool]:
+def _resolve_over_identities(server: str, servers: dict, identities: dict, placeholders: list, *,
+                             rewritten: bool = True) -> tuple[dict | None, str | None, bool]:
     """`history.resolve_all`, step for step, over EVERY record's identity (projection /2):
     exact key, then `mcp:<name>`, then — unless the name is a placeholder label — config-name
     aliases. ONE match is the record; it is enforced only if that record is approved. None or
@@ -473,7 +495,7 @@ def _resolve_over_identities(server: str, servers: dict, identities: dict,
     matches = [key for key, aliases in identities.items()
                if isinstance(aliases, list) and server in aliases]
     how = "an alias of"
-    if not matches:
+    if not matches and rewritten:
         # The AGENT'S name for a configured one: Claude Code rewrites `dot.server` to `dot_server`
         # in the tool name, so no stored name matches verbatim. A step `history.resolve` does not
         # need (it is given configured names); without it an approved server was deferred as never
@@ -529,10 +551,10 @@ def _resolve_over_approved_only(server: str,
 
 
 def _row_evidence(record: dict | None, tool: str):
-    """`(approved {tool: hash}, approved props for this tool, last-seen hash, seen_at)` from one
-    projection row. All None for no row."""
+    """`(approved {tool: hash}, approved props for this tool, last-seen hash, seen_at, permission
+    changes since approval)` from one projection row. All None for no row."""
     if record is None:
-        return None, None, None, None
+        return None, None, None, None, None
     _tools = record.get("tools")
     approved = dict(_tools) if isinstance(_tools, dict) else None
     seen_hash = seen_at = approved_props = None
@@ -549,13 +571,23 @@ def _row_evidence(record: dict | None, tool: str):
         _p = _props.get(tool)
         if isinstance(_p, list):
             approved_props = [str(x) for x in _p]
-    return approved, approved_props, seen_hash, seen_at
+    grown = None
+    _pc = record.get("permission_changes")
+    if isinstance(_pc, dict) and isinstance(_pc.get(tool), list):
+        grown = [str(x) for x in _pc[tool] if x] or None
+    return approved, approved_props, seen_hash, seen_at, grown
 
 
 def _judge(core, server: str, tool: str, record: dict | None, observations, sources, args):
     """`core.verdict` against ONE projection row, tolerant of an older decision core."""
-    approved, approved_props, seen_hash, seen_at = _row_evidence(record, tool)
+    approved, approved_props, seen_hash, seen_at, grown = _row_evidence(record, tool)
     args = args if isinstance(args, dict) else None
+    try:
+        return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
+                            args=args, approved_props=approved_props, seen_at=seen_at,
+                            permission_changes=grown)
+    except TypeError:
+        pass
     try:
         return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
                             args=args, approved_props=approved_props, seen_at=seen_at)
@@ -567,6 +599,25 @@ def _judge(core, server: str, tool: str, record: dict | None, observations, sour
                                 live_hash=seen_hash, args=args, approved_props=approved_props)
         except TypeError:
             return core.verdict(server, tool, approved, observations, sources)
+
+
+def _collision_reason(core_reason: str, server: str, label: str, tool: str) -> str:
+    """The deny for a call whose name the agent gives two servers (Claude Code calls `a.b` and
+    `a_b` both `a_b`). The core's first sentence, judged under `label`, is true and carries the
+    reason code; its "Tell the user: '<label>' added a tool" line is not (neither server added
+    anything), so the truth — the ambiguity — replaces it. The no-retry line is kept verbatim."""
+    lines = core_reason.splitlines()
+    first = lines[0] if lines else ""
+    for prefix in ("[mcpgawk guard] ", "SECURITY BLOCK (mcpgawk). "):
+        first = first[len(prefix):] if first.startswith(prefix) else first
+    first = first.split(". ", 1)[0].rstrip(".") + "."
+    final = next((ln for ln in lines if ln.startswith("This decision is final")), "")
+    return (f"SECURITY BLOCK (mcpgawk). Your agent gives two different MCP servers "
+            f"the one name '{server}', so mcpgawk cannot tell which one this call reaches. {first}"
+            f"\n{final}\nTell the user exactly this: two MCP servers in the agent config, '{label}' "
+            f"and another, are both called '{server}' by this agent, so mcpgawk refused '{tool}' "
+            f"rather than guess which one it reaches. Renaming one of them in the agent config "
+            f"removes the ambiguity.")
 
 
 def _attribute(reason: str, server: str, key: str) -> str:
@@ -604,8 +655,9 @@ def _decide(event: dict, store_path: Path | None,
     server, tool = parsed
 
     store = store_path or history_path()
-    record, note, strict_refuse, others = _lookup(server, store)
-    approved, _props, _seen, seen_at = _row_evidence(record, tool)
+    record, note, strict_refuse, others = _lookup(
+        server, store, rewritten=fmt not in RAW_SERVER_NAME_FORMATS)
+    approved, _props, _seen, seen_at, _grown = _row_evidence(record, tool)
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
@@ -643,6 +695,7 @@ def _decide(event: dict, store_path: Path | None,
         sources = _session_sources(_session_id(event), behaviour)
 
     verdict, basis, reason = _judge(core, server, tool, record, observations, sources, _args)
+    collision: str | None = None
     if verdict != core.DENY:
         # MOST RESTRICTIVE ACROSS EVERY CANDIDATE. `record` is what `history.resolve` picks; every
         # other approved record answering to this name as a config alias is judged too, and any
@@ -650,8 +703,12 @@ def _decide(event: dict, store_path: Path | None,
         # protection an approved alias record gave (credential-discriminator shape: `resolve`
         # picks a never-approved `mcp:x` over the approved `mcp:x#<fp>` the agent may be calling).
         for key, row in others:
-            v, b, r = _judge(core, server, tool, row, observations, sources, _args)
+            label = _candidate_label(server, key, row)
+            v, b, r = _judge(core, label, tool, row, observations, sources, _args)
             if v == core.DENY:
+                if label != server:
+                    collision = label
+                    r = _collision_reason(r, server, label, tool)
                 verdict, basis, reason = v, b, _attribute(r, server, key)
                 break
     # Checked means there was something to check AGAINST: an approved surface for this server, or
@@ -666,6 +723,9 @@ def _decide(event: dict, store_path: Path | None,
         code_fn = getattr(core, "reason_code", None)
         if callable(line_fn) and callable(code_fn):
             human = line_fn(server, tool, code_fn(reason))
+        if collision:
+            human = (f"mcpgawk blocked {server}.{tool} — your agent calls two servers '{server}', and "
+                     f"'{collision}' does not allow this call. Rename one of them in the agent config.")
         return _deny(fmt, reason, human), note, basis, checked, reason, None
     # Slice 5 (2026-09-05): context for the running agent — on a checked pass, once per session
     # per server+tool; on every defer. Composed here, EMITTED by main() for Claude Code only, and

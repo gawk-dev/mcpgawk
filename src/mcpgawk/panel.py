@@ -3843,9 +3843,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">rewrote its own '
                         'description after you approved it — the rug-pull signature.</span>')
         for t in [x for x in (_esc_ or []) if x not in (_inj or [])][:2]:
+            _what = ", ".join(rep.escalations(t)) or "a safety annotation widened"
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">now declares more '
-                        'power than you approved — it marked itself destructive or open-world '
-                        'after approval.</span>')
+                        f'power than you approved — {_esc(_what)} after approval.</span>')
         for t in rep.added[:2]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">appeared after you '
                         'approved this server. A tool that shows up later is how a malicious '
@@ -3867,16 +3867,21 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                                      'detailed diffs.</span>')
 
     def _dec_chip(k: str) -> str:
-        """What enforcement is ACTUALLY doing about this pending drift. The hook denies by
-        tool-name projection, so a schema/annotation-only change (pending since 2026-08-15,
-        the audit-B2 rug-pull class) leaves every call passing — a flat "Blocked" chip here
-        claimed enforcement that was not happening, the worst lie a security product can
-        render. [CLAUDE-PROPOSED, undecided]: whether schema drift should also deny."""
+        """What enforcement is ACTUALLY doing about this pending drift — the guard's own rules,
+        never a guess. A description change or a new tool is blocked; PERMISSION GROWTH (an
+        annotation escalation or a new destination parameter) is blocked by the same projection
+        rule the hook reads (FOUNDER 2026-10-06); any other schema change waits for a decision and
+        calls still pass (FOUNDER 2026-08-15). A flat "Blocked" for that last case claimed
+        enforcement that was not happening, the worst lie a security product can render."""
         base, latest = _h.approved(store, k), _h.last(store, k)
         if base and latest and base.get("items") != latest.get("items"):
             return '<span class="chip bad"><i></i>Blocked</span>'
-        return ('<span class="chip warn"><i></i>NOT blocked — schema/annotations only, '
-                'calls still pass</span>')
+        grown = _h._permission_growth(base, latest) if base and latest else {}
+        if grown:
+            what = "; ".join(f"{t}: {', '.join(v)}" for t, v in sorted(grown.items()))
+            return f'<span class="chip bad"><i></i>Blocked — {_esc(what)}</span>'
+        return ('<span class="chip warn"><i></i>NOT blocked — an ordinary schema change, '
+                'calls still pass until you decide</span>')
 
     def _dec_who(k: str) -> str:
         at, by = _h.approval_provenance(store, k)

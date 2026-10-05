@@ -75,7 +75,8 @@ def declared_verdict(server: str, tool: str,
                      live_hash: str | None = None,
                      args: dict | None = None,
                      approved_props: list[str] | None = None,
-                     seen_at: str | None = None) -> tuple[str, str, str | None]:
+                     seen_at: str | None = None,
+                     permission_changes: list[str] | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -109,6 +110,13 @@ def declared_verdict(server: str, tool: str,
     # not compute one, is missing evidence — and missing evidence is never a deny here.
     if live_hash and approved_hash and live_hash != approved_hash:
         return DENY, BASIS_DECLARED, changed_reason(server, tool, approved_hash, live_hash, seen_at)
+    # PERMISSION GROWTH. The description hash above cannot see a dropped read-only or a new
+    # destination parameter; the projection carries them, judged by scan's own compare
+    # (FOUNDER 2026-10-06, "Block permission growth"). Any other schema change still waits for
+    # sign-off without blocking (FOUNDER 2026-08-15, below).
+    if permission_changes:
+        return DENY, BASIS_DECLARED, permission_changed_reason(server, tool, permission_changes,
+                                                               seen_at)
     # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
     # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
     # call is FILLING a parameter the human never approved, and it is credential-shaped
@@ -142,7 +150,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
             live_hash: str | None = None,
             args: dict | None = None,
             approved_props: list[str] | None = None,
-            seen_at: str | None = None) -> tuple[str, str, str | None]:
+            seen_at: str | None = None,
+            permission_changes: list[str] | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -160,7 +169,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
     """
     decision, basis, reason = declared_verdict(server, tool, approved, live_hash,
                                                args=args, approved_props=approved_props,
-                                               seen_at=seen_at)
+                                               seen_at=seen_at,
+                                               permission_changes=permission_changes)
     if decision == DENY:
         return decision, basis, reason
 
@@ -211,6 +221,29 @@ def changed_reason(server: str, tool: str, approved_hash: str, live_hash: str,
         f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
         f"they approved it, mcpgawk blocked the call, and they should run `mcpgawk decide` "
         f"themselves to read what changed before deciding whether to trust it."
+    )
+
+
+def permission_changed_reason(server: str, tool: str, changes: list[str],
+                              seen_at: str | None = None) -> str:
+    """The denial for permission growth after approval: same name, and the tool can now do more
+    than the person approved (declared escalation or a new destination parameter). Same properties
+    as `changed_reason`, and its wording, so it classifies as REASON_TOOL_CHANGED."""
+    when = (f"as last seen {seen_at} — not this call; a change since then is not yet measured"
+            if seen_at else "now")
+    what = "; ".join(changes)
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
+        f"approved it — it can now do more than was approved ({what}, {when}). A tool that "
+        f"quietly gains the power to write, send or stop being read-only is how a malicious update "
+        f"arrives without changing a word of its description.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline — approval requires the person at the keyboard, and attempting it from "
+        f"inside an agent session is itself treated as a red flag.\n"
+        f"Tell the user exactly this: the MCP server '{server}' changed what the tool '{tool}' "
+        f"can do after they approved it ({what}), mcpgawk blocked the call, and they should run "
+        f"`mcpgawk decide` themselves to review the change before deciding whether to trust it."
     )
 
 
