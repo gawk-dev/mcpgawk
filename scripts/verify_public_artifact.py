@@ -64,23 +64,36 @@ def _is_sdist(path: Path) -> bool:
     return path.name.endswith((".tar.gz", ".tgz"))
 
 
-def _members(path: Path) -> list[str]:
-    if path.suffix in (".whl", ".zip"):
-        with zipfile.ZipFile(path) as z:
-            return z.namelist()
-    if _is_sdist(path):
-        with tarfile.open(path) as t:
-            return t.getnames()
-    raise ValueError(f"{path.name}: not a wheel or sdist")
+def _scanned(member: str) -> bool:
+    """Every member `check` reads the bytes of: metadata, and anything §4 or §5 may scan."""
+    return member.endswith(("METADATA", "PKG-INFO") + _TEXTUAL + (".json",))
 
 
-def _read(path: Path, member: str) -> bytes:
+def _contents(path: Path) -> tuple[list[str], dict[str, bytes]]:
+    """Every member name, and the bytes of every member `check` reads, from ONE pass.
+
+    Reading member by member re-opened a gzip tar per read and re-walked it from the start: the
+    real public sdist took 418 s to check (measured 2026-10-05). A wheel is a zip and seeks
+    cheaply, but one pass for both keeps a single reading rule.
+    """
     if path.suffix in (".whl", ".zip"):
         with zipfile.ZipFile(path) as z:
-            return z.read(member)
+            names = z.namelist()
+            return names, {m: z.read(m) for m in names if _scanned(m)}
+    if not _is_sdist(path):
+        raise ValueError(f"{path.name}: not a wheel or sdist")
+    names, out = [], {}
     with tarfile.open(path) as t:
-        f = t.extractfile(member)
-        return f.read() if f else b""
+        for info in t:
+            names.append(info.name)
+            if _scanned(info.name):
+                f = t.extractfile(info)
+                out[info.name] = f.read() if f else b""
+    return names, out
+
+
+def _members(path: Path) -> list[str]:
+    return _contents(path)[0]
 
 
 def _logical(path: Path, member: str) -> str:
@@ -93,7 +106,7 @@ def _logical(path: Path, member: str) -> str:
 def check(path: Path) -> list[str]:
     """Every reason this artefact must not be published. Empty list means clean."""
     problems: list[str] = []
-    members = _members(path)
+    members, blobs = _contents(path)
     pairs = [(m, _logical(path, m)) for m in members]
 
     # 1. PAID CODE — the failure this file exists to prevent.
@@ -106,7 +119,7 @@ def check(path: Path) -> list[str]:
     # 2. A DECLARED DEPENDENCY on the paid half would install it even with no file present.
     for raw, m in pairs:
         if m.endswith(("METADATA", "PKG-INFO")):
-            for line in _read(path, raw).splitlines():
+            for line in blobs[raw].splitlines():
                 low = line.lower()
                 if low.startswith(b"requires-dist:") and b"gawk" in low and b"platform" in low:
                     problems.append(f"paid dependency declared: {line.decode(errors='replace')}")
@@ -135,7 +148,7 @@ def check(path: Path) -> list[str]:
         if not m.endswith(_TEXTUAL) or "node_modules/" in m or m.startswith("tests/"):
             continue
         try:
-            blob = _read(path, raw)
+            blob = blobs[raw]
         except Exception:                         # noqa: BLE001 — unreadable member is reported
             problems.append(f"could not read {m} to scan for secrets")
             continue
@@ -165,7 +178,7 @@ def check(path: Path) -> list[str]:
         if not m.endswith(_TEXTUAL + (".json",)) or m.startswith("tests/"):
             continue
         try:
-            blob = _read(path, raw)
+            blob = blobs[raw]
         except Exception:                         # noqa: BLE001 — already reported above if textual
             continue
         # SPELLED APART on purpose. Written whole, these literals make THIS FILE match its own

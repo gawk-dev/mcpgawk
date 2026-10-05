@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -319,6 +320,33 @@ def _record_from_projection(server: str,
     return record, note
 
 
+#: What an agent does to a configured server name when it builds `mcp__<name>__<tool>`. MEASURED
+#: 2026-10-05 with Claude Code 2.1.289 (`claude -p` init event): `dot.server`, `space server` and
+#: `slash/server` became `dot_server`, `space_server`, `slash_server`. Pinned by
+#: tests/test_guard_agent_rewritten_names.py.
+_AGENT_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def agent_server_name(configured: str) -> str:
+    """The server segment an agent puts in the tool name for a server configured as `configured`."""
+    return _AGENT_UNSAFE.sub("_", configured)
+
+
+def _rewritten_to(server: str, names) -> bool:
+    """True when one of `names` is NOT `server` but becomes `server` once the agent rewrites it:
+    the call may be reaching that server even though no name matches verbatim."""
+    return any(isinstance(n, str) and n != server and agent_server_name(n) == server
+               for n in names)
+
+
+def _record_names(key: str, aliases) -> list:
+    """Every configured name a stored record answers to: its aliases, and its asserted name."""
+    names = list(aliases) if isinstance(aliases, list) else []
+    if key.startswith("mcp:"):
+        names.append(key[len("mcp:"):])
+    return names
+
+
 def _could_be_adhoc_target(name: str) -> bool:
     """A SUPERSET of `history._is_adhoc_target` (a URL or a command line). For such a name
     `resolve_all` also matches the credential-MASKED form it was stored under, which this
@@ -400,7 +428,8 @@ def _lookup(server: str,
     others = [(key, row) for key, row in sorted(servers.items())
               if isinstance(row, dict) and row is not record and not row.get("unreadable")
               and isinstance(row.get("tools"), dict)
-              and server in (row.get("aliases") or [])]
+              and (server in (row.get("aliases") or [])
+                   or _rewritten_to(server, _record_names(key, row.get("aliases"))))]
     return record, note, refuse, others
 
 
@@ -443,13 +472,22 @@ def _resolve_over_identities(server: str, servers: dict, identities: dict,
                       f"cannot reproduce — not enforcing a baseline it cannot attribute."), True
     matches = [key for key, aliases in identities.items()
                if isinstance(aliases, list) and server in aliases]
+    how = "an alias of"
+    if not matches:
+        # The AGENT'S name for a configured one: Claude Code rewrites `dot.server` to `dot_server`
+        # in the tool name, so no stored name matches verbatim. A step `history.resolve` does not
+        # need (it is given configured names); without it an approved server was deferred as never
+        # approved, and a rug pull on it passed in normal mode.
+        matches = [key for key, aliases in identities.items()
+                   if _rewritten_to(server, _record_names(key, aliases))]
+        how = "the name your agent gives"
     if len(matches) > 1:
         # AMBIGUOUS: `history.resolve` refuses this name, so no baseline can be shown to belong to
         # the server being called. Never guess one. Normal mode defers LOUDLY; strict refuses.
         kind = ("approved servers" if all(isinstance(servers.get(k), dict) for k in matches)
                 else "servers")
         return None, (
-            f"{server!r} is an alias of {len(matches)} different {kind} — deferring (not "
+            f"{server!r} is {how} {len(matches)} different {kind} — deferring (not "
             f"enforcing) rather than guessing which baseline applies. Re-scan so each is keyed distinctly, "
             f"or approve the one you mean by its own name."), True
     if not matches:
