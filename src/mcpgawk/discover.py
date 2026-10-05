@@ -298,12 +298,16 @@ def _drop_trailing_commas(text: str) -> str:
 
 def _tolerant_loads(text: str) -> dict[str, Any] | None:
     """Standard JSON first (the common case); only on failure apply the string-aware jsonc cleanup.
-    Returns None on anything that still won't parse or isn't an object — the caller skips it."""
+    Returns None on anything that still won't parse or isn't an object — the caller skips it.
+
+    RecursionError is a parse failure too. A few KB of `[` nests deeper than the interpreter's
+    recursion limit, and the stdlib parser raises rather than reporting it as malformed — so one
+    such file took the whole discovery sweep down, every other client's servers with it."""
     for candidate in (text, None):
         raw = candidate if candidate is not None else _drop_trailing_commas(_strip_comments(text))
         try:
             data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
             continue
         return data if isinstance(data, dict) else None
     return None
@@ -511,12 +515,12 @@ def _claude_code_plugins(home: Path) -> list[tuple[str, Path]]:
     try:
         reg = json.loads((home / ".claude" / "plugins" / "installed_plugins.json")
                          .read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):   # RecursionError: nesting past the stack limit
         return []
     try:
         enabled = json.loads((home / ".claude" / "settings.json")
                              .read_text(encoding="utf-8")).get("enabledPlugins") or {}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         enabled = {}
     out: list[tuple[str, Path]] = []
     plugins = reg.get("plugins") if isinstance(reg, dict) else None

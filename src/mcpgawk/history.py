@@ -206,26 +206,67 @@ def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
     travels with the result, so every surface can say it out loud.
     """
     path = path or default_path()
+    tail = "nothing shown reflects what you approved"
     try:
         with open(path, encoding="utf-8") as f:
             store = json.load(f)
-        # A store written before the synthetic-alias gate still carries placeholders. Shed them
-        # HERE so every alias reader gets the cleaned view, not just the ones that also save.
-        if isinstance(store, dict):
-            _shed_synthetic_aliases(store)
-        return store, None
     except FileNotFoundError:
         return {"servers": {}}, None            # a fresh machine: genuinely nothing approved yet
     except json.JSONDecodeError as exc:
         return {"servers": {}}, (
             f"the approved-baseline store at {path} is not readable JSON "
-            f"(line {exc.lineno}, column {exc.colno}) — nothing shown reflects what you approved"
+            f"(line {exc.lineno}, column {exc.colno}) — {tail}"
+        )
+    except UnicodeDecodeError as exc:
+        # A ValueError, like JSONDecodeError, but raised by the file's text decoding before the
+        # parser sees a character — so it escaped every handler here and crashed the caller.
+        return {"servers": {}}, (
+            f"the approved-baseline store at {path} is not UTF-8 text "
+            f"(byte {exc.start}) — {tail}"
+        )
+    except RecursionError:
+        # Nesting deeper than the interpreter's stack: the stdlib parser raises instead of
+        # reporting a malformed document. A few KB of `[` is enough.
+        return {"servers": {}}, (
+            f"the approved-baseline store at {path} is nested too deeply to read — {tail}"
         )
     except OSError as exc:
         return {"servers": {}}, (
-            f"the approved-baseline store at {path} could not be read ({exc.strerror}) — "
-            f"nothing shown reflects what you approved"
+            f"the approved-baseline store at {path} could not be read ({exc.strerror}) — {tail}"
         )
+    # VALID JSON IS NOT YET A STORE. A bare `[]`/`7`/`null` came back AS the store with error None,
+    # and every reader then raised on `.get` — or, worse, read it as "nothing approved". A
+    # non-object `servers` raised AttributeError out of the alias shed below. Both degrade the way
+    # unreadable JSON does: the empty store, plus the reason.
+    if not isinstance(store, dict):
+        return {"servers": {}}, (
+            f"the approved-baseline store at {path} holds a JSON {_json_kind(store)}, not an "
+            f"object — {tail}"
+        )
+    if "servers" in store and not isinstance(store["servers"], dict):
+        return {"servers": {}}, (
+            f"the approved-baseline store at {path} has a `servers` field that is a JSON "
+            f"{_json_kind(store['servers'])}, not an object — {tail}"
+        )
+    # A store written before the synthetic-alias gate still carries placeholders. Shed them
+    # HERE so every alias reader gets the cleaned view, not just the ones that also save.
+    _shed_synthetic_aliases(store)
+    # The same for a secret a released masker left in an alias or a key: no reader sees it.
+    _scrub_leaked_identities(store)
+    return store, None
+
+
+def _json_kind(value: Any) -> str:
+    """The JSON type name of a parsed value, for a message a person reads."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "array" if isinstance(value, list) else "object"
 
 
 #: The item-key shape drift mints: `tool.<name>`, `prompt.<name>`, `resource.<uri>`. The IDENT half
@@ -339,6 +380,9 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
     # The same argument carries the alias shed: converge the FILE, so a store repaired in memory by
     # one read does not go back to disk carrying the placeholders again.
     _shed_synthetic_aliases(store)
+    # Aliases and keys are identities `redact_record` never touches; re-mask them here too, so a
+    # secret a released masker wrote into one does not go back to disk (or into the projection).
+    _scrub_leaked_identities(store)
     for entry in (store.get("servers") or {}).values():
         if not isinstance(entry, dict):
             continue
@@ -396,7 +440,10 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
 #: The flat, stdlib-parsable file the agent hook reads instead of this store. Always a sibling of
 #: the history file it projects, so an MCPGAWK_HISTORY override relocates both together.
 PROJECTION_NAME = "guard-baseline.json"
-PROJECTION_SCHEMA = "gawk.guard-projection/1"
+#: /2 added `identities` + `placeholder_names` (top level; `servers` is unchanged, approved rows only),
+#: so the hook can resolve a name over EVERY record in `resolve_all`'s order. A /1 reader ignores
+#: both and behaves exactly as before; a /2 reader that finds them absent fails closed in strict mode.
+PROJECTION_SCHEMA = "gawk.guard-projection/2"
 
 
 def projection_path(path: str | None = None) -> str:
@@ -488,9 +535,27 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
                                       f"(record schema {stored!r}; this build reads "
                                       f"{drift.RECORD_SCHEMA})")}
             servers[key] = row
+        # EVERY RECORD'S IDENTITY, approved or not: its key and the config names it answers to,
+        # nothing else (no surface, no hashes, no sightings). `servers` holds approved rows only,
+        # and a hook resolving a name over approved rows alone does not do what `resolve` does:
+        # when `<name>` is the key of an UNAPPROVED record (resolve -> `mcp:<name>`, no baseline)
+        # and an approved record carries `<name>` as an alias, the hook enforced the OTHER record's
+        # baseline — in strict mode, a call to a never-approved server let through (found by
+        # tests/test_differential_duplicates.py pair 5, pinned by
+        # tests/test_guard_resolves_like_history.py). With every identity in hand the hook runs
+        # `resolve_all`'s exact order and lands where `resolve` lands. Kept OUT of `servers` on
+        # purpose: older readers treat a row there as "approved".
+        identities = {key: [a for a in ((entry.get("aliases") or [])
+                                        if isinstance(entry, dict) else [])
+                            if isinstance(a, str)]
+                      for key, entry in (store.get("servers") or {}).items()}
         projection = {"schema": PROJECTION_SCHEMA,
                       "source": {"mtime_ns": st.st_mtime_ns, "size": st.st_size},
                       "servers": servers,
+                      "identities": identities,
+                      # `resolve_all` refuses a placeholder label outright; carried rather than
+                      # duplicated, so the hook's copy of the rule cannot drift from this one.
+                      "placeholder_names": sorted(SYNTHETIC_NAMES),
                       # STRICT rides in the same file the hook already trusts, so the hook needs no
                       # second reader of history.json to know whether "no baseline" means deny.
                       "guard": {"strict": guard_strict(store)}}
@@ -601,6 +666,105 @@ def _shed_synthetic_aliases(store: dict[str, Any]) -> int:
     return shed
 
 
+#: What every release up to 0.1.69 left of a Slack webhook URL that also carried userinfo: the
+#: basic-auth signature swallowed scheme, userinfo and host as `[REDACTED]`, and the rest — the
+#: webhook's secret path — no longer matched the webhook signature, which is anchored on that host.
+#: No current masking can see it, because the anchor is gone; only this shape can.
+_LEAKED_WEBHOOK_RESIDUE = re.compile(
+    r"\[REDACTED\]/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+")
+
+
+def _scrub_residue(value: str) -> str:
+    from .redact import PLACEHOLDER
+    return _LEAKED_WEBHOOK_RESIDUE.sub(PLACEHOLDER, value)
+
+
+def _scrub_identity(value: str) -> str:
+    """One stored identity string (an alias, a key's target half, a fleet URL) under the CURRENT
+    masking, plus the residue no current rule recognises. Idempotent on anything already masked."""
+    out = _scrub_residue(value)
+    return adhoc_target(out) if _is_adhoc_target(out) else out
+
+
+def _scrub_key(key: str) -> str:
+    transport, sep, rest = key.partition(":")
+    if sep and transport in _TRANSPORTS:
+        return f"{transport}:{_scrub_identity(rest)}"      # a nameless ad-hoc server: the target
+    return _scrub_residue(key)
+
+
+def _baseline_rank(entry: dict[str, Any]) -> tuple[bool, bool]:
+    """Which of two entries that turn out to be one identity keeps the record."""
+    explicit = bool(entry.get("approved_at")) or entry.get("approved_via") == "approve"
+    return explicit, isinstance(entry.get("approved"), dict)
+
+
+def _scrub_leaked_identities(store: dict[str, Any]) -> int:
+    """Re-mask every server's aliases and KEY, and the fleet's recorded targets. Returns how many
+    strings changed.
+
+    `save()` re-masks RECORDS (`redact_record`), and a record's stamp binds only the record. Aliases
+    and keys are identities and were never re-masked, so a secret a released masker left in one
+    stayed on disk for good — measured 2026-10-05: a Slack webhook secret behind userinfo, stored by
+    0.1.69 as `[REDACTED]/services/T…/B…/<secret>` in the alias and in the nameless server's key.
+
+    A KEY IS AN IDENTITY, so a scrubbed key is a MIGRATION, not an edit: the entry moves to the key
+    a scan of the same target computes today (`key_for` → `adhoc_target`), keeping its approved
+    baseline and provenance, exactly as `record`'s legacy-key migration would have moved it. If that
+    key is already taken, the two are one identity under the current rules: the entry a person
+    approved explicitly wins, then one with any baseline, then the one already there; aliases are
+    merged.
+
+    Both doors, like the synthetic-alias shed: on READ so every reader sees no secret, on WRITE so
+    the file — and the guard projection derived from it — converges the first time anything saves.
+    """
+    changed = 0
+    servers = store.get("servers")
+    if isinstance(servers, dict):
+        for key in list(servers):
+            entry = servers[key]
+            if isinstance(entry, dict) and isinstance(entry.get("aliases"), list):
+                new: list[Any] = []
+                for a in entry["aliases"]:
+                    a2 = _scrub_identity(a) if isinstance(a, str) else a
+                    if a2 not in new:
+                        new.append(a2)
+                if new != entry["aliases"]:
+                    changed += 1
+                    entry["aliases"] = new
+            new_key = _scrub_key(key) if isinstance(key, str) else key
+            if new_key == key:
+                continue
+            changed += 1
+            moved = servers.pop(key)
+            there = servers.get(new_key)
+            if not isinstance(there, dict) or not isinstance(moved, dict):
+                servers[new_key] = moved
+                continue
+            winner, loser = ((moved, there) if _baseline_rank(moved) > _baseline_rank(there)
+                             else (there, moved))
+            aliases = list(winner.get("aliases") or [])
+            aliases += [a for a in (loser.get("aliases") or []) if a not in aliases]
+            winner["aliases"] = aliases
+            servers[new_key] = winner
+    fleet = store.get(FLEET_KEY)
+    entries = fleet.get("entries") if isinstance(fleet, dict) else None
+    for target in (entries.values() if isinstance(entries, dict) else ()):
+        if not isinstance(target, dict):
+            continue
+        if isinstance(target.get("url"), str):
+            url = _scrub_identity(target["url"])
+            if url != target["url"]:
+                target["url"], changed = url, changed + 1
+        if isinstance(target.get("command"), list):
+            cmd = [(_scrub_identity(t) if "://" in t else _scrub_residue(t))
+                   if isinstance(t, str) else t for t in target["command"]]
+            if cmd != target["command"]:
+                target["command"], changed = cmd, changed + 1
+    return changed
+
+
+
 def record(key: str, rec: dict[str, Any], path: str | None = None,
            keep: int = 50, migrate_from: tuple[str, ...] = (),
            alias: str | None = None, adopt_first: bool = True) -> dict[str, Any] | None:
@@ -630,6 +794,8 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     # the baseline this function returns. Masking only on the way to disk would diff a raw `current`
     # against a masked baseline and report a rename on every scan of a credentialled server.
     redact_record(rec)
+    # A nameless ad-hoc server keyed under the RELEASED masking is this server's own record.
+    migrate_from = tuple(migrate_from) + _legacy_adhoc_keys(key, alias)
     if alias and _is_adhoc_target(alias):
         alias = adhoc_target(alias)      # at the write, so no caller can store a key in a URL
     with locked(path):
@@ -730,13 +896,71 @@ def approval_provenance(store: dict[str, Any], key: str) -> tuple[str | None, st
 
 
 def baseline_origin(store: dict[str, Any], key: str) -> str | None:
-    """How a server's baseline was set: "approve" (a person ran `mcpgawk approve`),
-    "first-sighting" (trust on first use), or None for a baseline older than this field, whose
-    origin is unknown and is not guessed."""
+    """How a server's baseline was set — THE one rule every surface words its change from:
+
+    * "approve": a person ran `mcpgawk approve` (or `approve --fleet` adopted it while held);
+    * "fleet": a first sighting that a later `approve --fleet` accepted — the fleet approval
+      recorded this server's config entry, after the baseline was measured (`fleet_covers`);
+    * "first-sighting": trust on first use, and nobody has approved it since;
+    * None: a baseline older than the field, whose origin is unknown and is not guessed.
+
+    `approve --fleet` adopts only HELD sightings, so a server first seen before it keeps
+    `approved_via: first-sighting` on disk; deciding "fleet" here, and not in a caller, is what
+    keeps the scan, protect, the panel and `baseline` from disagreeing (e2e, 2026-10-05)."""
     e = (store.get("servers") or {}).get(key) or {}
     if e.get("approved_at") or e.get("approved_via") == "approve":
         return "approve"
-    return "first-sighting" if e.get("approved_via") == "first-sighting" else None
+    if e.get("approved_via") != "first-sighting":
+        return None
+    return "fleet" if fleet_covers(store, key) else "first-sighting"
+
+
+def fleet_covers(store: dict[str, Any], key: str) -> bool:
+    """A first-sighting baseline that an `approve --fleet` made AFTER it was recorded accepted:
+    the fleet approval is dated at or after the baseline's measurement, and it recorded a config
+    entry this server answers to. Time alone also marked an ad-hoc `--stdio` server, which no
+    fleet approval ever listed, as approved by one."""
+    from datetime import datetime
+    fleet = fleet_baseline(store)
+    base = approved(store, key)
+    if not fleet or not isinstance(base, dict):
+        return False
+    try:
+        approved_at = datetime.fromisoformat(str(fleet.get("approved_at")).replace("Z", "+00:00"))
+        measured = datetime.fromisoformat(str(base.get("measured_at")).replace("Z", "+00:00"))
+        if approved_at < measured:
+            return False
+    except (TypeError, ValueError):
+        return False
+    aliases = {str(a) for a in (((store.get("servers") or {}).get(key) or {}).get("aliases") or [])}
+    return any(str(fk).partition("/")[2] in aliases for fk in (fleet.get("entries") or {}))
+
+
+#: Origins whose baseline a person stands behind. None — a baseline recorded before origins were —
+#: keeps the approval wording every surface has always given it: unknown is not re-guessed.
+VOUCHED_ORIGINS = frozenset({"approve", "fleet", None})
+
+
+def vouched(origins: "list[str | None]") -> bool:
+    """True when a person stands behind EVERY one of these baselines (see `VOUCHED_ORIGINS`)."""
+    return bool(origins) and all(o in VOUCHED_ORIGINS for o in origins)
+
+
+def since_words(origins: "list[str | None]", *, plural: bool | None = None) -> str:
+    """What a change is measured since, for a sentence: "since you approved it/them" only when a
+    person approved every baseline; "since its first sighting" for one that nobody did; "since
+    its/their baseline" for a mix. `plural` overrides the count for a "server(s)" sentence."""
+    many = (len(origins) != 1) if plural is None else plural
+    if vouched(origins):
+        return "since you approved them" if many else "since you approved it"
+    if not many and list(origins) == ["first-sighting"]:
+        return "since its first sighting"
+    return "since their baseline" if many else "since its baseline"
+
+
+def changed_since(store: dict[str, Any], keys: "list[str]", *, plural: bool | None = None) -> str:
+    """`since_words` for stored servers."""
+    return since_words([baseline_origin(store, k) for k in keys], plural=plural)
 
 
 def changed_within(store: dict[str, Any], days: int = 7,
@@ -874,8 +1098,16 @@ def resolve_all(store: dict[str, Any], wanted: str) -> list[str]:
         return []
     # An ad-hoc alias is stored masked (`adhoc_target`); the person may paste the raw URL.
     names = {wanted, adhoc_target(wanted)} if _is_adhoc_target(wanted) else {wanted}
+    found = [key for key, entry in servers.items()
+             if names & set(entry.get("aliases") or [])]
+    if found or not _is_adhoc_target(wanted):
+        return found
+    # A record not re-scanned since the masking fix still carries the RELEASED alias. A fallback,
+    # not a peer: the old form collapsed hosts, so it answers only when no exact alias does — and
+    # several records sharing it come back as several, which `resolve` refuses as ambiguous.
+    legacy = _legacy_adhoc_target(wanted)
     return [key for key, entry in servers.items()
-            if names & set(entry.get("aliases") or [])]
+            if legacy in (entry.get("aliases") or [])] if legacy not in names else []
 
 
 def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str | None:
@@ -916,13 +1148,74 @@ def adhoc_target(target: str) -> str:
     and version must survive (the diagnostics masker `report_redact.redact_command` drops them). A
     raw `?apiKey=` URL used to land verbatim in history.json as an alias, and now also forms the key
     of a nameless server, which the drift block prints as the `approve` command (2026-09-26)."""
-    from .redact import redact, redact_url, redact_urls_in_text
+    from .redact import redact, redact_url
     if "://" in target and " " not in target.strip():
-        return redact(redact_url(target) or target) or target
+        masked = redact_url(target) or target
+        # THE USERINFO IS MASKED APART FROM THE HOST. `redact_url` turns `u:pass@a.dev` into
+        # `u:***@a.dev`, and the basic-auth provider signature then read `***` as a password and
+        # swallowed scheme, userinfo and host whole: `https://u:pass@a.dev/mcp` and
+        # `https://u:pass@b.dev/mcp` both stored as `[REDACTED]/mcp`, one identity for two hosts.
+        # So the prose redactor sees the URL WITHOUT its userinfo (every other shape, including
+        # host-anchored ones, still fires) and the userinfo on its own (a token carried as the
+        # username is still masked), and the two are put back together.
+        scheme_end = masked.find("://") + 3
+        netloc_end = next((i for i in range(scheme_end, len(masked)) if masked[i] in "/?#"),
+                          len(masked))
+        netloc = masked[scheme_end:netloc_end]
+        if "@" in netloc:
+            creds, hostport = netloc.rsplit("@", 1)
+            head = masked[:scheme_end] + hostport
+            bare = redact(head + masked[netloc_end:]) or head
+            if not bare.startswith(head):
+                # A shape anchored on the host itself fired (a Slack webhook is its host): there is
+                # no host left to keep, so return that masking whole. NOT `redact(masked)`, the
+                # released form: there the basic-auth signature consumed the URL up to the first
+                # `/` before the webhook shape could match, and the webhook's secret survived.
+                return bare
+            # A credential-shaped username is masked whole, as `***`: the redactor's bracketed
+            # placeholder inside a netloc reads as an IPv6 literal and breaks the URL.
+            creds = creds if redact(creds) == creds else "***"
+            return f"{masked[:scheme_end]}{creds}@{bare[scheme_end:]}"
+        return redact(masked) or target
     # A COMMAND gets only its URLs masked (`mcp-remote <url?key=…>`, the credential shape seen in
     # launch lines). `redact()` reads `name@version` as an address: `npx -y a@1.0.0` and
     # `npx -y b@2.0.0` both became `npx -y [REDACTED]`, one key for two servers again.
+    # EACH URL IS MASKED AS A URL TARGET IS, provider signatures included. Structural masking
+    # alone (`redact_urls_in_text`) kept `mcp-remote <a Slack incoming-webhook URL>` verbatim, its
+    # /services/T…/B…/<secret> path and all: a webhook's secret is its path, not a parameter or a
+    # password (2026-10-05). No literal URL here: the privacy-policy egress test reads every host
+    # string in the free package as a host it contacts.
+    from .redact import _URL_IN_TEXT
+    return _URL_IN_TEXT.sub(lambda m: adhoc_target(m.group(0)), target) or target
+
+
+def _legacy_adhoc_target(target: str) -> str:
+    """`adhoc_target` as every release up to 0.1.69 computed it — kept because its output is an
+    identity KEY in users' stores (`http:<it>` for a nameless ad-hoc server, and the alias of a
+    named one). For a `user:pass@host` URL it lost the host (`[REDACTED]/mcp`); the fixed form
+    keeps it, which re-keys that server. Without this derivation the upgrade would orphan the
+    baseline: a "new" server, a first sighting, silence — the reset ADR-0012 exists to prevent.
+    Used only to FIND an old record (`record`'s migration, `resolve_all`'s fallback), never to
+    write one."""
+    from .redact import redact, redact_url, redact_urls_in_text
+    if "://" in target and " " not in target.strip():
+        return redact(redact_url(target) or target) or target
     return redact_urls_in_text(target) or target
+
+
+def _legacy_adhoc_keys(key: str, raw_alias: str | None) -> tuple[str, ...]:
+    """The key a NAMELESS ad-hoc server had under `_legacy_adhoc_target`, when it differs.
+
+    `key_for` keys such a server `{transport}:{adhoc_target(target)}`, and the scan passes the same
+    target as the alias. `cli` builds `migrate_from` from the snapshot alone, which never sees the
+    target — so the derivation lives here, at the one write every scan goes through."""
+    if not raw_alias or not _is_adhoc_target(raw_alias):
+        return ()
+    transport, _, rest = key.partition(":")
+    if transport not in _TRANSPORTS or rest != adhoc_target(raw_alias):
+        return ()
+    old = _legacy_adhoc_target(raw_alias)
+    return (f"{transport}:{old}",) if old != rest else ()
 
 
 def display_name(store: dict[str, Any], key: str) -> str:
@@ -987,17 +1280,18 @@ def pending(store: dict[str, Any]) -> list[str]:
         # maps, so a kind the baseline never enumerated queued a decision that `drift.compare`
         # then correctly found nothing in: a blocked server with an empty diff. Same import, same
         # answer, both surfaces (dadan, 2026-09-09).
+        #
+        # THE WHOLE RULE, not the half of it that was copied here. Filtering `items` by
+        # `comparable_kinds` reproduced compare's kind rule but not its LEGACY rule: a baseline
+        # approved before item fingerprints carries only `tools`, which compare promotes to
+        # `tool.*` keys and diffs against the sighting's tools. Read here as an absent `items` map,
+        # it differed from every modern sighting, so an UNCHANGED server was queued on upgrade —
+        # the flood this docstring promises never happens. So the decision IS compare's verdict,
+        # on exactly the surface fields a person is asked to review.
         from . import drift as _drift
-        kinds = _drift.comparable_kinds(base, latest)
-        def _cmp(rec, ax="items"):
-            return {k: v for k, v in (rec.get(ax) or {}).items()
-                    if "." not in str(k) or str(k).split(".", 1)[0] in kinds}
-        # EVERY axis, not just `items`. The C1 maps are keyed the same `{kind}.{name}` way, so an
-        # un-enumerated kind put a key in `annotations`/`props`/`schemas` too — and filtering only
-        # `items` left the server queued on those instead, with a diff that showed nothing.
-        if _cmp(base) != _cmp(latest) or any(
-                ax in base and ax in latest and _cmp(base, ax) != _cmp(latest, ax)
-                for ax in ("schemas", "props", "annotations")):
+        r = _drift.compare(base, latest)
+        if r is not None and (r.added or r.removed or r.changed or r.schema_changed
+                              or r.annotation_changed):
             out.append(key)
     return sorted(out)
 

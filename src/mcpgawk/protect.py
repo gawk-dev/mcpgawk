@@ -121,6 +121,20 @@ def ask_consent(local_count: int, agents: list[str], *,
     return None
 
 
+def at_approved_baseline(store: dict[str, Any],
+                         pending: "list[str] | None" = None) -> list[str]:
+    """Keys "at an approved baseline": an approved record, and no pending drift from it.
+
+    ONE rule for the bare run's "Protected", `status`'s count and the panel's See step. The panel
+    counted every approved record, pending or not, so during a rug pull it read "1 at an approved
+    baseline" beside the CLI's and status's 0 (e2e flow 5, 2026-10-05). `pending` may be passed by
+    a caller that already computed `history.pending(store)`; it is not a second rule."""
+    servers = store.get("servers") or {}
+    waiting = set(history.pending(store) if pending is None else pending)
+    return [k for k in servers
+            if k not in waiting and history.approved(store, k) is not None]
+
+
 def protection_report(store: dict[str, Any], guard_line: str,
                       unchecked: list[tuple[str, str]]) -> str:
     """What the user is left with: what is covered, what needs them, what was not checked.
@@ -128,17 +142,18 @@ def protection_report(store: dict[str, Any], guard_line: str,
     Ordered by what the reader must DO — a change waiting on a decision first, because that is the
     only part that is blocking, then the state of protection, then the honest coverage gaps. The
     'not checked' block is never omitted and never summarised into a number."""
-    servers = store.get("servers") or {}
     waiting = history.pending(store)
     appeared = history.held(store)
     # Only a server with an approved record is covered. Counting every row put a planted server
     # that appeared after the fleet approval under "Protected" (0.1.68, 2026-10-04).
-    covered = [k for k in servers
-               if k not in waiting and history.approved(store, k) is not None]
+    covered = at_approved_baseline(store, waiting)
 
     out: list[str] = [""]
     if waiting:
-        out.append(f"  {len(waiting)} server(s) changed since you approved them — your agents are")
+        # From the one origin rule: "since you approved them" only when a person approved every
+        # one; otherwise "since their baseline", as `status` says it (e2e, 2026-10-05).
+        out.append(f"  {len(waiting)} server(s) changed "
+                   f"{history.changed_since(store, waiting, plural=True)} — your agents are")
         out.append("  blocked from calling them until you decide:")
         for key in waiting:
             out.append(f"      {history.display_name(store, key)}")

@@ -25,12 +25,13 @@ from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_report
-from .label import build_label, display_name, lead_concern, render_cli, render_summary
+from .label import (build_label, display_name, lead_concern, render_cli, render_summary,
+                    signal_lead)
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
 from .probe import ServerSnapshot, probe, probe_stdio, probe_url
 from .signals import (as_dicts, detect, detect_card_mismatch, detect_cross_server_reference,
-                      detect_dynamic_dispatch, detect_shadowing)
+                      detect_dynamic_dispatch, detect_shadowing, is_instruction_finding)
 from .supplychain import check as check_supply_chain
 
 
@@ -1061,6 +1062,8 @@ def _baseline(args) -> int:
 
     print(f"Baseline — {len(servers)} server(s). "
           f"verify and monitor compare against exactly this.\n")
+    # Read once: a fleet-accepted baseline is dated by the fleet approval, not by itself.
+    fleet = history.fleet_baseline(history.load()) or {}
     for key in sorted(servers):
         rec = servers[key]
         alias = f" ({', '.join(rec['aliases'])})" if rec.get("aliases") else ""
@@ -1070,6 +1073,11 @@ def _baseline(args) -> int:
         if rec.get("approved_at"):
             print(f"    approved   {rec['approved_at']}"
                   f"{' by ' + rec['approved_by'] if rec.get('approved_by') else ''}")
+        elif rec.get("baseline_origin") == "fleet":
+            # First seen, then accepted by `approve --fleet`: a person's approval, of the fleet.
+            print(f"    approved   with your fleet {fleet.get('approved_at') or '—'}"
+                  f"{' by ' + str(fleet['approved_by']) if fleet.get('approved_by') else ''}"
+                  f" · first seen {rec.get('measured_at') or '—'}")
         elif rec.get("baseline_origin") == "first-sighting":
             # Trust on first use: nobody approved it, so say that, and when it was first seen.
             print(f"    approved   not yet by you · trusted on first scan "
@@ -1601,7 +1609,15 @@ def _protect() -> int:
         from .consent import CONSENT_GIVEN_ENV
         os.environ[CONSENT_GIVEN_ENV] = "1"
 
-    rc = _dispatch(scan_args)
+    # This run turns checking on and reports it below, agent by agent. The scan's own "not
+    # checking yet — run `mcpgawk`" nudge would tell the user to run what they just ran, and on a
+    # first run it fires before the hooks exist, contradicting "Protected: N" a few lines down.
+    global _IN_PROTECT_RUN
+    _IN_PROTECT_RUN = True
+    try:
+        rc = _dispatch(scan_args)
+    finally:
+        _IN_PROTECT_RUN = False
 
     # Runtime checking on. `guard.install` is idempotent and preserves foreign hooks, so re-running
     # `mcpgawk` is safe — which is the point of a front door you are meant to type again.
@@ -1903,7 +1919,10 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
         # The store read above already holds this key's approval, unless `record` just adopted it
         # from a migrated key; only then is a second read needed.
         known = key in (store.get("servers") or {})
-        report.baseline_origin = history.baseline_origin(store if known else history.load(), key)
+        _st = store if known else history.load()
+        # ONE rule, in history: it decides "fleet" for a first sighting a later fleet approval
+        # accepted, for every surface at once (e2e, 2026-10-05).
+        report.baseline_origin = history.baseline_origin(_st, key)
     return _Sighting(key=key, previous=previous, report=report, reidentified_from=was,
                      appeared=held_now)
 
@@ -2141,6 +2160,33 @@ def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
     return (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
             or any(_live(lab) for lab in labels)
             or bool(drift_reports) or bool(reidentified))
+
+
+def _unshown_exit_reasons(labels: list, shown: dict[str, str]) -> list[str]:
+    """What sets the exit code that the fleet view's rows do not already say.
+
+    A row names a probe failure (its state), injection and secret findings (counted on the row),
+    and a dynamic catalog (INCOMPLETE). Everything else `_scan_failed` counts — a live signal of any
+    other kind (tool-name shadowing, a server-card mismatch, hidden characters) or a caveat on a
+    server that answered (a corrected transport) — left the row reading CLEAN while the scan exited
+    1: "2 servers — 2 clean", exit 1, the cause only under --detail (walk, 2026-10-05).
+    Returns one "<servers>: <reason>" per distinct reason, servers sharing a reason grouped."""
+    by_reason: dict[str, list[str]] = {}
+    for lab in labels:
+        x = lab["x-mcpgawk"]
+        if x.get("is_failure"):
+            continue
+        name = shown.get(lab["name"], lab["name"])
+        reasons = list(x.get("caveats") or [])
+        for s in x.get("bounded_signals") or []:
+            kind = s.get("kind") or ""
+            if (s.get("muted") or kind.startswith(("config:", "secret:", "dispatch:"))
+                    or is_instruction_finding(kind)):
+                continue
+            reasons.append(f"{signal_lead(kind)} {s.get('tool', '?')}")
+        for r in dict.fromkeys(reasons):
+            by_reason.setdefault(r, []).append(name)
+    return [f"{', '.join(sorted(set(names)))}: {r}" for r, names in by_reason.items()]
 
 
 def _dispatch(argv: list[str] | None = None) -> int:
@@ -2426,7 +2472,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print(drift.render_headline(
                 sorted(drift_reports), hostile,
                 injected=sorted(n for n, r in drift_reports.items() if r.injected),
-                escalated=sorted(n for n, r in drift_reports.items() if r.escalated)))
+                escalated=sorted(n for n, r in drift_reports.items() if r.escalated),
+                origins={n: r.baseline_origin for n, r in drift_reports.items()}))
             for name in sorted(drift_reports):
                 print(drift.render(name, drift_reports[name]))
         print()
@@ -2492,6 +2539,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
                                          for r in refreshed.values())
             any_error = any_error or any(s.reidentified_from or (s.report and s.report.any)
                                          for s in late.values())
+        # NAMED BEFORE IT RETURNS 1. The exit code is a CI gate; a gate that fails under a fleet
+        # line reading "2 clean" sends the reader hunting. Same register as "Look at X first".
+        _whys = _unshown_exit_reasons(labels, {
+            lab["name"]: display_name(lab, _adhoc_name(lab["name"], entries.get(lab["name"])))
+            for lab in labels})
+        for _why in _whys:
+            print(f"  → exit 1: {_why} — mcpgawk scan --detail")
+        if _whys:
+            print()
         _protection_nudge(bool(rows))
         _behavioural_capability_note()
         return 1 if (any_error or failed or appeared) else 0
@@ -2602,6 +2658,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
     return 1 if (any_error or failed or appeared) else 0
 
 
+#: True while the bare `mcpgawk` run drives its scan: that run installs the hooks and states the
+#: protection itself, so the scan's nudge is not printed inside it.
+_IN_PROTECT_RUN = False
+
+
 def _protection_nudge(has_servers: bool) -> None:
     """Scanning is not protection. A report with no next step is how the author finished a scan on
     his own machine and stayed unprotected — the hook existed, worked, and was never installed
@@ -2610,15 +2671,34 @@ def _protection_nudge(has_servers: bool) -> None:
     ONE helper for both report paths: the fleet-table path returned without it (found 2026-09-26
     when the journey test first ran on a seeded fleet), so every machine that got the table — any
     fleet with an unreachable server — was never told how to turn checking on."""
-    _installed = _guard_is_installed() if has_servers else True
-    if _installed is None:
+    if _IN_PROTECT_RUN or not has_servers:
+        return
+    coverage = _hook_coverage()
+    if coverage is None:
         print("  Whether your agents are checking these servers could not be determined — the "
               "guard probe failed. Run `mcpgawk guard status`.\n")
-    elif not _installed:
+        return
+    off, broken, on = coverage
+    if broken:
+        one = len(broken) == 1
+        whose = "'s hook is" if one else "' hooks are"
+        print(f"  {_and_join(broken)}{whose} installed but "
+              f"cannot run, so {'it is' if one else 'they are'} not checking these servers — "
+              f"run `mcpgawk guard install` to repair {'it' if one else 'them'}.\n")
+    if not off:
+        return
+    if not on and not broken:
         # "`mcpgawk` turns that on" read as circular right after `mcpgawk scan` (re-walk,
         # 2026-09-26). Bare `mcpgawk` is still the command: it enables every agent with a hook.
         print("  Your agents are not checking these servers yet. To turn that on, run `mcpgawk` "
               "with no arguments.\n")
+        return
+    # A MIXED MACHINE NAMES THE GAP. "Any agent hooked" silenced this line on a machine where
+    # Claude Code was hooked and Cursor was not, so Cursor's calls went unchecked and the last line
+    # of the scan said nothing (2026-10-05).
+    also = f" ({_and_join(on)} {'is' if len(on) == 1 else 'are'})" if on else ""
+    print(f"  {_and_join(off)} {'is' if len(off) == 1 else 'are'} not checking these servers "
+          f"yet{also}. To turn that on, run `mcpgawk` with no arguments.\n")
 
 
 #: Printed on a discovery run when no fleet has been approved yet.
@@ -2722,20 +2802,41 @@ def _mark_muted_findings(labels: list[dict]) -> None:
                 s["muted"] = True
 
 
-def _guard_is_installed() -> "bool | None":
-    """Is the runtime guard installed? True / False / None when the probe itself failed.
+def _and_join(names: "list[str]") -> str:
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
-    Was `return True` on exception, "to stay quiet rather than nag wrongly" — which meant a broken
-    probe silenced "Your agents are not checking these servers yet." on exactly the machines most
-    likely to need it. Silence there is indistinguishable from coverage, and this is the last line
-    of a scan: the one a user reads to decide whether they are done.
 
-    Still never raises — an advisory probe must not fail a completed scan — but "I could not tell"
-    is now its own answer, and the caller says so instead of picking the reassuring one.
-    """
+def _hook_coverage() -> "tuple[list[str], list[str], list[str]] | None":
+    """(off, broken, on): the hook-capable agents WITH SERVERS ON THIS MACHINE, by the state of
+    their own hook, as display names. None when the probe itself failed.
+
+    Was one boolean, `_guard_is_installed`: first Claude Code's settings alone (a Cursor-only
+    machine with Cursor's hook was told nothing was checking), then "any agent is ok" (a machine
+    with Claude Code hooked and Cursor not was told nothing at all). Protection is per agent, so
+    the answer is too — the same population `mcpgawk status` lists: agents discovery attributes a
+    server to, among those with a hook point. An agent with no servers here is not a gap.
+
+    No agent with servers found (an ad-hoc `--stdio`/`--http` target on a machine with no agent
+    configs): Claude Code stands in, as the one agent `mcpgawk` always arms — so the nudge still
+    fires on a machine with nothing hooked, and stays quiet where something is.
+
+    Never raises — an advisory probe must not fail a completed scan — but "I could not tell" is
+    its own answer, and the caller says so instead of picking the reassuring one."""
     try:
-        from .guard import status
-        return "NOT installed" not in status()
+        from .discover import discover_servers
+        from .status import HOOK_CAPABLE, _label, agents_on_this_machine, hook_health_by_client
+        health = hook_health_by_client()
+        found = discover_servers()
+        entries = found[0] if isinstance(found, tuple) else found
+        present = sorted(c for c in agents_on_this_machine(entries) if c in HOOK_CAPABLE)
+        if not present:
+            if any(h == "ok" for h in health.values()):
+                return [], [], []
+            present = ["claude-code"]
+        off = [_label(c) for c in present if health.get(c, "absent") not in ("ok", "broken")]
+        broken = [_label(c) for c in present if health.get(c) == "broken"]
+        on = [_label(c) for c in present if health.get(c) == "ok"]
+        return off, broken, on
     except Exception:                              # noqa: BLE001 - advisory only
         return None
 

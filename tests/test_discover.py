@@ -691,3 +691,43 @@ def test_detect_unscannable_names_claudeai_connectors_from_ever_connected(tmp_pa
     # exclude wins: a name that is actually a scannable fleet server is not listed as unscannable
     excl = detect_unscannable(home=tmp_path, platform="darwin", exclude={"claude.ai Gmail"})
     assert "claude.ai Gmail" not in {r["name"] for r in excl}
+
+
+def test_a_deeply_nested_config_is_reported_unparsable_and_the_sweep_goes_on(tmp_path):
+    """`_tolerant_loads`: "returns None on anything that still won't parse … the caller skips it".
+    A few KB of `[` raised RecursionError out of the json parser, and that one file took the whole
+    discovery sweep down with it — every other client's servers went unreported along with it."""
+    from mcpgawk.discover import OK, UNPARSABLE, discover_report
+    _write(tmp_path, ".cursor/mcp.json", "[" * 5_000)
+    _write(tmp_path, ".codeium/windsurf/mcp_config.json",
+           {"mcpServers": {"ok": {"command": "ok-mcp"}}})
+    servers, sources = discover_report(home=tmp_path, platform="darwin")
+    by_client = {s["client"]: s for s in sources}
+    assert by_client["cursor"]["status"] == UNPARSABLE
+    assert by_client["windsurf"]["status"] == OK and by_client["windsurf"]["servers"] == 1
+    assert set(servers) == {"ok"}
+
+
+def test_a_deeply_nested_plugin_registry_does_not_take_down_the_sweep(tmp_path):
+    """`_claude_code_plugins`: "Never raises". Its two registry reads caught ValueError but not the
+    RecursionError a deeply nested file raises — the same sweep-killer, one door over."""
+    from mcpgawk.discover import OK, discover_report
+    _write(tmp_path, ".claude/plugins/installed_plugins.json", "[" * 5_000)
+    _write(tmp_path, ".claude/settings.json", '{"a":' * 5_000)
+    _write(tmp_path, ".codeium/windsurf/mcp_config.json",
+           {"mcpServers": {"ok": {"command": "ok-mcp"}}})
+    servers, sources = discover_report(home=tmp_path, platform="darwin")
+    assert next(s for s in sources if s["client"] == "windsurf")["status"] == OK
+    assert set(servers) == {"ok"}
+
+
+def test_a_deeply_nested_plugin_settings_file_does_not_take_down_the_sweep(tmp_path):
+    """The second registry read: a readable plugin registry, then a deeply nested settings.json."""
+    from mcpgawk.discover import OK, discover_report
+    _write(tmp_path, ".claude/plugins/installed_plugins.json", {"plugins": {}})
+    _write(tmp_path, ".claude/settings.json", '{"a":' * 5_000)
+    _write(tmp_path, ".codeium/windsurf/mcp_config.json",
+           {"mcpServers": {"ok": {"command": "ok-mcp"}}})
+    servers, sources = discover_report(home=tmp_path, platform="darwin")
+    assert next(s for s in sources if s["client"] == "windsurf")["status"] == OK
+    assert set(servers) == {"ok"}

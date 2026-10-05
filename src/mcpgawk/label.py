@@ -612,6 +612,12 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def signal_lead(kind: str) -> str:
+    """The human lead phrase for one bounded-signal kind — per-kind override, then family."""
+    return (_SIGNAL_LEAD_BY_KIND.get(kind)
+            or _SIGNAL_LEAD.get(kind.split(":", 1)[0], "review signal in"))
+
+
 def lead_concern(labels: list[dict[str, Any]]) -> tuple[str, str] | None:
     """On a multi-server overview the per-server narrative is deliberately behind --detail (three
     full reports in a row go unread). So pick the ONE server most worth opening and its lead
@@ -895,8 +901,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False, shown: str | None =
     live_signals = False
     for s in (x.get("bounded_signals") or []):
         kind = s.get("kind", "")
-        family = kind.split(":", 1)[0]
-        lead = _SIGNAL_LEAD_BY_KIND.get(kind) or _SIGNAL_LEAD.get(family, "review signal in")
+        lead = signal_lead(kind)
         if s.get("muted"):
             # A muted finding is a HUMAN's judgement recorded via `mcpgawk wrong`. It stays on the
             # report — absence-is-not-safety applies to our own mistakes too — but stops shouting.

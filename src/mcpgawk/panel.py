@@ -485,7 +485,10 @@ TIERS = (
     # the same word, two units (live 2026-09-03). The label now carries its unit.
     ("findings", "With findings", "verification caught it doing something — exfiltration, SSRF "
                                   "or injected output"),
-    ("unverified", "Unverified", "never watched — absence of a finding, not safety"),
+    # NOT "never watched": a server verify exercised but nobody approved lands here too (A,
+    # 2026-10-05) — it was watched, and there was no approval to verify it against.
+    ("unverified", "Unverified", "not verified against anything you approved — absence of a "
+                                 "finding, not safety"),
     # OBSERVED IS NOT VERIFIED, AND SAYS SO IN ITS OWN NAME. A session-bound-auth server can never
     # be verified here: the login belongs to the client's live session and verify's own session
     # times out. `wrap` rides that authenticated pipe and watches the real calls — real evidence,
@@ -495,7 +498,12 @@ TIERS = (
     # verification, which is the mistake observed.py exists to make impossible.
     ("observed", "Observed (wrap)", "watched in your client's real traffic — observation, not "
                                     "reproduction: the sandbox checks were not run"),
-    ("baseline", "At baseline", "matches what you approved, and behaviour was observed"),
+    # "VERIFIED", NOT "AT BASELINE" — the label only; the key stays "baseline" so URLs, filters
+    # and stored state keep working. The journey says "N at an approved baseline" (approved, as
+    # `mcpgawk status` counts it); this tier also needs behaviour observed. One page read "1 at an
+    # approved baseline" beside "At baseline 0" (walk, 2026-10-05): one word, two facts. The
+    # tier's own name is now the pair of "Unverified".
+    ("baseline", "Verified", "matches what you approved, and behaviour was observed"),
 )
 
 
@@ -553,7 +561,25 @@ def _classify(name: str, key: str | None, d: dict) -> str:
         if name in _obs or (key and str(key) in _obs):
             return "observed"
         return "unverified"
+    # VERIFIED MEANS "AGAINST WHAT YOU APPROVED". An exercised run on a server with no approved
+    # record — no store entry, or one with no sighting — put it here (property suite, 2026-10-05).
+    # With nothing approved there is nothing to have matched: it is Unverified, the pair of this
+    # tier. Not Observed: that tier says the sandbox checks were NOT run, and here they were.
+    if not _has_approval(d, key):
+        return "unverified"
     return "baseline"
+
+
+def _has_approval(d: dict, key: str | None) -> bool:
+    """`history.approved(store, key) is not None` — the rule `status` and `protect` count by —
+    guarded for a key with no store entry and for a damaged entry that is not an object."""
+    if not key:
+        return False
+    servers = (d.get("store") or {}).get("servers") if isinstance(d.get("store"), dict) else None
+    if not isinstance(servers, dict) or not isinstance(servers.get(key), dict):
+        return False
+    from . import history as _h
+    return _h.approved({"servers": servers}, key) is not None
 
 
 
@@ -1097,7 +1123,7 @@ def _wrap(text: str, width: int, lines: int) -> list[str]:
     return out
 
 
-def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str, *,
+def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str | None, *,
            accent: bool = False, alarm: bool = False, aria: str = "") -> str:
     """One box. A link, so the whole node is the target — the drill-down is a GET and a
     re-render, which is what keeps this drawing script-free under the panel's CSP.
@@ -1115,8 +1141,12 @@ def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str, *,
     cap = int((w - 24) / 6.6)
     mt = "".join(f'<text class="tnm" x="{x + 12}" y="{y + 30 + i * 12}">{_esc(_clip(m, cap))}</text>'
                  for i, m in enumerate(lines))
-    return (f'<a href="{_esc_attr(href)}" class="{cls}">{label}'
-            f'<rect x="{x}" y="{y}" width="{w}" height="{_TW["h"]}" rx="9"/>{tt}{mt}</a>')
+    body = f'<rect x="{x}" y="{y}" width="{w}" height="{_TW["h"]}" rx="9"/>{tt}{mt}'
+    if href is None:
+        # NOTHING TO OPEN, SO NOT A LINK. A box that navigates to a target no view answers is a
+        # control that does nothing; the drawing still says what it says.
+        return f'<g class="{cls} tnx">{label}{body}</g>'
+    return f'<a href="{_esc_attr(href)}" class="{cls}">{label}{body}</a>'
 
 
 def _elbow(x1: int, y1: int, x2: int, y2: int) -> str:
@@ -1225,7 +1255,8 @@ def _surface_nodes(server: str, surfaces: dict | None, surfurl, x: int, y: int, 
 def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | None = None,
                       agurl=None, open_server: str | None = None, srvurl=None,
                       rows: list[dict] | None = None, open_tool: str | None = None,
-                      toolurl=None, surfaces: dict | None = None, surfurl=None) -> str:
+                      toolurl=None, surfaces: dict | None = None, surfurl=None,
+                      known: set[str] | None = None) -> str:
     """The fleet drawn as a tree: agents, the servers each can reach, and that pair's tools.
 
     [FOUNDER 2026-08-26] "when i say it to be a branch in a tree i meant like this" — a drawn
@@ -1318,10 +1349,16 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
             # TWO TARGETS ON ONE ROW, because they are two different questions. The box opens the
             # branch; this opens the server's own detail drawer. Making the box do both would have
             # cost the drawer its only route in from the fleet.
-            parts.append(
-                f'<a href="{_esc_attr(rowurl(pair["server"]))}" class="tdet">'
-                f'<title>{_esc(pair["server"])} — open the server detail</title>'
-                f'<text x="{sx + sw - 12}" y="{sy + 30}" text-anchor="end">detail ›</text></a>')
+            # ONLY WHERE A DRAWER EXISTS. A pair known only from call rows ("used, not in this
+            # config") has no server record, so `sel=` for it opened nothing (2026-10-05). The
+            # tree itself is the whole record of such a pair; every link to the drawer is dropped.
+            detail_url = (rowurl(pair["server"])
+                          if known is None or pair["server"] in known else None)
+            if detail_url is not None:
+                parts.append(
+                    f'<a href="{_esc_attr(detail_url)}" class="tdet">'
+                    f'<title>{_esc(pair["server"])} — open the server detail</title>'
+                    f'<text x="{sx + sw - 12}" y="{sy + 30}" text-anchor="end">detail ›</text></a>')
 
             if not srv_open:
                 cursor = sy + pitch
@@ -1375,7 +1412,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                     parts.append(_elbow(tx + tw, ty + _TW["h"] // 2, cx, cy + _TW["h"] // 2))
                     parts.append(_tnode(cx, cy, cw, head,
                                         _wrap(why, int((cw - 24) / 6.6), 2) if why else ["", ""],
-                                        rowurl(pair["server"]),
+                                        detail_url,
                                         alarm=c["decision"] == "deny",
                                         aria=(f'{c["decision"]} at {c["ts"]}, basis {c["basis"]}'
                                               + (f' — {why}' if why else ""))))
@@ -1383,7 +1420,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                 if chid:
                     parts.append(_tnode(cx, ty + len(calls) * pitch, cw,
                                         f'+{chid} more ruling{"" if chid == 1 else "s"}',
-                                        ["older than the eight shown", ""], rowurl(pair["server"]),
+                                        ["older than the eight shown", ""], detail_url,
                                         aria=f'{chid} further rulings, not drawn'))
                 tcursor = ty + max(1, len(calls) + (1 if chid else 0)) * pitch
             widest = max(widest, tx + tw)
@@ -1391,7 +1428,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                 # NO SILENT CAP. A list cut at ten reads as the complete set, and this view's
                 # whole claim is that it shows what an agent can reach.
                 parts.append(_tnode(tx, tcursor, tw, f'+{hidden} more tool{"" if hidden == 1 else "s"}',
-                                    ["quieter than the ten shown", ""], rowurl(pair["server"]),
+                                    ["quieter than the ten shown", ""], detail_url,
                                     aria=f'{hidden} further tools, not drawn — open the server'))
                 tcursor += pitch
             snodes, tcursor = _surface_nodes(pair["server"], surfaces, surfurl,
@@ -1660,7 +1697,6 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     every stage is listed always, and an unreached one says what would make it real rather than
     rendering as a blank. The strip disappears only when every stage is done.
     """
-    from . import history as _h
 
     entries = d.get("entries") or {}
     store = (d.get("store") or {}).get("servers") or {}
@@ -1670,7 +1706,10 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     live = gw.get("live") or {}
     rows = _agent_rows(d)
     protected = sum(1 for _, _, st, _, _ in rows if st == "on")
-    approved = sum(1 for k in store if _h.approved({"servers": store}, k))
+    # The rule `status` and the bare run count by: approved AND not pending. Counting every
+    # approved record said "1 at an approved baseline" during drift, beside their 0 (2026-10-05).
+    from .protect import at_approved_baseline
+    approved = len(at_approved_baseline({"servers": store}, d.get("pending") or []))
     clients = sorted({c for e in entries.values() if isinstance(e, dict)
                       for c in (e.get("_clients") or [])})
     signins = signin_asks(entries)      # ONE source — the briefing strip reads the same list
@@ -1760,7 +1799,10 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
         # a user reading it reaches for the Blocked filter and finds nothing — those servers carry
         # the "Changed" tier. Saying both words is what closes the gap between the alarm and the
         # place the alarm's subject can be found.
-        return (f"{pending} server(s) changed since you approved them — your agents cannot call "
+        # "since you approved them" only when a person approved every one (history's one rule).
+        from .history import changed_since
+        since = changed_since(d.get("store") or {}, list(d.get("pending") or []), plural=True)
+        return (f"{pending} server(s) changed {since} — your agents cannot call "
                 f"them right now. Open Decisions, or filter Servers by Changed.", "bad")
     appeared = d.get("appeared") or {}
     if appeared:
@@ -2470,6 +2512,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     """
     from . import history as _h
 
+    def _origin_of(keys: "list[str]") -> "list[str | None]":
+        """Each key's baseline origin — history's one rule — for the "since you approved" words."""
+        return [_h.baseline_origin(store, k) for k in keys]
+
+    def _since_approval(k: str) -> str:
+        """A Today row's "changed since …": "approval" only when a person approved the baseline."""
+        return ("since approval" if _h.vouched(_origin_of([k]))
+                else _h.since_words(_origin_of([k])))
+
     # NB there is deliberately no `entries` local any more. The row counter was its last consumer,
     # and it was the wrong source for it (see the note at the counter): discovery-only, while the
     # rows come from `classified`. Anything here that needs discovery should say `d["entries"]` at
@@ -2678,7 +2729,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     fleet_tree = render_fleet_tree(agent_server_tree(d), _rowurl, len(_fleet_rows),
                                    expanded=ag, agurl=_agurl, open_server=br, srvurl=_srvurl,
                                    rows=_fleet_rows, open_tool=tc, toolurl=_toolurl,
-                                   surfaces=_surfaces, surfurl=_surfurl)
+                                   surfaces=_surfaces, surfurl=_surfurl,
+                                   known={n for n, _e, _k, _t in classified})
 
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
     drawer = ""
@@ -3191,10 +3243,12 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                       f'<code>mcpgawk approve &lt;name&gt;</code>.</p></div>')
     if pending:
         _cards.append(f'<div class="ask"><span class="ak">trust decision — only you should</span>'
-                      f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed after '
-                      f'you approved {"them" if len(pending) != 1 else "it"}</h5>'
-                      f'<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
-                      f'<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
+                      f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed '
+                      + (f'after you approved {"them" if len(pending) != 1 else "it"}'
+                         if _h.vouched(_origin_of(pending)) else
+                         _h.since_words(_origin_of(pending))) + '</h5>'
+                      '<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
+                      '<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
     # THE SAME CONTRADICTION, ONE ELEMENT DOWN. These cards are built from sign-ins and pending
     # approvals alone, so their empty state used to say "Nothing needs you — sign-ins and trust
     # decisions are the only things that ever will" — the claim 05f6935 removed from the line
@@ -3226,7 +3280,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # Revolut X (measured, at baseline) both rendered as "waiting on your browser sign-in"
         # here, hiding the finding and contradicting the Servers table one click away.
         if _t2 == "changed":
-            _why2 = "changed since approval — blocked until you decide"
+            _why2 = f"changed {_since_approval(_k2)} — blocked until you decide"
             # A changed server with findings says BOTH: the reorder that made the counts agree
             # must not hide the conviction ("a server we convicted is not at its baseline").
             _nf2 = _f_by_srv.get(_n2, 0)
@@ -3239,10 +3293,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         elif _t2 == "appeared":
             _why2 = (f"{_HELD_GONE} — its sighting is kept" if _e2.get("_baseline_only")
                      else _app_why)
+            # APPEARED OUTRANKS CHANGED (the pinned order), but the drift is still pending: the
+            # tile, the ask card and the strip all count it. A row saying only "appeared" left
+            # Today counting one changed server and naming none (2026-10-05).
+            if _k2 and _k2 in (pending or []):
+                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+            _nf2 = _f_by_srv.get(_n2, 0)
+            if _nf2:
+                _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
         elif _t2 == "blocked":
             # A strict-mode deny of an appeared server is BOTH; the reason it was refused is that
             # nobody approved it, so the row must not shrink to a bare "blocked".
-            _why2 = (f"{_app_why} · a call was denied" if _n2 in _appeared_d else "blocked")
+            _why2 = (f"{_app_why} · a call was denied" if _n2 in _appeared_d
+                     else "a call was denied")
+            # BLOCKED OUTRANKS CHANGED too, and the drift is just as pending: the same suffixes
+            # as the appeared branch, or Today counts a changed server it never names
+            # (2026-10-05). "a call was denied", not "blocked": the chip already says Blocked.
+            if _k2 and _k2 in (pending or []):
+                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+            _nf2 = _f_by_srv.get(_n2, 0)
+            if _nf2:
+                _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
         else:
             _why2 = _st2.get("row") or "waiting on your browser sign-in"
             if _st2.get("state") == "blocked_vendor" and _st2.get("vendor"):
@@ -3277,7 +3348,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         _grp_lines += (f'<tr class="tgrp"><td colspan="5">unverified ({_quiet_unv}) '
                        f'<a href="{_tierurl("unverified")}">show</a></td></tr>')
     if counts.get("baseline"):
-        _grp_lines += (f'<tr class="tgrp"><td colspan="5">at baseline, quiet '
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">verified, quiet '
                        f'({counts["baseline"]}) <a href="{_tierurl("baseline")}">show</a></td></tr>')
     # The calls-per-day series, shared by Today and Activity (FOUNDER 2026-09-28: the chart matters most).
     try:
@@ -3752,6 +3823,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     def _dec_what(k: str) -> str:
         it = _dec_items.get(k)
+        if not it and not _h.vouched(_origin_of([k])):
+            return (f'<span class="dim">Moved {_h.since_words(_origin_of([k]))}; your agents '
+                    'cannot call it until you look. Review it in Servers.</span>')
         if not it:
             return ('<span class="dim">Moved since you approved it; your agents cannot call it '
                     'until you look. Review it in Servers.</span>')
@@ -4423,7 +4497,7 @@ var(--warn);border-radius:10px;padding:11px 16px;font-size:13.5px;margin-bottom:
 .ftwrap{{overflow-x:auto;margin-top:10px}}
 svg.ftree{{display:block;max-width:100%;height:auto}}
 svg.ftree .tn rect{{fill:var(--card);stroke:var(--line);stroke-width:1}}
-svg.ftree .tn:hover rect{{stroke:var(--acc-ink)}}
+svg.ftree .tn:hover rect{{stroke:var(--acc-ink)}} svg.ftree .tnx:hover rect{{stroke:var(--line)}}
 svg.ftree .tnsel rect{{stroke:var(--acc);stroke-width:1.6;fill:var(--acc-soft)}}
 svg.ftree .tnbad rect{{stroke:var(--bad)}}
 svg.ftree .tnt{{font:550 12.5px var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);
@@ -8566,6 +8640,15 @@ def queue_alarms(items: list[dict[str, Any]]) -> bool:
                for it in items)
 
 
+def _origin(store: dict[str, Any], key: str) -> str | None:
+    """`history.baseline_origin`, never raising: an unreadable entry has no known origin."""
+    try:
+        from .history import baseline_origin
+        return baseline_origin(store, key)
+    except Exception:  # noqa: BLE001 — wording only; None keeps the long-standing words
+        return None
+
+
 def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """The human gates on this machine, one entry each, in the order they are served (the
     spec's kinds): 1 servers whose agents are refused right now (changed since approval, newest
@@ -8593,6 +8676,9 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
                       "changes": total, "hostile": list(rep.hostile),
                       "approved_at": str(entry.get("approved_at") or ""),
                       "approved_by": str(entry.get("approved_by") or ""),
+                      # history's one origin rule, so a fleet-accepted first sighting is not
+                      # told "nobody has approved this server yet".
+                      "origin": _origin(store, it["key"]),
                       "seen_at": str(it.get("seen_at") or "")})
     entries = d.get("entries") or {}
     _calls = d.get("fleet_calls")
@@ -8956,10 +9042,14 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # None and the headline still read "changed since you approved it"). The fallback is
             # right — comparing against the first sighting beats comparing against nothing — but
             # the sentence has to say which anchor it actually used.
-            head = (f'{_esc(it["name"])} changed since you approved it on {_esc(when)}.'
-                    if when else
-                    f'{_esc(it["name"])} changed since it was first seen — '
-                    'nobody has approved this server yet.')
+            if when:
+                head = f'{_esc(it["name"])} changed since you approved it on {_esc(when)}.'
+            elif it.get("origin") == "fleet":
+                head = (f'{_esc(it["name"])} changed since it was first seen — the baseline your '
+                        'fleet approval accepted.')
+            else:
+                head = (f'{_esc(it["name"])} changed since it was first seen — '
+                        'nobody has approved this server yet.')
             n = it["changes"]
             # NAME THE KIND THAT CHANGED. "the tools it declares" was hardcoded, so a resource or
             # prompt change was reported as a tool change (dadan again: the one change was

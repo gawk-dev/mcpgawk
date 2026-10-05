@@ -8,7 +8,7 @@ import { serversOf, toConfig } from "./config.js";
 import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
-import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
+import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, compareSharedBaseline, diffPins, hasDrift, } from "./pins.js";
 import { redactAuditEvent, redactDocument, redactText } from "./redact.js";
 import { buildReport, exitCodeForStatus, groupCheckErrors, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
@@ -301,20 +301,21 @@ licenseOpts = {}) {
     if (!baselinePath) {
         const shared = await readSharedBaseline();
         if (shared) {
-            for (const r of reports) {
-                const entry = shared.servers[r.server];
-                const priorTools = entry?.tools;
-                if (!priorTools || Object.keys(priorTools).length === 0)
-                    continue;
-                const prior = Object.entries(priorTools).map(([name, hash]) => ({ name, hash }));
-                const d = diffPins(prior, r.pins.tools);
-                driftByServer[r.server] = d;
-                if (hasDrift(d))
+            // Looked up by CONFIG name through the engine's own index, and compared like basis with
+            // like basis: the two halves of why this hop used to be silently inert (pins.ts).
+            const results = compareSharedBaseline(shared, reports.map((r) => r.pins));
+            for (const [server, c] of Object.entries(results)) {
+                driftByServer[server] = c.drift;
+                if (hasDrift(c.drift))
                     drifted = true;
             }
-            const compared = Object.keys(driftByServer).length;
+            const compared = Object.keys(results).length;
             if (compared > 0) {
                 log(`\nBaseline: comparing ${compared} server(s) against what you approved with \`mcpgawk approve\`.`);
+                for (const [server, c] of Object.entries(results)) {
+                    if (c.reason)
+                        log(`  ${server}: ${c.reason}.`);
+                }
             }
         }
     }

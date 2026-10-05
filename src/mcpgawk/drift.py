@@ -841,18 +841,24 @@ def _excerpt(text: str) -> str:
 
 def render_headline(names: list[str], hostile: list[str] | None = None,
                     injected: list[str] | None = None,
-                    escalated: list[str] | None = None) -> str:
+                    escalated: list[str] | None = None,
+                    origins: "dict[str, str | None] | None" = None) -> str:
     """The first thing a fleet scan says when something changed.
 
     Drift used to print AFTER the fleet list, under a wall of token counts — so the one finding a
     general-purpose agent cannot produce was the last thing the reader reached, on the path almost
     every user takes (any machine with more than one server). Cost is a commodity measurement; a
     server changing after you approved it is not. It leads.
+
+    `origins` maps each name to `history.baseline_origin`; "since you approved" is said only when a
+    person approved every baseline (`history.since_words`). Omitted, every baseline is taken as
+    recorded before origins were — the wording such a baseline has always had.
     """
+    from .history import since_words
     n = len(names)
     what = "server has" if n == 1 else "servers have"
-    them = "it" if n == 1 else "them"
-    head = f"  ⚠  {n} {what} CHANGED since you approved {them}: {', '.join(names)}"
+    since = since_words([(origins or {}).get(x) for x in names])
+    head = f"  ⚠  {n} {what} CHANGED {since}: {', '.join(names)}"
     if hostile:
         # Not all change is equal, and the headline must not flatten them. A rewrite that added an
         # injection signature is the thing this product exists to catch; saying it in the same voice
@@ -919,6 +925,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         # never ran `approve` that they had (new-developer walk, 2026-09-26).
         head = (f"    ⟳ DRIFT on {name} — changed since first seen"
                 f"{' ' + when if when else ''}; you have not approved this server yet:")
+    elif r.baseline_origin == "fleet":
+        # First seen, then accepted by `approve --fleet`: an approval, but of the fleet, given
+        # after this baseline was recorded — so the date is the sighting's, said as such.
+        head = (f"    ⟳ DRIFT on {name} — changed since first seen"
+                f"{' ' + when if when else ''}, the baseline your fleet approval accepted:")
     elif when:
         # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
         # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say

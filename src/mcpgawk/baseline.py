@@ -131,6 +131,7 @@ def export(path: str | None = None) -> dict[str, Any]:
     Only APPROVED state crosses this boundary — never the sighting history. What a server looked
     like last Tuesday is scan's business; what the operator has agreed to trust is everyone's.
     """
+    from . import drift   # local, like publish's: keeps the module graph acyclic
     store = history.load(path or history.default_path())
     out: dict[str, Any] = {}
     for key, entry in (store.get("servers") or {}).items():
@@ -142,6 +143,12 @@ def export(path: str | None = None) -> dict[str, Any]:
         out[key] = {
             "pin": rec.get("pin"),
             "tools": dict(rec.get("tools") or {}),
+            # WHICH RULE minted `tools` (drift.TOOLS_BASIS_*): 1 = hash(description) as scan writes
+            # it, 2 = fingerprint.surface_hashes as the monitor spine publishes it. Without it a
+            # reader cannot tell the two apart and diffs one against the other — verify did, and
+            # would have called every tool of an unchanged scan-approved server changed. The
+            # deduction (`tools_basis_of`), not the raw field, so a pre-field record still says.
+            "tools_basis": drift.tools_basis_of(rec),
             # The approval's OWN time and actor when recorded (2026-09-03 on); before that the
             # sighting's measurement time stood in for it, and `approved_by` is honestly absent.
             "approved_at": entry.get("approved_at"),      # None until the approval itself is dated
@@ -156,7 +163,31 @@ def export(path: str | None = None) -> dict[str, Any]:
                 if isinstance(ident, str) and ident.startswith("tool.") and isinstance(ann, dict)
             },
         }
-    return {"schema": SCHEMA, "servers": out}
+    return {"schema": SCHEMA, "servers": out, "names": _names_index(store, out)}
+
+
+def _names_index(store: dict[str, Any], exported: dict[str, Any]) -> dict[str, str]:
+    """Every name another runtime may hold for an exported server -> its key in `servers`.
+
+    `servers` is keyed by STORE IDENTITY (`mcp:<asserted name>`); verify knows only the CONFIG name
+    from mcp.json, so its `servers[name]` lookup never hit and the shared baseline was silently
+    never consulted. Resolution stays HERE, through `history.resolve` — the one rule approve, scan
+    and the guard use — so a name that is ambiguous, or that resolves to a record with no approval,
+    is absent rather than answered by first match. Entries are never duplicated under an alias:
+    every consumer that iterates `servers` would double-count."""
+    candidates: set[str] = set()
+    for key, entry in (store.get("servers") or {}).items():
+        candidates.add(key)
+        if key.startswith("mcp:"):
+            candidates.add(key[len("mcp:"):])
+        if isinstance(entry, dict):
+            candidates.update(a for a in entry.get("aliases") or [] if isinstance(a, str))
+    index: dict[str, str] = {}
+    for name in sorted(candidates):
+        key = history.resolve(store, name)
+        if key is not None and key in exported:
+            index[name] = key
+    return index
 
 
 #: Re-exported so every pillar raises and catches ONE exception type, and so this stays a single

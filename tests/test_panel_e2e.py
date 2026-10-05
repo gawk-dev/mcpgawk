@@ -326,8 +326,13 @@ def test_drift_is_pending_until_approved_via_the_button(panel):
         "the page never uses the 'Changed' tier — the vocabulary TIERS defines for a server that "
         "moved since you approved it (panel.py:278)")
     # ...and it must NOT be filed under the tier that means the opposite.
-    assert 'class="seg baseline"' not in body or "at baseline" not in low.split("fixture")[0][-200:], (
-        "the drifted server appears to be rendered as 'At baseline'")
+    # The tier's LABEL, read from TIERS: it was "At baseline" until 2026-10-05, now "Verified".
+    from mcpgawk.panel import TIERS
+    _lbl = {k: v for k, v, _ in TIERS}["baseline"].lower()
+    # Lookbehind: "verified" is a substring of "unverified", the neighbouring tier.
+    _near = low.split("fixture")[0][-200:]
+    assert 'class="seg baseline"' not in body or not re.search(rf"(?<!un){re.escape(_lbl)}", _near), (
+        f"the drifted server appears to be rendered as '{_lbl}'")
 
     # Keep is the documented no-op: message only, baseline untouched.
     status, _ = panel.post("keep", key="mcp:fixture")

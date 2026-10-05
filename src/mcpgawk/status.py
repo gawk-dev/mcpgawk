@@ -99,7 +99,7 @@ def hook_health_by_client() -> dict[str, str]:
     return out
 
 
-def render(*, hook_health: dict[str, str], guard_path: Path | None,
+def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path | None",
            agents: dict[str, int], baseline_total: int, pending: list[str],
            pending_keys: list[str] | None = None,
            behaviour_tools: int | None, enforce_available: bool,
@@ -156,8 +156,15 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
             # The honest one. Saying nothing here is how a gap becomes a belief of safety.
             out.append(f"      {name:<{width}}  --   no hook point; {count} server(s) reachable "
                        f"without a check")
-    if any(h != "absent" for h in hook_health.values()) and guard_path:
-        out.append(f"      hook: {guard_path}")
+    # EACH AGENT'S OWN HOOK FILE, and only where that agent has one. One path — Claude Code's
+    # settings.json — was printed whenever ANY agent had a hook, so a Cursor-only machine read
+    # "hook: ~/.claude/settings.json", a file that did not exist (e2e, 2026-10-05). A bare Path is
+    # Claude Code's, as it always was.
+    paths = guard_path if isinstance(guard_path, dict) else (
+        {"claude-code": guard_path} if guard_path else {})
+    for client in sorted(hook_health):
+        if hook_health[client] != "absent" and paths.get(client):
+            out.append(f"      {_label(client)} hook: {paths[client]}")
 
     out += ["", "  EXPECTED BEHAVIOUR"]
     if baseline_error:
@@ -282,12 +289,13 @@ def collect() -> dict:
     from . import history
 
     try:
-        from .guard import CLAUDE_USER_SETTINGS
+        from .agents import ADAPTERS
         # Per-agent, and asked of each agent's own config — not one boolean sniffed out of the
         # prose of `guard status` ("NOT installed" not in text), which could not distinguish a
         # broken hook from a working one and knew nothing about any agent but Claude Code.
         hook_health = hook_health_by_client()
-        guard_path: Path | None = CLAUDE_USER_SETTINGS
+        # The file each agent's hook lives in — the one `hook_health_for` read.
+        guard_path: dict[str, Path] | None = {k: a.config for k, a in ADAPTERS.items()}
     except Exception:                              # noqa: BLE001
         hook_health, guard_path = {}, None
 
@@ -319,8 +327,8 @@ def collect() -> dict:
         # so a held sighting — a server that appeared after the fleet approval and that nobody has
         # approved — was counted here as "at an approved baseline" (walk, 2026-10-05). The panel's
         # policy row and protect's "Protected" count already asked this question.
-        baseline_total = len([k for k in servers if k not in pending_keys
-                              and history.approved(store, k) is not None])
+        from .protect import at_approved_baseline
+        baseline_total = len(at_approved_baseline(store, pending_keys))
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
