@@ -10,7 +10,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mcpgawk.discover import detect_unscannable, discover_servers
+
+
+@pytest.fixture(autouse=True)
+def _cwd_is_the_temp_tree(tmp_path, monkeypatch):
+    """Project scope reads `.mcp.json` from the working directory. The public repo commits one (the
+    Claude plugin's server declaration), so run from its root these tests discovered it and 13 went
+    red (2026-10-05, the 0.1.69 public suite). `home` is injected; the cwd must be too."""
+    monkeypatch.chdir(tmp_path)
 
 
 def _write(home: Path, rel: str, obj) -> None:
