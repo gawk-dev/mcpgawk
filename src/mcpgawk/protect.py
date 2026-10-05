@@ -130,7 +130,11 @@ def protection_report(store: dict[str, Any], guard_line: str,
     'not checked' block is never omitted and never summarised into a number."""
     servers = store.get("servers") or {}
     waiting = history.pending(store)
-    covered = [k for k in servers if k not in waiting]
+    appeared = history.held(store)
+    # Only a server with an approved record is covered. Counting every row put a planted server
+    # that appeared after the fleet approval under "Protected" (0.1.68, 2026-10-04).
+    covered = [k for k in servers
+               if k not in waiting and history.approved(store, k) is not None]
 
     out: list[str] = [""]
     if waiting:
@@ -144,6 +148,16 @@ def protection_report(store: dict[str, Any], guard_line: str,
 
     out.append(f"  Protected: {len(covered)} server(s) at their approved baseline.")
     out.append(f"  {guard_line}")
+
+    if appeared:
+        fleet = history.fleet_baseline(store) or {}
+        since = str(fleet.get("approved_at") or "")[:10] or "an earlier date"
+        out.append("")
+        out.append(f"  Appeared ({len(appeared)}) — in an agent config since your fleet approval on "
+                   f"{since}, and given no baseline:")
+        for key in appeared:
+            out.append(f"      {history.display_name(store, key)}")
+        out.append("    Review it with `mcpgawk scan`, then accept it: mcpgawk approve <name>")
 
     if unchecked:
         out.append("")

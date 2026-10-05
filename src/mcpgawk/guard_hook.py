@@ -20,9 +20,11 @@ WHAT IT DECIDES, and — just as important — what it refuses to decide:
     This is the rug-pull, caught at the moment it matters.
   * A tool ABSENT from an otherwise-approved server → **deny**. A tool that appeared after
     approval is exactly the shape a malicious update takes.
-  * A server with NO approved baseline → **defer**, always. "Never approved" is not "violated":
-    blocking here would break every tool call on a machine that has simply never run
+  * A server with NO approved baseline → **defer** by default. "Never approved" is not
+    "violated": blocking here would break every tool call on a machine that has simply never run
     `mcpgawk approve`, which is most machines. Trust-on-first-use is scan's job, not the guard's.
+    In STRICT mode (`mcpgawk guard install --strict`, carried in the projection) → **deny**: the
+    person chose to refuse anything they never approved, including a server planted in a config.
   * Anything we cannot parse or read → **defer, loudly** on stderr. A security tool that bricks
     an agent session because its own baseline file was corrupt has done more harm than the drift
     it was watching for.
@@ -289,6 +291,19 @@ def tools_comparable(server: str, store_path: Path) -> bool:
     return "seen_not_compared" not in record
 
 
+def _strict(store_path: Path) -> bool:
+    """Whether the projection says the guard is in strict mode. Read only when a call has no
+    baseline, so the common path pays nothing for it. Unreadable → False: the projection reader
+    has already said why it is deferring."""
+    try:
+        proj = projection_path(store_path)
+        raw = json.loads(proj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    guard = raw.get("guard") if isinstance(raw, dict) else None
+    return isinstance(guard, dict) and guard.get("strict") is True
+
+
 def _record_from_projection(server: str,
                             store_path: Path) -> tuple[dict | None, str | None]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
@@ -436,6 +451,19 @@ def _decide(event: dict, store_path: Path | None,
     core = _load_sibling("decision")
     if core is None:
         return None, note, "declared", False, None, None
+
+    # STRICT: no baseline is a refusal, not a pass. Only on a FRESH projection that simply does
+    # not list this server (note is None); a stale or unreadable projection still defers loudly,
+    # because there the absence proves nothing about what was approved.
+    strict_fn = getattr(core, "strict_no_baseline_reason", None)
+    if approved is None and note is None and callable(strict_fn) and _strict(store):
+        reason = strict_fn(server, tool)
+        human = None
+        line_fn = getattr(core, "human_line", None)
+        code_fn = getattr(core, "reason_code", None)
+        if callable(line_fn) and callable(code_fn):
+            human = line_fn(server, tool, code_fn(reason))
+        return _deny(fmt, reason, human), None, "declared", True, reason, None
 
     # The behavioural tier (free since Task 0): observations verify recorded for THIS server,
     # plus this session's earlier observed-source calls from the spool. Both are gathered only

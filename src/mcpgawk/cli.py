@@ -682,6 +682,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--all", action="store_true", help="approve every server with pending drift")
     a.add_argument("--list", action="store_true",
                    help="show which servers have changes you have not approved, and change nothing")
+    a.add_argument("--fleet", action="store_true",
+                   help="accept every server now in your agent configs as your fleet; a server "
+                        "that appears later is named instead of trusted")
 
     w = sub.add_parser(
         "wrong",
@@ -711,6 +714,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="default: status")
     g.add_argument("--settings", metavar="PATH",
                    help="settings file to edit (default: ~/.claude/settings.json)")
+    g.add_argument("--strict", action="store_true",
+                   help="with install: refuse calls to any server with no baseline on this machine")
+    g.add_argument("--no-strict", action="store_true",
+                   help="with install: switch strict mode off (run it in your own terminal)")
 
     k = sub.add_parser(
         "skills",
@@ -1250,15 +1257,30 @@ def _approve(args) -> int:
     # agent would be asked to approve its way past one. See baseline.approval_blocked_reason.
     from .baseline import approval_blocked_reason
     blocked = approval_blocked_reason()
-    if blocked and not (args.list or (not args.server and not args.all)):
+    if blocked and (getattr(args, "fleet", False)
+                    or not (args.list or (not args.server and not args.all))):
         print(f"mcpgawk approve: refusing — {blocked}", file=sys.stderr)
         return 4
+    if getattr(args, "fleet", False):
+        return _approve_fleet()
     path = history.default_path()
     store, _store_err = _store_or_say_why(path)
     _warn_if_store_unreadable(_store_err)
     waiting = history.pending(store)
 
     if args.list or (not args.server and not args.all):
+        appeared = history.held(store)
+        if appeared:
+            print(f"{len(appeared)} server(s) appeared after your fleet approval and have no "
+                  f"baseline:\n")
+            for key in appeared:
+                print(f"    {history.display_name(store, key)}  ({key})")
+            print("\nReview it first — `mcpgawk scan` names it. Then accept it:")
+            for key in appeared:
+                print(f"    mcpgawk approve {shlex.quote(key)}")
+            print()
+        if not waiting and appeared:
+            return 0 if args.list else 1
         if not waiting:
             if _store_err:
                 print("Nothing to compare — the approval store is unreadable, so whether anything "
@@ -1305,6 +1327,30 @@ def _approve(args) -> int:
         # Name what was approved. "Approved." alone leaves a user unsure WHAT they just trusted.
         print(f"✓ approved {names} — {rec.get('tool_count', '?')} tools, "
               f"as seen {rec.get('measured_at') or 'just now'}. Future drift is measured from here.")
+    return 0
+
+
+def _approve_fleet() -> int:
+    """`mcpgawk approve --fleet` — accept the servers in your agent configs today as your fleet."""
+    try:
+        found, _sources = discover_report()
+    except Exception as exc:                        # noqa: BLE001 - say it, never record half
+        print(f"mcpgawk approve --fleet: could not read your agent configs ({exc}).",
+              file=sys.stderr)
+        return 4
+    try:
+        n, adopted = history.approve_fleet(found)
+    except history.ApprovalBlocked as exc:
+        print(f"mcpgawk approve: refusing — {exc}", file=sys.stderr)
+        return 4
+    clients = {k.split("/", 1)[0] for k in history.fleet_targets(found)}
+    print(f"✓ fleet approved — {n} entr{'y' if n == 1 else 'ies'} across {len(clients)} agent "
+          f"config{'s' if len(clients) != 1 else ''}. A server that appears after this is named "
+          f"the next time you run `mcpgawk`, and gets no baseline until you approve it.")
+    if adopted:
+        store = history.load()
+        print(f"  Also approved what had appeared: "
+              f"{', '.join(history.display_name(store, k) for k in adopted)}.")
     return 0
 
 
@@ -1767,6 +1813,9 @@ class _Sighting(NamedTuple):
     previous: dict | None
     report: Any
     reidentified_from: str | None
+    #: True when this server appeared after the fleet approval and its sighting was kept WITHOUT
+    #: becoming a baseline. `previous is None` alone cannot tell that from a first sighting.
+    appeared: bool = False
 
 
 def _collisions(snaps) -> set[str]:
@@ -1785,7 +1834,7 @@ def _collisions(snaps) -> set[str]:
 
 
 def _record_sighting(sn, m, *, now: str, collided=frozenset(),
-                     alias: str | None = None) -> "_Sighting | None":
+                     alias: str | None = None, hold: bool = False) -> "_Sighting | None":
     """THE single writer for a measured server. Every path that MEASURES must come through here.
 
     WHY IT IS A FUNCTION AND NOT A LOOP BODY (found 2026-08-27, on the founder's own machine). The
@@ -1844,14 +1893,19 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
         was = None
     # `alias` names the record for an AD-HOC target (`_adhoc_name`); a config scan's label IS
     # the config name, so the default stands there.
-    previous = history.record(key, current, migrate_from=migrate_keys, alias=alias or sn.name)
+    previous = history.record(key, current, migrate_from=migrate_keys, alias=alias or sn.name,
+                              adopt_first=not hold)
+    # Held: kept, not adopted. Read back rather than inferred from `hold`, because `record` also
+    # holds a server that was ALREADY awaiting approval whatever this caller passed.
+    held_now = previous is None and key in history.held(history.load())
     report = drift.compare(previous, current)
     if report is not None:
         # The store read above already holds this key's approval, unless `record` just adopted it
         # from a migrated key; only then is a second read needed.
         known = key in (store.get("servers") or {})
         report.baseline_origin = history.baseline_origin(store if known else history.load(), key)
-    return _Sighting(key=key, previous=previous, report=report, reidentified_from=was)
+    return _Sighting(key=key, previous=previous, report=report, reidentified_from=was,
+                     appeared=held_now)
 
 
 def with_stored_login(entry: dict) -> dict:
@@ -2193,6 +2247,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         rest = [args.action]
         if args.settings:
             rest += ["--settings", args.settings]
+        if args.strict:
+            rest.append("--strict")
+        if args.no_strict:
+            rest.append("--no-strict")
         return guard_main(rest)
 
     # No args at all is VALID: it means "discover and scan everything on this machine". _run handles
@@ -2250,6 +2308,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
     new_baselines: list[str] = []
     reidentified: dict[str, str] = {}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # THE FLEET CHECK. Only on a discovery run — an explicit config or URL is not "your fleet".
+    appeared, fleet_since = _appeared_this_run(args, entries, skipped)
+    held_names: dict[str, str] = {}          # appeared name -> what happened to its baseline
     if args.track:
         # Keying on the server's asserted identity (so a rename can't orphan a baseline) means two
         # config entries for the SAME server collapse onto one key. Left alone they overwrite each
@@ -2259,12 +2320,19 @@ def _dispatch(argv: list[str] | None = None) -> int:
         collided = _collisions(snaps)
         for sn, m in zip(snaps, measurements):
             seen_now = _record_sighting(sn, m, now=now, collided=collided,
-                                        alias=_adhoc_name(sn.name, entries.get(sn.name)))
+                                        alias=_adhoc_name(sn.name, entries.get(sn.name)),
+                                        hold=sn.name in appeared)
             if seen_now is None:
                 continue          # an errored probe would record an empty tool list as the truth
             if seen_now.reidentified_from:
                 reidentified[sn.name] = seen_now.reidentified_from
-            if seen_now.previous is None:
+            if sn.name in appeared:
+                # A changed target can reach a server whose asserted identity already HAS a
+                # baseline; that record stays and drift is measured from it. Say which.
+                held_names[sn.name] = ("no baseline recorded" if seen_now.appeared else
+                                       "the server it reaches already had a baseline, and "
+                                       "changes are measured from that")
+            if seen_now.previous is None and not seen_now.appeared:
                 new_baselines.append(sn.name)
             if seen_now.report and seen_now.report.any:
                 drift_reports[sn.name] = seen_now.report
@@ -2380,11 +2448,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
                   f"{', '.join(sorted(display_name(lab, _adhoc_name(lab['name'], entries.get(lab['name']))) for lab in labels if lab['name'] in new_baselines))}")
             print("    From now on a scan reports what CHANGED — the one thing looking at your "
                   "machine today can never tell you.")
+        _print_appeared(appeared, held_names, fleet_since, args)
         print()
         late: dict[str, _Sighting] = {}
         refreshed = _offer_batched_auth(rows, args, entries, sightings=late,
                                         now=now if args.track else None,
-                                        fleet_snaps=snaps)
+                                        fleet_snaps=snaps, appeared=frozenset(appeared))
         any_error = any(lab["x-mcpgawk"].get("caveats") for lab in labels)
         if refreshed:
             # Redraw with the signed-in servers now MEASURED, rather than sending the user back to
@@ -2405,6 +2474,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
                     print(f"  ⛔ {name} now identifies itself as a DIFFERENT server "
                           f"(was {seen_now.reidentified_from}). Its baseline does not carry over — "
                           f"treat it as unreviewed.")
+                elif seen_now.appeared:
+                    print(f"  ⚠ APPEARED  {name} — measured after sign-in; no baseline recorded "
+                          f"until you approve it.")
                 elif seen_now.previous is None:
                     print(f"  ✓ Baseline recorded for {name} — from now on a scan reports what "
                           f"CHANGED.")
@@ -2422,7 +2494,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                                          for s in late.values())
         _protection_nudge(bool(rows))
         _behavioural_capability_note()
-        return 1 if (any_error or failed) else 0
+        return 1 if (any_error or failed or appeared) else 0
 
     any_error = False
     # DRIFT LEADS — design-contract item 2 (drift over inventory: the noise control). Once a
@@ -2453,6 +2525,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # rest of the surface — unchanged since approval — stays behind --full.
             print("\n" + drift.render(shown, rep))
             _print_accept(drift_keys.get(name))
+        elif name in appeared:
+            # Never "no change since your baseline": it has none. Named in the block below.
+            print("\n" + render_cli(lab, verbose=False, shown=shown))
         elif name in new_baselines:
             print(f"\n  ✓ {shown}: first scan — baseline recorded. Scan it again later and "
                   f"mcpgawk tells you if anything changed. What it can do:")
@@ -2500,6 +2575,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     unlabelled = [r for r in rows if r.name not in {lab["name"] for lab in labels}]
     if unlabelled:
         print("\n" + fleet.render_fleet(unlabelled))
+    _print_appeared(appeared, held_names, fleet_since, args)
     # Local (stdio) servers — launched this run or merely configured. Both inherit the same ambient
     # credentials the moment anything starts them (your IDE starts a server you declined HERE), so
     # both count, as 4dd441f decided. The one exception is a package the registry says does not
@@ -2523,7 +2599,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     _named = ({lab["name"] for lab in labels} | {r.name for r in unlabelled} | {n for n, _ in skipped})
     _protection_nudge(bool(_named - not_run))
     _behavioural_capability_note()
-    return 1 if (any_error or failed) else 0
+    return 1 if (any_error or failed or appeared) else 0
 
 
 def _protection_nudge(has_servers: bool) -> None:
@@ -2543,6 +2619,75 @@ def _protection_nudge(has_servers: bool) -> None:
         # 2026-09-26). Bare `mcpgawk` is still the command: it enables every agent with a hook.
         print("  Your agents are not checking these servers yet. To turn that on, run `mcpgawk` "
               "with no arguments.\n")
+
+
+#: Printed on a discovery run when no fleet has been approved yet.
+FLEET_HINT = ("Run `mcpgawk approve --fleet` once, and a server that appears later is named "
+              "instead of trusted.")
+
+
+def _appeared_this_run(args, entries: dict, skipped: list) -> "tuple[dict, str | None]":
+    """({display name: [(client/name, target)]}, fleet approval date) for this run.
+
+    Discovery runs only: `scan <config>` and `--stdio/--http/--sse` name their own targets, which
+    are not "your fleet". Returns ({}, None) when no fleet was ever approved."""
+    if getattr(args, "config", None) or args.stdio or args.http or args.sse:
+        return {}, None
+    try:
+        store = history.load()
+        if history.fleet_baseline(store) is None and not history.held(store):
+            return {}, None
+        # Judged on the configs as WRITTEN, not on `entries`: a stored login rewrites an entry's
+        # url/headers before the probe, and that must not read as a changed target. ONE helper,
+        # shared with `status` and the panel, so the three surfaces cannot disagree.
+        found, _sources = discover_report()
+        appeared, since = history.appeared_now(store, found)
+        if since is None:
+            return {}, None
+        if args.only:
+            scanned = set(entries) | {n for n, _ in skipped}
+            appeared = {n: v for n, v in appeared.items() if n in scanned}
+        return appeared, since
+    except Exception as exc:                         # noqa: BLE001 - say it, never go quiet
+        print(f"mcpgawk: the fleet check could not run ({type(exc).__name__}: {exc}) — a server "
+              f"that appeared since your fleet approval would NOT be named this run.",
+              file=sys.stderr)
+        return {}, None
+
+
+def _print_appeared(appeared: dict, held_names: dict, since: "str | None", args) -> None:
+    """The APPEARED block, or — with no fleet approved yet — the one hint line."""
+    if since is None:
+        if not (getattr(args, "config", None) or args.stdio or args.http or args.sse):
+            print(f"\n  {FLEET_HINT}")
+        return
+    if not appeared:
+        return
+    default = ("no baseline recorded" if not args.track
+               else "not measured this run, so no baseline recorded")
+    print()
+    for line in appeared_lines(appeared, since, held_names, default):
+        print(line)
+
+
+def appeared_lines(appeared: dict, since: str, states: dict, default: str) -> list[str]:
+    """The APPEARED block's lines — ONE wording, printed by `scan` and listed by `status`.
+    `states` says per name what happened to its baseline; `default` covers the rest."""
+    out = [f"  ⚠ APPEARED ({len(appeared)}) — in an agent config since your fleet approval; "
+           f"named, not trusted:"]
+    for name in sorted(appeared):
+        for key, target in appeared[name]:
+            where = target.get("url") or " ".join(target.get("command") or [])
+            if where:
+                out.append(f"      {name}  ({key.split('/', 1)[0]}) → {where}")
+            else:
+                # A held sighting whose config entry has gone: nothing to point at but the record.
+                out.append(f"      {name}  (held as {key}; in no agent config now)")
+        state = states.get(name) or default
+        out.append(f"        appeared after your fleet approval on {since}; {state}.")
+    out.append("    Your agents' calls to it are checked against nothing you approved. Review it, "
+               "then accept it: mcpgawk approve <name>")
+    return out
 
 
 def _print_accept(key: str | None) -> None:
@@ -2637,7 +2782,7 @@ def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> 
 
 def _offer_batched_auth(rows: list, args, entries: dict, *,
                         sightings: dict | None = None, now: str | None = None,
-                        fleet_snaps=()) -> dict:
+                        fleet_snaps=(), appeared: frozenset = frozenset()) -> dict:
     """ONE prompt for every server that needs credentials — never one prompt per server, which the
     founder rejected outright as the painpoint this view exists to remove.
 
@@ -2705,7 +2850,7 @@ def _offer_batched_auth(rows: list, args, entries: dict, *,
         # honoured by one of two recording paths is not honoured.
         if getattr(args, "track", False):
             seen_now = _record_sighting(snap, m, now=now or datetime.now(timezone.utc).isoformat(
-                timespec="seconds"), collided=collided)
+                timespec="seconds"), collided=collided, hold=row.name in appeared)
             if sightings is not None and seen_now is not None:
                 sightings[row.name] = seen_now
         label = _label_for(snap, m, entry, args)

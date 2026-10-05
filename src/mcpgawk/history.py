@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -489,7 +490,10 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             servers[key] = row
         projection = {"schema": PROJECTION_SCHEMA,
                       "source": {"mtime_ns": st.st_mtime_ns, "size": st.st_size},
-                      "servers": servers}
+                      "servers": servers,
+                      # STRICT rides in the same file the hook already trusts, so the hook needs no
+                      # second reader of history.json to know whether "no baseline" means deny.
+                      "guard": {"strict": guard_strict(store)}}
         proj = projection_path(path)
         tmp = f"{proj}.{os.getpid()}.tmp"
         try:
@@ -599,7 +603,7 @@ def _shed_synthetic_aliases(store: dict[str, Any]) -> int:
 
 def record(key: str, rec: dict[str, Any], path: str | None = None,
            keep: int = 50, migrate_from: tuple[str, ...] = (),
-           alias: str | None = None) -> dict[str, Any] | None:
+           alias: str | None = None, adopt_first: bool = True) -> dict[str, Any] | None:
     """Append `rec` under `key` and return the APPROVED baseline, the whole cycle under one lock.
 
     Returning the baseline from inside the lock is what makes drift correct under concurrency:
@@ -613,6 +617,13 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
 
     First sighting is trust-on-first-use: with nothing approved yet, this record becomes the
     baseline and `None` is returned, so a first scan never reports drift against itself.
+
+    EXCEPT for a server that APPEARED after the fleet was approved (`adopt_first=False`, decided
+    by the caller against `fleet_appeared`). Its sighting is kept — `approve <name>` needs one to
+    adopt — but it is marked AWAITING_APPROVAL and never becomes the baseline here. Measured on
+    0.1.68: a planted `mcp-sync` entry became its own approval on first sight. Once marked, no
+    later scan adopts it either, whatever the caller passes: only `approve` and `approve --fleet`
+    clear the mark, and both go through the human gate.
     """
     path = path or default_path()
     # IN PLACE, before anything compares it: the caller keeps this same object and diffs it against
@@ -626,7 +637,11 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
         adopted = _migrate(store, key, migrate_from, alias)
         base = approved(store, key)
         entry = server_entry(store, key)
-        if base is None:
+        if base is None and (not adopt_first or entry.get(AWAITING_APPROVAL)):
+            entry[AWAITING_APPROVAL] = "appeared"
+            if not isinstance(entry.get("appeared_at"), str):
+                entry["appeared_at"] = rec.get("measured_at") or _now_iso()
+        elif base is None:
             entry["approved"] = rec          # trust-on-first-use
             # Say HOW it became the baseline. Without this a first sighting and a human `approve`
             # from before approved_at existed looked alike, and drift told a user who never
@@ -676,6 +691,7 @@ def approve(key: str, path: str | None = None, *,
             return None
         entry = server_entry(store, key)
         entry["approved"] = latest
+        entry.pop(AWAITING_APPROVAL, None)
         # PROVENANCE. `cli status` has printed `approved —` since the field it reads was never
         # written (2026-09-03); and "approved when, by whom" is the first thing a security team
         # asks of a baseline ("Approved May 18 · By: Security Admin"). Single operator today, so
@@ -683,6 +699,7 @@ def approve(key: str, path: str | None = None, *,
         entry["approved_at"] = _now_iso()
         entry["approved_by"] = _operator()
         entry["approved_via"] = "approve"
+        admit_to_fleet(store, key)
         save(store, path)
     return latest
 
@@ -991,6 +1008,10 @@ def approved(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     entry = store.get("servers", {}).get(key, {})
     if "approved" in entry:
         return entry["approved"]
+    if entry.get(AWAITING_APPROVAL):
+        # An appeared server was never approved — the oldest-sighting fallback is for stores
+        # written before ADR-0012, and applied here it would adopt the sighting on the next read.
+        return None
     hist = entry.get("history", [])
     return hist[0] if hist else None
 
@@ -1192,3 +1213,222 @@ def append(store: dict[str, Any], key: str, record: dict[str, Any], keep: int = 
     hist = server_entry(store, key).setdefault("history", [])
     hist.append(record)
     del hist[:-keep]  # bounded — keep the last `keep` sightings
+
+
+# ------------------------------------------------------------------------------------------- #
+# THE FLEET BASELINE. Trust-on-first-use answers "what did this server look like when I first saw
+# it" — it cannot answer "should this server be here at all". A remote entry planted in an agent
+# config was scanned, labelled CLEAN and given a baseline on its first run (0.1.68, 2026-10-04).
+# `approve --fleet` records which entries a person accepted; anything discovered afterwards that
+# is not in that list is APPEARED, and its first sighting is kept without becoming a baseline.
+# ------------------------------------------------------------------------------------------- #
+
+#: Top-level key in history.json holding the approved fleet.
+FLEET_KEY = "fleet"
+#: Marker on a server entry whose sighting is kept but must not become its baseline.
+AWAITING_APPROVAL = "awaiting_approval"
+#: Top-level key holding guard settings the hook reads through the projection.
+GUARD_KEY = "guard"
+
+
+def _fleet_token(tok: str) -> str:
+    """One launch token as stored: credential shapes masked, identity kept. A `name@version`
+    package spec is left alone — `redact()` reads it as an address and would mask the package."""
+    from .redact import redact
+    if "://" in tok:
+        return adhoc_target(tok)
+    if _PACKAGE_SPEC.match(tok):
+        return tok
+    return redact(tok) or tok
+
+
+#: `name@version` / `@scope/name@version` — the only `@` shape left unmasked. A bare "contains @"
+#: test let `--token=abc@123` through verbatim.
+_PACKAGE_SPEC = re.compile(r"^@?[\w.-]+(/[\w.-]+)?@[\w.^~<>=*-]+$")
+
+
+def fleet_targets(discovered: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """`{"<client>/<config name>": {"kind", "command"|"url", "sha256"}}` for a discovery map.
+
+    The stored command/url is MASKED (history.json is a file people open); the comparison runs on
+    `sha256` of the raw launch target, so masking can never make two different targets look the
+    same. `env` and `headers` are never stored."""
+    out: dict[str, dict[str, Any]] = {}
+    for disp, e in (discovered or {}).items():
+        if not isinstance(e, dict):
+            continue
+        if e.get("command"):
+            args = e.get("args") or []
+            raw = [str(e["command"]), *(str(a) for a in (args if isinstance(args, list)
+                                                          else [args]))]
+            target: dict[str, Any] = {"kind": "stdio",
+                                      "command": [_fleet_token(t) for t in raw]}
+        elif e.get("url"):
+            raw = [str(e["url"])]
+            target = {"kind": "http", "url": adhoc_target(str(e["url"]))}
+        else:
+            continue
+        target["sha256"] = hashlib.sha256(json.dumps(raw).encode("utf-8")).hexdigest()
+        names = e.get("_names")
+        keys = ([f"{c}/{n}" for c, n in names.items()] if isinstance(names, dict) and names
+                else [f"config/{disp}"])
+        for k in keys:
+            out[k] = dict(target)
+    return out
+
+
+def fleet_baseline(store: dict[str, Any]) -> dict[str, Any] | None:
+    """The approved fleet, or None when `approve --fleet` has never run on this machine."""
+    fleet = store.get(FLEET_KEY)
+    if isinstance(fleet, dict) and isinstance(fleet.get("entries"), dict):
+        return fleet
+    return None
+
+
+def fleet_appeared(fleet: dict[str, Any] | None,
+                   discovered: dict[str, Any]) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+    """`{display name: [(client/name, target), …]}` for every discovered entry that is not in the
+    approved fleet — new, or the same name now pointing at a different command or URL. Empty when
+    there is no fleet baseline: nothing was approved, so nothing can have appeared after it."""
+    if fleet is None:
+        return {}
+    approved_entries = fleet.get("entries") or {}
+    out: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for disp, e in (discovered or {}).items():
+        for k, t in fleet_targets({disp: e}).items():
+            prior = approved_entries.get(k)
+            if not isinstance(prior, dict) or prior.get("sha256") != t["sha256"]:
+                out.setdefault(disp, []).append((k, t))
+    return out
+
+
+def held(store: dict[str, Any]) -> list[str]:
+    """Keys whose sighting is kept but was never approved — servers that appeared after the fleet
+    approval and are waiting on a person."""
+    return sorted(k for k, e in (store.get("servers") or {}).items()
+                  if isinstance(e, dict) and e.get(AWAITING_APPROVAL) and "approved" not in e)
+
+
+def held_display_name(store: dict[str, Any], key: str, discovered: dict[str, Any]) -> str:
+    """The name a held store key is shown under — the panel's `classified_servers` rule exactly:
+    the discovered config name that is one of its aliases, else its first alias, else the key."""
+    entry = (store.get("servers") or {}).get(key) or {}
+    aliases = [str(a) for a in (entry.get("aliases") or []) if a]
+    return next((a for a in aliases if a in (discovered or {})), None) or \
+        (aliases[0] if aliases else key)
+
+
+def appeared_now(store: dict[str, Any], discovered: dict[str, Any]
+                 ) -> tuple[dict[str, list[tuple[str, dict[str, Any]]]], str | None]:
+    """ONE answer to "which servers appeared after the fleet approval?" for the CLI, `status` and
+    the panel — `({display name: [(client/name or store key, target)]}, approval date)`.
+
+    Two populations, because either alone misses one. `fleet_appeared` judges discovery as WRITTEN
+    against the approved fleet; `held` is every store entry whose sighting was kept without ever
+    being approved — including one whose config entry has since gone, which discovery alone can
+    no longer see. Three surfaces each answering this their own way is how one HOME read "1
+    appeared", "2 at an approved baseline" and "At baseline 0" at once (walk, 2026-10-05).
+
+    Returns ({}, None) when no fleet was ever approved and nothing is held. Pure: it RAISES on bad
+    input, and every caller turns that into a stated "the fleet check could not run", never into
+    an empty answer."""
+    fleet = fleet_baseline(store)
+    held_keys = held(store)
+    if fleet is None and not held_keys:
+        return {}, None
+    since = (str((fleet or {}).get("approved_at") or "")[:10] or "an earlier date")
+    appeared = fleet_appeared(fleet, discovered)
+    for key in held_keys:
+        name = held_display_name(store, key, discovered)
+        if name in appeared:
+            continue
+        if name in (discovered or {}):
+            appeared[name] = list(fleet_targets({name: discovered[name]}).items()) or \
+                [(key, {"kind": "held"})]
+        else:
+            appeared[name] = [(key, {"kind": "held"})]
+    return appeared, since
+
+
+def admit_to_fleet(store: dict[str, Any], key: str,
+                   discovered: dict[str, Any] | None = None) -> list[str]:
+    """Add the config entries that name `key` to the approved fleet. Returns the entries written.
+
+    Called INSIDE every gated writer of `approved`, under its lock, in its write. Approving one
+    server used to write its baseline and not its fleet entry, so the scan after `mcpgawk approve
+    mcp-sync` — the exact step every surface told the operator to take — printed "APPEARED (1)" and
+    "Protected: 2 server(s)" on the same run (live drive, 2026-10-05). Only this server's entries
+    are written (its aliases that a config names today, keyed client/name as `fleet_targets` keys
+    them), each stamped with its own `admitted_at`; the fleet's `approved_at` is not touched,
+    because nobody re-approved the fleet.
+
+    No fleet record: nothing to do — this never invents one. Discovery unreadable: said on stderr
+    and nothing written, so the server stays NAMED as appeared; that is the safe direction."""
+    fleet = fleet_baseline(store)
+    if fleet is None:
+        return []
+    if discovered is None:
+        try:
+            from .discover import discover_report
+            discovered, _sources = discover_report()
+        except Exception as exc:                   # noqa: BLE001 - say it, never go quiet
+            print(f"mcpgawk: approved {key}, but its fleet entry was NOT written — the agent "
+                  f"configs could not be read ({type(exc).__name__}: {exc}). It will still be "
+                  f"named as appeared; run `mcpgawk approve --fleet` once they can be read.",
+                  file=sys.stderr)
+            return []
+    entry = (store.get("servers") or {}).get(key) or {}
+    names = [str(a) for a in (entry.get("aliases") or []) if a and str(a) in (discovered or {})]
+    written: list[str] = []
+    now = _now_iso()
+    for name in names:
+        for fk, target in fleet_targets({name: discovered[name]}).items():
+            fleet["entries"][fk] = {**target, "admitted_at": now}
+            written.append(fk)
+    return written
+
+
+def approve_fleet(discovered: dict[str, Any],
+                  path: str | None = None) -> tuple[int, list[str]]:
+    """Record `discovered` as the approved fleet, and adopt every held sighting. Returns (number of
+    fleet entries, keys adopted). Gated exactly like `approve`: this moves trust."""
+    require_human_approval()
+    path = path or default_path()
+    entries = fleet_targets(discovered)
+    adopted: list[str] = []
+    with locked(path):
+        store = load(path)
+        now = _now_iso()
+        store[FLEET_KEY] = {"approved_at": now, "approved_by": _operator(), "entries": entries}
+        for key in held(store):
+            latest = last(store, key)
+            if latest is None:
+                continue
+            entry = server_entry(store, key)
+            entry["approved"] = latest
+            entry.pop(AWAITING_APPROVAL, None)
+            entry["approved_at"] = now
+            entry["approved_by"] = _operator()
+            entry["approved_via"] = "approve"
+            adopted.append(key)
+        save(store, path)
+    return len(entries), adopted
+
+
+def guard_strict(store: dict[str, Any]) -> bool:
+    """Whether the guard refuses calls to a server with no baseline."""
+    guard = store.get(GUARD_KEY)
+    return isinstance(guard, dict) and guard.get("strict") is True
+
+
+def set_guard_strict(on: bool, path: str | None = None) -> None:
+    """Persist strict mode. Switching it OFF loosens the guard, so it needs the person at the
+    keyboard; switching it on only tightens and needs no gate."""
+    if not on:
+        require_human_approval()
+    path = path or default_path()
+    with locked(path):
+        store = load(path)
+        guard = store.get(GUARD_KEY)
+        store[GUARD_KEY] = {**(guard if isinstance(guard, dict) else {}), "strict": bool(on)}
+        save(store, path)

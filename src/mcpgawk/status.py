@@ -106,7 +106,9 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
            monitor_open: int | None = None, baseline_error: str | None = None,
-           agents_error: str | None = None, unprotected: str | None = None) -> str:
+           agents_error: str | None = None, unprotected: str | None = None,
+           appeared: dict | None = None, appeared_since: str | None = None,
+           appeared_states: dict | None = None, appeared_error: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
@@ -198,6 +200,17 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
                 out.append(f"          mcpgawk approve {shlex.quote(key)}")
         else:
             out.append("      Accept: mcpgawk approve <name>")
+    if appeared_error:
+        # Said, never an empty block: "nothing appeared" and "could not look" must not read alike.
+        out += ["", f"      ⚠ the fleet check could not run ({appeared_error}) — a server that "
+                    f"appeared since your fleet approval would NOT be named here."]
+    elif appeared and appeared_since:
+        # THE SAME WORDS the scan prints, from the same function: one rule, one wording.
+        from .cli import appeared_lines
+        out.append("")
+        out += ["    " + line for line in appeared_lines(appeared, appeared_since,
+                                                         appeared_states or {},
+                                                         "no baseline recorded")]
 
     out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, hash-chained log)"]
     if enforce_available:
@@ -302,13 +315,43 @@ def collect() -> dict:
         store, baseline_error = history.load_checked(history.default_path())
         servers = store.get("servers") or {}
         pending_keys = history.pending(store)
-        baseline_total = len([k for k in servers if k not in pending_keys])
+        # APPROVED, not merely "not pending". `pending()` skips every entry with no approved record,
+        # so a held sighting — a server that appeared after the fleet approval and that nobody has
+        # approved — was counted here as "at an approved baseline" (walk, 2026-10-05). The panel's
+        # policy row and protect's "Protected" count already asked this question.
+        baseline_total = len([k for k in servers if k not in pending_keys
+                              and history.approved(store, k) is not None])
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
     except Exception as exc:                       # noqa: BLE001
         pending, pending_keys, baseline_total, muted_total = [], [], 0, 0
         baseline_error = f"{type(exc).__name__}: {exc}"
+        store = None
+
+    # APPEARED — the one helper the scan and the panel use, over the same store and discovery.
+    appeared: dict = {}
+    appeared_since: str | None = None
+    appeared_states: dict[str, str] = {}
+    appeared_error: str | None = None
+    try:
+        # An unreadable store is already said, louder, by the baseline line ("UNKNOWN, not
+        # zero"); a second warning would only repeat it. Discovery failing is NOT said anywhere
+        # else on a machine with a fleet approved, so it is said here.
+        if store is not None and not baseline_error:
+            if agents_error and (history.fleet_baseline(store) or history.held(store)):
+                raise RuntimeError(f"discovery failed: {agents_error}")
+            if not agents_error:
+                appeared, appeared_since = history.appeared_now(store, entries)
+        for _name in appeared:
+            _key = next((k for k, v in servers.items()
+                         if _name in ((v or {}).get("aliases") or [])), None)
+            if _key and store is not None and history.approved(store, _key) is not None:
+                appeared_states[_name] = ("the server it reaches already had a baseline, and "
+                                          "changes are measured from that")
+    except Exception as exc:                       # noqa: BLE001 - say it, never go quiet
+        appeared, appeared_since = {}, None
+        appeared_error = f"{type(exc).__name__}: {exc}"
 
     behaviour_tools: int | None = None
     try:
@@ -402,7 +445,9 @@ def collect() -> dict:
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
                   behavioural_unavailable=behavioural_unavailable,
-                  monitor_open=monitor_open, unprotected=unprotected)
+                  monitor_open=monitor_open, unprotected=unprotected,
+                  appeared=appeared, appeared_since=appeared_since,
+                  appeared_states=appeared_states, appeared_error=appeared_error)
 
 
 def collect_and_render() -> str:
@@ -441,6 +486,10 @@ def to_json(collected: dict, panel_data: dict | None = None) -> dict:
         "activity": collected.get("activity"),
         "pending": list(collected.get("pending") or []),
         "baseline_total": collected.get("baseline_total"),
+        # Servers in an agent config since the fleet approval, by the scan's own rule. A consumer
+        # reading `baseline_total` alone could not learn that anything had appeared.
+        "appeared": sorted(collected.get("appeared") or {}),
+        "appeared_since": collected.get("appeared_since"),
         "muted_total": collected.get("muted_total"),
         "behaviour_tools": collected.get("behaviour_tools"),
         "behavioural_unavailable": collected.get("behavioural_unavailable"),
@@ -449,7 +498,8 @@ def to_json(collected: dict, panel_data: dict | None = None) -> dict:
         "monitor_open": collected.get("monitor_open"),
         "last_activity": collected.get("last_activity"),
         "errors": {k: v for k, v in (("agents", collected.get("agents_error")),
-                                     ("baseline", collected.get("baseline_error"))) if v},
+                                     ("baseline", collected.get("baseline_error")),
+                                     ("appeared", collected.get("appeared_error"))) if v},
     }
     try:
         from . import panel

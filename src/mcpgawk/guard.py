@@ -293,6 +293,13 @@ def status(path: Path | None = None) -> str:
     return "\n".join(lines)
 
 
+def _strict_now() -> bool:
+    """Strict mode as persisted in history.json (the same value the hook reads via the
+    projection). False when the store cannot be read — status says off rather than guessing on."""
+    from . import history
+    return history.guard_strict(history.load())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     action = args[0] if args else "status"
@@ -303,18 +310,39 @@ def main(argv: list[str] | None = None) -> int:
             print("mcpgawk guard: --settings needs a path", file=sys.stderr)
             return 2
         override = Path(args[i + 1])
+    strict_on, strict_off = "--strict" in args, "--no-strict" in args
+    if (strict_on or strict_off) and action != "install":
+        print("mcpgawk guard: --strict and --no-strict go with install", file=sys.stderr)
+        return 2
+    if strict_on and strict_off:
+        print("mcpgawk guard: choose --strict or --no-strict, not both", file=sys.stderr)
+        return 2
 
     try:
         if action in ("status", "-h", "--help"):
             if action != "status":
-                print("usage: mcpgawk guard [status|install|uninstall] [--settings PATH]\n\n"
+                print("usage: mcpgawk guard [status|install|uninstall] [--settings PATH] "
+                      "[--strict|--no-strict]\n\n"
                       "Installs a Claude Code PreToolUse hook that checks every MCP tool call "
-                      "against your approved baseline, locally.")
+                      "against your approved baseline, locally. With --strict the hook also "
+                      "refuses calls to any server that has no baseline on this machine.")
                 return 0
             print(status(override))
+            print(f"  strict: {'on' if _strict_now() else 'off'}")
             return 0
         if action == "install":
+            if strict_on or strict_off:
+                from . import history
+                try:
+                    # Before the hook is written: a refused --no-strict must change nothing.
+                    history.set_guard_strict(strict_on)
+                except history.ApprovalBlocked as exc:
+                    print(f"mcpgawk guard: refusing — {exc}", file=sys.stderr)
+                    return 4
             print(install(override))
+            print(f"  strict: {'on' if _strict_now() else 'off'}"
+                  + (" — a call to a server with no baseline on this machine is refused."
+                     if _strict_now() else ""))
             print("  Claude Code picks this up without a restart.")
             return 0
         if action == "uninstall":

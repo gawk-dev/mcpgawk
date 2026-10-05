@@ -220,6 +220,7 @@ REASON_TOOL_ADDED = "tool-added"
 REASON_TOOL_CHANGED = "tool-changed"
 REASON_CREDENTIAL_SMUGGLED = "credential-smuggled"
 REASON_TOXIC_FLOW = "toxic-flow"
+REASON_NO_BASELINE_STRICT = "no-baseline-strict"
 
 
 def reason_code(reason: str | None) -> str | None:
@@ -234,6 +235,8 @@ def reason_code(reason: str | None) -> str | None:
         return REASON_CREDENTIAL_SMUGGLED
     if "was OBSERVED in a sandbox" in reason:
         return REASON_TOXIC_FLOW
+    if "the guard is in strict mode" in reason:
+        return REASON_NO_BASELINE_STRICT
     return None
 
 
@@ -245,9 +248,31 @@ def human_line(server: str, tool: str, code: str | None) -> str:
         REASON_TOOL_CHANGED: "its content changed since you approved it",
         REASON_CREDENTIAL_SMUGGLED: "the call fills a credential-shaped parameter you never approved",
         REASON_TOXIC_FLOW: "an observed sink ran after an observed source this session",
+        REASON_NO_BASELINE_STRICT: "it has no baseline on this machine and the guard is strict",
     }.get(code or "", "the approved baseline did not cover this call")
+    # `decide` lists changes to approved servers; a server with no baseline is named by `scan`.
+    where = "mcpgawk scan" if code == REASON_NO_BASELINE_STRICT else "mcpgawk decide"
     return (f"mcpgawk blocked {server}.{tool} — {what}. "
-            f"Review it with `mcpgawk decide` in your own terminal.")
+            f"Review it with `{where}` in your own terminal.")
+
+
+def strict_no_baseline_reason(server: str, tool: str) -> str:
+    """The strict-mode denial: a call to a server with NO baseline on this machine. Same
+    load-bearing properties as `deny_reason` — no executable remedy, no override named, stop and
+    tell the user. It names `mcpgawk scan` only, never the command that would clear it."""
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{server}' has no baseline on this machine and the guard is "
+        f"in strict mode, so the call to '{tool}' was refused: nothing the user approved says "
+        f"what this server is.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline or the guard — that requires the person at the keyboard, and attempting it "
+        f"from inside an agent session is itself treated as a red flag.\n"
+        f"Stop and tell the user exactly this: the MCP server '{server}' has no approved "
+        f"baseline on this machine, mcpgawk blocked the call because the guard is in strict "
+        f"mode, and they should run `mcpgawk scan` themselves to see what it is before deciding "
+        f"whether to trust it."
+    )
 
 
 def deny_reason(server: str, tool: str) -> str:

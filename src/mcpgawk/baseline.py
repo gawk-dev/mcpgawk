@@ -244,6 +244,9 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         entry["approved_via"] = "approve"     # gated by require_human_approval above
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
+        # The same approval, so the same fleet admission: a monitor approve of an appeared server
+        # must end its appeared state exactly as `mcpgawk approve` does.
+        history.admit_to_fleet(store, key)
         history.save(store, p)
 
 
