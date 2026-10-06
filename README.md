@@ -5,6 +5,7 @@
   </picture>
 </p>
 <p align="center"><em>One gateway in the path. On your machine.</em></p>
+<p align="center"><a href="https://www.producthunt.com/products/mcpgawk?launch=mcpgawk"><img alt="mcpgawk on Product Hunt" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1259498&theme=light" width="250" height="54"></a><br><strong>Live on Product Hunt today</strong>: questions and feedback welcome there.</p>
 
 # mcpgawk
 <!-- mcp-name: io.github.gawk-dev/mcpgawk -->
