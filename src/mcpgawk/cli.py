@@ -2150,6 +2150,16 @@ def _staleness_advisory() -> None:
         pass
 
 
+def _print_held_change(shown: str, key: str, held: dict, report) -> None:
+    """A server back to its approved form after a change since approval: say so, show the change it
+    made, and how to accept it. The guard holds its changed tools until then (history.held_sighting)."""
+    at = str(held.get("measured_at") or "")[:10] or "an earlier scan"
+    print(f"\n  ⚠ {shown}: matches your baseline now, but it CHANGED on {at} and changed back "
+          f"since. Its changed tools stay blocked until you approve. What it changed to:")
+    print(drift.render(shown, report))
+    _print_accept(key)
+
+
 def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
     """The scan's exit-code decision — one answer for --json, --fleet-json and the terminal view.
 
@@ -2363,6 +2373,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # name -> the store key, so a drift block can print the exact `approve` command: the name shown
     # for an ad-hoc scan ("cli-stdio") is deliberately not resolvable (new-developer walk, 2026-09-26).
     drift_keys: dict[str, str] = {}
+    seen_keys: dict[str, str] = {}          # every server recorded this run -> its store key
     pin_notes: dict[str, str] = {}          # servers whose pin this build cannot compare
     new_baselines: list[str] = []
     reidentified: dict[str, str] = {}
@@ -2393,6 +2404,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                                        "changes are measured from that")
             if seen_now.previous is None and not seen_now.appeared:
                 new_baselines.append(sn.name)
+            seen_keys[sn.name] = seen_now.key
             if seen_now.report and seen_now.report.any:
                 drift_reports[sn.name] = seen_now.report
                 drift_keys[sn.name] = seen_now.key
@@ -2403,6 +2415,23 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 # that skipped the exact anchor, which is this product's failure mode.
                 pin_notes[sn.name] = seen_now.report.pin_not_compared
 
+    # THE LATCH, said where a person looks. A server back to its approved form after a change since
+    # approval matches its baseline now, so it has no drift report, but the guard still holds the
+    # tools that changed and `status`/`approve --list` list it. Without this, scan printed
+    # "✓ no change since your baseline" under status's "changed — blocked; Review: mcpgawk scan"
+    # (measured 2026-10-08). Same exit as drift: an unanswered change is not a clean run.
+    held_changes: dict[str, tuple] = {}
+    if seen_keys:
+        _st = history.load()
+        for _nm, _k in seen_keys.items():
+            if _nm in drift_reports:
+                continue
+            _held = history.held_sighting(_st, _k)
+            if _held is None or history.sighting_to_review(_st, _k) is not _held:
+                continue
+            _rep = drift.compare(history.approved(_st, _k), _held)
+            if _rep is not None and _rep.any:
+                held_changes[_nm] = (_k, _held, _rep)
     # Drift must reach the MACHINE-READABLE output and the exit code, not only the pretty print.
     # A rug-pull that a CI job can't see is a rug-pull that ships: `--json` consumers and pipeline
     # gates were previously blind to it.
@@ -2427,11 +2456,19 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # No DriftReport exists for a re-identification, so a JSON consumer would see nothing
             # at all — the same blindness the exit code had.
             lab["x-mcpgawk"]["reidentified_from"] = reidentified[lab["name"]]
+        if lab["name"] in held_changes:
+            # THE LATCH in the document too: --json exited 1 with nothing saying why. The change the
+            # server made and reverted, in the same shape as `drift`, plus when it was seen.
+            _k, _held, _rep = held_changes[lab["name"]]
+            hd = asdict(_rep)
+            hd["changed_back"] = True
+            hd["changed_at"] = _held.get("measured_at")
+            lab["x-mcpgawk"]["held_change"] = hd
 
     # ONE exit code for both output modes (see _scan_failed). `--json` used to `return 0`
     # unconditionally — so a failed probe or a detected rug-pull reported success to CI, the same
     # class of lie as a false CLEAN.
-    failed = _scan_failed(labels, drift_reports, reidentified)
+    failed = _scan_failed(labels, drift_reports, reidentified) or bool(held_changes)
 
     if args.json:
         print(json.dumps(labels, indent=2))
@@ -2489,6 +2526,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 origins={n: r.baseline_origin for n, r in drift_reports.items()}))
             for name in sorted(drift_reports):
                 print(drift.render(name, drift_reports[name]))
+        for name in sorted(held_changes):
+            _print_held_change(name, *held_changes[name])
         print()
         print(fleet.render_fleet(rows))
         # The per-server narrative is a deliberate --detail away here, so a multi-server overview
@@ -2583,6 +2622,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             if rep:
                 print(drift.render(shown, rep))
                 _print_accept(drift_keys.get(name))
+            elif name in held_changes:
+                _print_held_change(shown, *held_changes[name])
             continue
         if name in reidentified:
             print(f"\n  ⛔ {shown} now identifies itself as a DIFFERENT server "
@@ -2594,6 +2635,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # rest of the surface — unchanged since approval — stays behind --full.
             print("\n" + drift.render(shown, rep))
             _print_accept(drift_keys.get(name))
+        elif name in held_changes:
+            _print_held_change(shown, *held_changes[name])
         elif name in appeared:
             # Never "no change since your baseline": it has none. Named in the block below.
             print("\n" + render_cli(lab, verbose=False, shown=shown))

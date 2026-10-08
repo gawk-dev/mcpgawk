@@ -460,6 +460,15 @@ def redact_record(rec: dict[str, Any]) -> dict[str, Any]:
     return rec
 
 
+def entry_records(entry: dict[str, Any]) -> list[Any]:
+    """EVERY full record an entry stores: the approval, the sightings, and the copies kept for the
+    latch (`changed_since_approval`) and the original baseline (`original_approved`). One list, so
+    the masking at `save` cannot miss a record-shaped key added later (found 2026-10-09: a pre-gate
+    credential survived in `original_approved` because the loop named approved + history only)."""
+    return [entry.get("approved"), *(entry.get("history") or []),
+            entry.get("changed_since_approval"), entry.get("original_approved")]
+
+
 def save(store: dict[str, Any], path: str | None = None) -> None:
     path = path or default_path()
     # THE persistence boundary — every writer lands here (record, approve, baseline). Masking here
@@ -473,7 +482,7 @@ def save(store: dict[str, Any], path: str | None = None) -> None:
     for entry in (store.get("servers") or {}).values():
         if not isinstance(entry, dict):
             continue
-        for rec in [entry.get("approved"), *(entry.get("history") or [])]:
+        for rec in entry_records(entry):
             # Skip only what is PROVABLY already masked under the current rules. Anything
             # unstamped — a record from `baseline.approve`'s direct save, from an older version,
             # or from a writer that does not exist yet — is masked here exactly as before, so the
@@ -622,6 +631,11 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
                     grown = _permission_growth(rec, last)
                     if grown:
                         row["permission_changes"] = grown
+                    # THE LATCH: tools that changed at an earlier sighting since approval and are
+                    # back to their approved form now (`reverted_tools`, the panel reads the same).
+                    reverted = reverted_tools(store, key)
+                    if reverted:
+                        row["reverted"] = reverted
                 else:
                     row["seen_not_compared"] = drift.TOOLS_NOT_COMPARED.format(server=key)
             # The APPROVED parameter names per tool, so the hook can catch the smuggled-field
@@ -923,6 +937,7 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
             if not isinstance(entry.get("appeared_at"), str):
                 entry["appeared_at"] = rec.get("measured_at") or _now_iso()
         elif base is None:
+            keep_original(entry, rec, "first-sighting")
             entry["approved"] = rec          # trust-on-first-use
             # Say HOW it became the baseline. Without this a first sighting and a human `approve`
             # from before approved_at existed looked alike, and drift told a user who never
@@ -1008,6 +1023,16 @@ def change_words(change: Any) -> str | None:
     growth = change.get("permission_growth") or {}
     if growth:
         parts.append(f"permission growth on {_names(sorted(growth))}")
+    total = original_words(change.get("since_original"))
+    if total:
+        inner = {k: v for k, v in change.items() if k != "since_original"}
+        return f"{change_words(inner)}; {total}"
+    reverted = change.get("changed_and_reverted")
+    if isinstance(reverted, dict):
+        what = change_words(reverted) or "a change"
+        when = str(change.get("changed_at") or "")[:10]
+        return (", ".join(parts) + "; " if parts else "") + \
+            f"changed{(' on ' + when) if when else ''} and changed back ({what})"
     return ", ".join(parts) or "no change to its tools since the previous approval"
 
 
@@ -1041,12 +1066,25 @@ def approve(key: str, path: str | None = None, *,
         # WHAT was accepted, against the previous approval, and WHY if the person said (Yashigani
         # read, candidate 3): "approved by me at 10:02" never answered "approved what?".
         entry["approved_change"] = approval_change(entry.get("approved"), latest)
+        # A change that reverted is still what this approval answers: record it, or the record
+        # says nothing was accepted while a person just cleared a held change (the latch).
+        _held = held_sighting(store, key)
+        if isinstance(_held, dict) and _held is not latest \
+                and not _surface_differs(entry.get("approved"), latest):
+            entry["approved_change"]["changed_and_reverted"] = approval_change(
+                entry.get("approved"), _held)
+            entry["approved_change"]["changed_at"] = _held.get("measured_at")
         _why = (reason or "").strip()
         if _why:
             entry["approved_reason"] = _why[:APPROVAL_REASON_MAX]
         else:
             entry.pop("approved_reason", None)
+        _total = since_original(entry, latest)
+        if _total is not None:
+            entry["approved_change"]["since_original"] = _total
+        keep_original(entry, latest, "approve")
         entry["approved"] = latest
+        clear_review(entry)                  # the held change is answered by this approval
         entry.pop(AWAITING_APPROVAL, None)
         # PROVENANCE. `cli status` has printed `approved —` since the field it reads was never
         # written (2026-09-03); and "approved when, by whom" is the first thing a security team
@@ -1477,7 +1515,7 @@ def pending(store: dict[str, Any]) -> list[str]:
     on upgrade — their drift stays invisible until the next approve, exactly as before."""
     out = []
     for key, entry in store.get("servers", {}).items():
-        base, latest = approved(store, key), last(store, key)
+        base, latest = approved(store, key), sighting_to_review(store, key)
         if not (base and latest):
             continue
         # ONE rule, imported — not a second opinion. This function compared the whole `items`
@@ -1707,10 +1745,196 @@ def last(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     return hist[-1] if hist else None
 
 
+#: The entry key holding the first sighting since approval that differed from it (see `append`).
+REVIEW_KEY = "changed_since_approval"
+
+
+def _surface_differs(base: Any, rec: Any, *, by_pin_across_rules: bool = False) -> bool:
+    """True when `rec` differs from `base` on the surface a person is asked to review: the exact
+    rule `pending` has always used (drift.compare, all axes). False when they cannot be compared.
+
+    `by_pin_across_rules` is for THE LATCH only (holding a sighting until a person approves): there
+    a false difference is permanent, so across two hashing rules the pin decides. The last-sighting
+    rule keeps compare's answer unchanged, so `pending` and `scan` keep agreeing
+    (tests/test_monitor_shares_full_records.py)."""
+    if not (isinstance(base, dict) and isinstance(rec, dict)):
+        return False
+    from . import drift as _drift
+    # TWO HASHING RULES, ONE PIN. A monitor sighting (`baseline.record_observed`) stores tool hashes
+    # under the surface rule, a scan under the content rule; compared tool by tool, an unchanged
+    # server read as every tool "changed" (measured 2026-10-08: same pin, 2/2 tools "changed"). The
+    # pin is computed one way by both writers, so across rules it is the evidence.
+    try:
+        if by_pin_across_rules and _drift.tools_basis_of(base) != _drift.tools_basis_of(rec):
+            pa, pb = base.get("pin"), rec.get("pin")
+            return isinstance(pa, str) and isinstance(pb, str) and pa != pb
+    except Exception:                                   # noqa: BLE001 — fall through to compare
+        pass
+    try:
+        r = _drift.compare(base, rec)
+    except Exception:                                   # noqa: BLE001 — never block a write on this
+        return False
+    return bool(r is not None and (r.added or r.removed or r.changed or r.schema_changed
+                                   or r.annotation_changed))
+
+
+def _approval_anchor(entry: dict[str, Any], base: dict[str, Any]):
+    """When the current approval was made: `approved_at`, else the approved record's measured_at
+    (a first-sighting or monitor approval records no approved_at). None when neither parses."""
+    from datetime import datetime
+    for raw in (entry.get("approved_at"), base.get("measured_at")):
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+    return None
+
+
+def held_sighting(store: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The FIRST sighting since the current approval that differed from it, or None: the latched
+    record (`append`), else, for stores written before the latch existed, the first such sighting
+    still in history, dated after `approved_at` (or the approved record's measured_at)."""
+    entry = (store.get("servers") or {}).get(key) or {}
+    base = entry.get("approved")
+    if not isinstance(base, dict):
+        return None
+    held = entry.get(REVIEW_KEY)
+    if isinstance(held, dict):
+        return held
+    anchor = _approval_anchor(entry, base)
+    if anchor is None:
+        return None
+    from datetime import datetime
+    for s in entry.get("history") or []:
+        raw = s.get("measured_at") if isinstance(s, dict) else None
+        try:
+            at = datetime.fromisoformat(raw.replace("Z", "+00:00")) if isinstance(raw, str) else None
+        except ValueError:
+            at = None
+        if at is not None and at > anchor and _surface_differs(base, s, by_pin_across_rules=True):
+            return s
+    return None
+
+
+def sighting_to_review(store: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The sighting a person must review for this server, or None. ONE rule for pending, decide and
+    the panel: the LAST sighting when it differs from the approval (what `approve` would accept, so
+    the diff shown is the diff approved); else the held sighting (`held_sighting`), so a change that
+    reverted stays open until a person approves. A server that never changed has nothing."""
+    base = approved(store, key)
+    if not isinstance(base, dict):
+        return None
+    latest = last(store, key)
+    if _surface_differs(base, latest):
+        return latest
+    return held_sighting(store, key)
+
+
+def reverted_tools(store: dict[str, Any], key: str) -> dict[str, dict[str, Any]]:
+    """`{tool: {"at", "hash", "permission_changes"}}` for THE LATCH: tools whose description changed
+    or whose permissions grew at the held sighting (`held_sighting`) and are back to the approved
+    form at the last sighting. Per tool, so a tool that never changed stays allowed. Empty unless the
+    approved, held and last records were all minted by the content rule (the stand-down `seen`
+    obeys: across rules a per-tool hash comparison is meaningless). ONE rule: the guard projection
+    and the panel both read it."""
+    from . import drift
+    entry = (store.get("servers") or {}).get(key) or {}
+    rec, held = entry.get("approved"), held_sighting(store, key)
+    hist = entry.get("history") or []
+    latest = hist[-1] if hist else None
+    if not all(isinstance(x, dict) and isinstance(x.get("tools"), dict) for x in (rec, held, latest)):
+        return {}
+    if held is latest or not all(drift.tools_comparable(x) for x in (rec, held, latest)):
+        return {}
+    held_growth, grown_now = _permission_growth(rec, held), _permission_growth(rec, latest)
+    at = held.get("measured_at") if isinstance(held.get("measured_at"), str) else None
+    out: dict[str, dict[str, Any]] = {}
+    for tool, approved_hash in rec["tools"].items():
+        then, now = held["tools"].get(tool), latest["tools"].get(tool)
+        content_back = isinstance(then, str) and then != approved_hash and now == approved_hash
+        growth_back = bool(held_growth.get(tool)) and not grown_now.get(tool)
+        if content_back or growth_back:
+            out[tool] = {"at": at, "hash": then, "permission_changes": held_growth.get(tool) or []}
+    return out
+
+
+#: THE ORIGINAL BASELINE (2026-10-08): the first record this server was trusted at, kept beside
+#: `approved` and never moved, so a person can see what the server has become since, not only the
+#: last step (a widening in small steps never shows a total otherwise). For the person only: the
+#: guard enforces `approved`.
+ORIGINAL_KEY = "original_approved"
+
+
+def keep_original(entry: dict[str, Any], new: dict[str, Any], via: str) -> None:
+    """Record the original baseline, once, just before `approved` is first set or moved. A store
+    written before this existed keeps the approval being replaced, labelled "earliest-known" so no
+    surface calls it the first. Every path that sets `approved` calls this."""
+    if isinstance(entry.get(ORIGINAL_KEY), dict):
+        return
+    prior = entry.get("approved")
+    if isinstance(prior, dict):
+        entry[ORIGINAL_KEY] = prior
+        entry["original_via"] = "earliest-known"
+        entry["original_approved_at"] = entry.get("approved_at") or prior.get("measured_at")
+    elif isinstance(new, dict):
+        entry[ORIGINAL_KEY] = new
+        entry["original_via"] = via
+        entry["original_approved_at"] = (_now_iso() if via != "first-sighting"
+                                         else new.get("measured_at") or _now_iso())
+
+
+def _same_record(a: Any, b: Any) -> bool:
+    return (isinstance(a, dict) and isinstance(b, dict) and a.get("pin") == b.get("pin")
+            and a.get("measured_at") == b.get("measured_at"))
+
+
+def since_original(entry: dict[str, Any], latest: Any) -> dict[str, Any] | None:
+    """The change from the original baseline to `latest`, labelled with how the original was
+    recorded; None when the original IS the current approval (the one diff already says it)."""
+    orig = entry.get(ORIGINAL_KEY)
+    if not isinstance(orig, dict) or _same_record(orig, entry.get("approved")):
+        return None
+    change = approval_change(orig, latest)
+    change["original_via"] = entry.get("original_via")
+    change["original_at"] = entry.get("original_approved_at")
+    return change
+
+
+def original_words(change: Any) -> str | None:
+    """"since first seen 2026-10-01: +1 tool (forward_note), …", or None."""
+    if not isinstance(change, dict):
+        return None
+    when = str(change.get("original_at") or "")[:10]
+    label = {"first-sighting": "since first seen", "approve": "since first approval",
+             "earliest-known": "since the earliest approval on record"}.get(
+                 str(change.get("original_via")), "since the earliest approval on record")
+    inner = {k: v for k, v in change.items() if k not in ("original_via", "original_at")}
+    what = change_words(inner) or "no change"
+    return f"{label}{(' ' + when) if when else ''}: {what}"
+
+
+def clear_review(entry: dict[str, Any]) -> None:
+    """A person approved: the held sighting is answered. Every approval path calls this."""
+    entry.pop(REVIEW_KEY, None)
+
+
 def append(store: dict[str, Any], key: str, record: dict[str, Any], keep: int = 50) -> None:
-    hist = server_entry(store, key).setdefault("history", [])
+    entry = server_entry(store, key)
+    hist = entry.setdefault("history", [])
     hist.append(record)
     del hist[:-keep]  # bounded — keep the last `keep` sightings
+    # THE LATCH (2026-10-08). The FIRST sighting since approval that differs from it is kept on the
+    # entry, outside the trimmed history, until a person approves again. Without it a server could
+    # serve a poisoned tool for one window and revert before the next scan: every reader compared
+    # the approval with the LAST sighting only, so [approved A, hostile B, A again] left nothing
+    # open (measured). Kept here, at the one append every writer goes through, so a monitor sighting
+    # and a scan sighting latch alike; and kept whole, so the hold outlives 50 later sightings.
+    base = entry.get("approved")
+    if (isinstance(base, dict) and not isinstance(entry.get(REVIEW_KEY), dict)
+            and not entry.get(AWAITING_APPROVAL)
+            and _surface_differs(base, record, by_pin_across_rules=True)):
+        entry[REVIEW_KEY] = record
 
 
 # ------------------------------------------------------------------------------------------- #
@@ -1905,7 +2129,9 @@ def approve_fleet(discovered: dict[str, Any],
             if latest is None:
                 continue
             entry = server_entry(store, key)
+            keep_original(entry, latest, "approve")
             entry["approved"] = latest
+            clear_review(entry)              # the held change is answered by this approval
             entry.pop(AWAITING_APPROVAL, None)
             entry["approved_at"] = now
             entry["approved_by"] = _operator()

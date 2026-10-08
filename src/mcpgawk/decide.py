@@ -51,16 +51,23 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
     and the page cannot disagree with `mcpgawk status` about what is outstanding."""
     out: list[dict[str, Any]] = []
     for key in history.pending(store):
-        approved, latest = history.approved(store, key), history.last(store, key)
+        # The sighting to REVIEW, not merely the last: a change that reverted is still shown as the
+        # change it was (history.sighting_to_review, the one rule pending() uses too).
+        approved, latest = history.approved(store, key), history.sighting_to_review(store, key)
         if not approved or not latest:
             continue
         report = drift.compare(approved, latest)
         if report is None:
             continue
+        entry = (store.get("servers") or {}).get(key) or {}
         out.append({
             "key": key,
             "name": history.display_name(store, key),
             "report": report,
+            # The step (since the current approval) and the TOTAL (since the original baseline):
+            # a widening in small steps is invisible in the step alone. None when they coincide.
+            "since_last": history.approval_change(approved, latest),
+            "since_original": history.since_original(entry, latest),
             "hostile": list(report.hostile),
             "seen_at": latest.get("seen") or "",
         })
@@ -157,6 +164,13 @@ def _diff_block(report: drift.DriftReport) -> str:
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
 
 
+def _total_line(total: Any) -> str:
+    """The change since the ORIGINAL baseline, under the step: what trusting this makes the server,
+    measured from where it started. Empty when the step is the whole story."""
+    words = history.original_words(total)
+    return f'<p class="sub"><b>In total</b>, {_esc(words)}.</p>' if words else ""
+
+
 def render_page(items: list[dict[str, Any]], token: str, note: str = "",
                 gaps: dict[str, Any] | None = None) -> str:
     """The whole UI. One file, no assets, no network — it must work on a machine with no internet
@@ -200,6 +214,7 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
   <p class="sub">Changed after you approved it{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
      Your agents cannot call it until you decide.</p>
   {_diff_block(r)}
+  {_total_line(it.get('since_original'))}
   {(f'''<form method="POST" action="/decide">
     <input type="hidden" name="token" value="{_esc(token)}">
     <input type="hidden" name="key" value="{_esc(it['key'])}">

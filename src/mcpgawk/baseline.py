@@ -277,7 +277,9 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             # the old surface; this call is replacing the pin and the tool set. Carrying them over
             # would enforce yesterday's labels on today's tools, which reads as coverage and is not.
             record.pop("annotations", None)
+        history.keep_original(entry, record, "approve")
         entry["approved"] = record
+        history.clear_review(entry)           # the held change is answered by this approval
         entry["approved_via"] = "approve"     # gated by require_human_approval above
         entry["approved_evidence"] = evidence
         if alias:

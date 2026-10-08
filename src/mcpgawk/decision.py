@@ -76,7 +76,8 @@ def declared_verdict(server: str, tool: str,
                      args: dict | None = None,
                      approved_props: list[str] | None = None,
                      seen_at: str | None = None,
-                     permission_changes: list[str] | None = None) -> tuple[str, str, str | None]:
+                     permission_changes: list[str] | None = None,
+                     reverted: dict | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -98,8 +99,11 @@ def declared_verdict(server: str, tool: str,
     (`gateway.set_live_tools`). The free hook cannot list the server per call; since 2026-09-05 it
     passes the hash from the LAST SIGHTING the projection carries (`seen`, written by every scan
     and by the monitor daemon) with `seen_at`, and the reason says so — a deny on the last
-    sighting is not a deny on this call: a drift not yet seen passes until the next scan, and a
-    server that reverted stays denied until it is seen again.
+    sighting is not a deny on this call: a drift not yet seen passes until the next scan.
+
+    `reverted` is THE LATCH (2026-10-08): this tool changed at an earlier sighting since approval
+    (`{"at": when}`) and is back to its approved form now. It stays denied until a person approves
+    again — a change that reverted before the next scan is still a change the person never saw.
     """
     if approved is None:
         return DEFER, BASIS_DECLARED, None
@@ -117,6 +121,10 @@ def declared_verdict(server: str, tool: str,
     if permission_changes:
         return DENY, BASIS_DECLARED, permission_changed_reason(server, tool, permission_changes,
                                                                seen_at)
+    if reverted:
+        return DENY, BASIS_DECLARED, reverted_reason(server, tool,
+                                                     reverted.get("at") if isinstance(reverted, dict)
+                                                     else None)
     # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
     # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
     # call is FILLING a parameter the human never approved, and it is credential-shaped
@@ -151,7 +159,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
             args: dict | None = None,
             approved_props: list[str] | None = None,
             seen_at: str | None = None,
-            permission_changes: list[str] | None = None) -> tuple[str, str, str | None]:
+            permission_changes: list[str] | None = None,
+            reverted: dict | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -170,7 +179,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
     decision, basis, reason = declared_verdict(server, tool, approved, live_hash,
                                                args=args, approved_props=approved_props,
                                                seen_at=seen_at,
-                                               permission_changes=permission_changes)
+                                               permission_changes=permission_changes,
+                                               reverted=reverted)
     if decision == DENY:
         return decision, basis, reason
 
@@ -244,6 +254,24 @@ def permission_changed_reason(server: str, tool: str, changes: list[str],
         f"Tell the user exactly this: the MCP server '{server}' changed what the tool '{tool}' "
         f"can do after they approved it ({what}), mcpgawk blocked the call, and they should run "
         f"`mcpgawk decide` themselves to review the change before deciding whether to trust it."
+    )
+
+
+def reverted_reason(server: str, tool: str, at: str | None = None) -> str:
+    """The denial for THE LATCH: the tool changed after approval and changed back. Same properties
+    and the same classifying phrase as `changed_reason` (REASON_TOOL_CHANGED)."""
+    when = f"on {at[:10]}" if isinstance(at, str) and at else "at an earlier sighting"
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
+        f"approved it — it was seen changed {when} and changed back since. A tool that changes "
+        f"and then reverts before anyone looks is still a change you never reviewed.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline — approval requires the person at the keyboard, and attempting it from "
+        f"inside an agent session is itself treated as a red flag.\n"
+        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
+        f"they approved it and changed it back, mcpgawk blocked the call, and they should run "
+        f"`mcpgawk decide` themselves to read what changed before deciding whether to trust it."
     )
 
 

@@ -3874,6 +3874,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         calls still pass (FOUNDER 2026-08-15). A flat "Blocked" for that last case claimed
         enforcement that was not happening, the worst lie a security product can render."""
         base, latest = _h.approved(store, k), _h.last(store, k)
+        # THE LATCH: back to the approved form now, but changed since approval. The guard holds
+        # exactly `reverted_tools` (the projection reads the same helper); say which.
+        held = _h.reverted_tools(store, k)
+        if held:
+            when = str(next(iter(held.values())).get("at") or "")[:10]
+            return (f'<span class="chip bad"><i></i>Blocked — {_esc(", ".join(sorted(held)))} '
+                    f'changed{(" on " + _esc(when)) if when else ""} and changed back</span>')
         if base and latest and base.get("items") != latest.get("items"):
             return '<span class="chip bad"><i></i>Blocked</span>'
         grown = _h._permission_growth(base, latest) if base and latest else {}

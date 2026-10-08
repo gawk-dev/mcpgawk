@@ -273,6 +273,24 @@ def _approved_from_projection(server: str,
     return (dict(tools) if isinstance(tools, dict) else None), note
 
 
+def projected_evidence(server: str, store_path: Path) -> dict[str, tuple]:
+    """`{tool: (permission_changes, reverted)}` for one server, from the SAME projection row the hook
+    judges by — for the paid gateway, so it refuses what the hook refuses (permission growth since
+    approval, and the latch). Empty when there is no row; never raises."""
+    try:
+        record, _note = _record_from_projection(server, store_path)
+    except Exception:                               # noqa: BLE001 — evidence is optional, never a crash
+        return {}
+    if not isinstance(record, dict) or not isinstance(record.get("tools"), dict):
+        return {}
+    out: dict[str, tuple] = {}
+    for tool in record["tools"]:
+        _a, _p, _s, _at, grown, reverted = _row_evidence(record, tool)
+        if grown or reverted:
+            out[tool] = (grown, reverted)
+    return out
+
+
 def tools_comparable(server: str, store_path: Path) -> bool:
     """Whether this server's approved per-tool hashes may be compared with hashes WE compute.
 
@@ -552,9 +570,9 @@ def _resolve_over_approved_only(server: str,
 
 def _row_evidence(record: dict | None, tool: str):
     """`(approved {tool: hash}, approved props for this tool, last-seen hash, seen_at, permission
-    changes since approval)` from one projection row. All None for no row."""
+    changes since approval, reverted hold)` from one projection row. All None for no row."""
     if record is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     _tools = record.get("tools")
     approved = dict(_tools) if isinstance(_tools, dict) else None
     seen_hash = seen_at = approved_props = None
@@ -575,13 +593,25 @@ def _row_evidence(record: dict | None, tool: str):
     _pc = record.get("permission_changes")
     if isinstance(_pc, dict) and isinstance(_pc.get(tool), list):
         grown = [str(x) for x in _pc[tool] if x] or None
-    return approved, approved_props, seen_hash, seen_at, grown
+    # THE LATCH: changed at an earlier sighting since approval, back to approved now (history.py).
+    reverted = None
+    _rv = record.get("reverted")
+    if isinstance(_rv, dict) and isinstance(_rv.get(tool), dict):
+        reverted = {"at": _rv[tool].get("at") if isinstance(_rv[tool].get("at"), str) else None}
+    return approved, approved_props, seen_hash, seen_at, grown, reverted
 
 
 def _judge(core, server: str, tool: str, record: dict | None, observations, sources, args):
     """`core.verdict` against ONE projection row, tolerant of an older decision core."""
-    approved, approved_props, seen_hash, seen_at, grown = _row_evidence(record, tool)
+    approved, approved_props, seen_hash, seen_at, grown, reverted = _row_evidence(record, tool)
     args = args if isinstance(args, dict) else None
+    if reverted:
+        try:
+            return core.verdict(server, tool, approved, observations, sources,
+                                live_hash=seen_hash, args=args, approved_props=approved_props,
+                                seen_at=seen_at, permission_changes=grown, reverted=reverted)
+        except TypeError:
+            pass   # an older decision core: fall through, the hold is not enforced by it
     try:
         return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
                             args=args, approved_props=approved_props, seen_at=seen_at,
@@ -657,7 +687,7 @@ def _decide(event: dict, store_path: Path | None,
     store = store_path or history_path()
     record, note, strict_refuse, others = _lookup(
         server, store, rewritten=fmt not in RAW_SERVER_NAME_FORMATS)
-    approved, _props, _seen, seen_at, _grown = _row_evidence(record, tool)
+    approved, _props, _seen, seen_at, _grown, _reverted = _row_evidence(record, tool)
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
