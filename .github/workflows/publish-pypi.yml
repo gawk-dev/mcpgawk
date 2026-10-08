@@ -37,6 +37,13 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
+    # TRUSTED PUBLISHING (2026-10-08). PyPI trusts THIS workflow in THIS repo (configured on pypi.org:
+    # gawk-dev/mcpgawk, publish-pypi.yml) instead of a long-lived API token: nothing to leak, and every
+    # upload carries a signed PEP 740 attestation naming the repo and workflow that built it, so a
+    # user can verify where their mcpgawk came from. id-token is the only extra permission it needs.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,12 +51,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Fail loudly if the PyPI token isn't configured
-        run: |
-          if [ -z "${{ secrets.PYPI_API_TOKEN }}" ]; then
-            echo "::error::PYPI_API_TOKEN secret is not set — add it under repo Settings > Secrets before this can publish."
-            exit 1
-          fi
 
       - name: Skip if this version is already published (re-running main shouldn't re-publish)
         run: |
@@ -86,7 +87,7 @@ jobs:
       # gate still green — and PyPI has no unpublish, so the mistake is permanent.
       #
       # So the check runs on the BUILT artefacts, in the job that uploads them, after `build` and
-      # before `twine`. It also fails on OVER-exclusion (a wheel with no `_bundled/verify` is a
+      # before the upload. It also fails on OVER-exclusion (a wheel with no `_bundled/verify` is a
       # broken free product) and on credential-shaped strings. Exit 2 means "could not check" and
       # is treated exactly like a failure — never publish something unverified.
       #
@@ -96,31 +97,27 @@ jobs:
         if: env.SKIP != '1'
         run: python scripts/verify_public_artifact.py dist/*.whl dist/*.tar.gz
 
-      - name: Publish to PyPI
+      # skip-existing: a retry is idempotent (2026-07-23, 0.1.7: upload.pypi.org timed out AFTER both
+      # files had landed — a red run over a successful publish). One retry rides out a transient
+      # blip; the next step, not this one, is the evidence that a release actually shipped.
+      - name: Publish to PyPI (trusted publishing, signed attestations)
+        id: upload
         if: env.SKIP != '1'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          python -m pip install twine
-          # --skip-existing + retry: on 2026-07-23 (0.1.7) upload.pypi.org connect-timeouts made
-          # twine exit 1 AFTER both artefacts had already landed — a RED run over a SUCCESSFUL
-          # publish, and a plain re-run would then fail with "file already exists". --skip-existing
-          # makes a retry idempotent (already-uploaded files are skipped, not errored); the loop
-          # rides out a transient network blip instead of failing the whole release on it.
-          for attempt in 1 2 3; do
-            if twine upload --non-interactive --skip-existing dist/*; then
-              echo "upload ok (attempt $attempt)"; exit 0
-            fi
-            echo "::warning::twine upload attempt $attempt failed (likely a transient upload.pypi.org timeout) — retrying"
-            sleep 20
-          done
-          echo "::error::twine upload failed after 3 attempts"; exit 1
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+      - name: Retry the upload once after a transient failure
+        if: env.SKIP != '1' && steps.upload.outcome == 'failure'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
       - name: PyPI must actually serve the version we just built
         if: env.SKIP != '1'
         run: |
-          # `twine --skip-existing` exits 0 when it uploaded NOTHING, so "upload ok" is not
+          # An upload with skip-existing exits 0 when it uploaded NOTHING, so "upload ok" is not
           # evidence of a release. This step is the evidence: PyPI itself must name our
           # version as the current one. Without it a publish can ship nothing and still go
           # green — which is exactly what happened on 2026-08-19.
