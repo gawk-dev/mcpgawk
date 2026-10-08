@@ -5,7 +5,7 @@
   </picture>
 </p>
 <p align="center"><em>One gateway in the path. On your machine.</em></p>
-<p align="center"><a href="https://www.producthunt.com/products/mcpgawk?launch=mcpgawk"><img alt="mcpgawk on Product Hunt" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1259498&theme=light" width="250" height="54"></a><br><strong>Live on Product Hunt today</strong>: questions and feedback welcome there.</p>
+<p align="center"><a href="https://www.producthunt.com/products/mcpgawk?launch=mcpgawk"><img alt="mcpgawk on Product Hunt" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1259498&theme=light" width="250" height="54"></a><br>Featured on Product Hunt.</p>
 
 # mcpgawk
 <!-- mcp-name: io.github.gawk-dev/mcpgawk -->
@@ -93,6 +93,8 @@ request, used or not.
 
 ## Get it — three ways
 
+[![Install mcpgawk from PyPI, the VS Code Marketplace or Open VSX (13-second film)](https://mcp.gawk.dev/assets/video/mcpgawk-registries-poster.jpg)](https://youtu.be/Gu-6oriEBio)
+
 **CLI** (any terminal):
 ```bash
 uv tool install --force mcpgawk      # or: pipx install --force mcpgawk
@@ -101,7 +103,7 @@ mcpgawk                              # finds every agent config on the machine i
 
 Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
 
-**Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
+**Editor** (VS Code / Cursor): install **mcpgawk** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=gawk-dev.mcpgawk) or [Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
 
 **CI** (GitHub Action): gate every PR on token budget / drift ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
 ```yaml
