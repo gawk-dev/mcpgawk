@@ -686,6 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--fleet", action="store_true",
                    help="accept every server now in your agent configs as your fleet; a server "
                         "that appears later is named instead of trusted")
+    a.add_argument("--reason", metavar="TEXT",
+                   help="why you are accepting this change; kept on the approval record")
 
     w = sub.add_parser(
         "wrong",
@@ -1070,7 +1072,12 @@ def _baseline(args) -> int:
         print(f"  {key}{alias}")
         print(f"    pin        {rec.get('pin') or '—'}")
         print(f"    tools      {len(rec.get('tools') or {})}")
-        if rec.get("approved_at"):
+        if rec.get("baseline_origin") == "unattended":
+            # An approval nobody was present for (slice 1, FOUNDER 2026-10-05 "Block + name it"): never
+            # "by <user>", which reads as that person's decision.
+            print(f"    approved   {rec.get('approved_at') or '—'} · "
+                  f"{rec.get('unattended_reason') or 'approved without a person present'}")
+        elif rec.get("approved_at"):
             print(f"    approved   {rec['approved_at']}"
                   f"{' by ' + rec['approved_by'] if rec.get('approved_by') else ''}")
         elif rec.get("baseline_origin") == "fleet":
@@ -1086,6 +1093,12 @@ def _baseline(args) -> int:
             # Before 2026-09-03 the sighting's time was printed under "approved": a borrowed date.
             print(f"    approved   time and actor not recorded · baseline measured "
                   f"{rec.get('measured_at') or '—'}")
+        # WHAT that approval accepted and WHY (absent on approvals older than the field).
+        change = history.change_words(rec.get("approved_change"))
+        if change:
+            print(f"    change     {change}")
+        if rec.get("approved_reason"):
+            print(f"    reason     {rec['approved_reason']}")
     return 0
 
 
@@ -1327,7 +1340,7 @@ def _approve(args) -> int:
         return 2
 
     for key in targets:
-        rec = history.approve(key, path=path)
+        rec = history.approve(key, path=path, reason=getattr(args, "reason", None))
         if rec is None:
             print(f"Nothing recorded for {key} yet — scan it first.", file=sys.stderr)
             return 2

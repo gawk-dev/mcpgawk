@@ -9047,7 +9047,12 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # None and the headline still read "changed since you approved it"). The fallback is
             # right — comparing against the first sighting beats comparing against nothing — but
             # the sentence has to say which anchor it actually used.
-            if when:
+            if it.get("origin") == "unattended":
+                # Approved with no person present (slice 1): "you approved it" claims a decision
+                # nobody made at a keyboard.
+                head = (f'{_esc(it["name"])} changed since its baseline — approved'
+                        f'{" on " + _esc(when) if when else ""} without a person present.')
+            elif when:
                 head = f'{_esc(it["name"])} changed since you approved it on {_esc(when)}.'
             elif it.get("origin") == "fleet":
                 head = (f'{_esc(it["name"])} changed since it was first seen — the baseline your '
@@ -9061,9 +9066,10 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # `resource.dadan-video-card` and the line read "1 change to the tools it declares").
             noun = _kinds_phrase(it["report"])
             sub = (f'{n} change{"s" if n != 1 else ""} to the {noun} it declares. No agent can call '
-                   'it until you decide — a server that changes after you approved it is the '
+                   'it until you decide — a server that changes after it was approved is the '
                    'rug-pull shape.'
-                   + (f' Approved by {_esc(it["approved_by"])}.' if it["approved_by"] else '')
+                   + (f' Approved by {_esc(it["approved_by"])}.'
+                      if it["approved_by"] and it.get("origin") != "unattended" else '')
                    + (f' Change first seen {_esc(_local_stamp(it["seen_at"]))}.' if it["seen_at"] else ''))
             evidence = ('<h2>What changed</h2>' + _next_diff(it["report"]))
             acts = (f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'

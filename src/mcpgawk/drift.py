@@ -464,13 +464,16 @@ class DriftReport:
         return out
 
     def permission_changes(self, key: str) -> list[str]:
-        """What this item can now do that the person never approved: an annotation escalation, or
-        a new parameter that names a destination. The guard REFUSES on these (FOUNDER 2026-10-06,
-        "Block permission growth"); every other schema change waits for sign-off without blocking
-        (FOUNDER 2026-08-15). One rule, read by scan and by the guard projection."""
+        """What this item can now do that the person never approved: an annotation escalation, a
+        new parameter that names a destination, or a new parameter that names code to execute.
+        The guard REFUSES on these (FOUNDER 2026-10-06, "Block permission growth"); every other
+        schema change waits for sign-off without blocking (FOUNDER 2026-08-15). One rule, read by
+        scan and by the guard projection."""
         return (self.escalations(key)
                 + [f"new destination parameter {p}" for p in self.gained_params(key)
-                   if destination_param(p)])
+                   if destination_param(p)]
+                + [f"new execution parameter {p}" for p in self.gained_params(key)
+                   if execution_param(p)])
 
     def of_kind(self, kind: str) -> dict[str, list[str]]:
         """Split the typed `{kind}.{name}` keys back out for rendering."""
@@ -497,6 +500,28 @@ def destination_param(name: str) -> bool:
         return False
     snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
     return bool({t for t in re.split(r"[^a-z0-9]+", snake) if t} & DESTINATION_TOKENS)
+
+
+#: Name tokens that make a NEW parameter an execution surface: the call can now run a command,
+#: script or query the caller supplies. Borrowed as a pattern from Yashigani's EXEC class
+#: (docs/research-yashigani-2026-10-08.md), minus `query` and `code`, which would fire on every
+#: search and docs tool. Measured 2026-10-08 on all 184 real updates (107 + Nueravi's 77): zero
+#: of the 99 parameters added to existing tools match, so it adds no false refusals.
+EXECUTION_TOKENS = frozenset({
+    "command", "commands", "cmd", "script", "scripts", "shell", "sql", "exec", "eval"})
+_REFERENCE_SUFFIXES = frozenset({"id", "ids", "name", "names", "type", "types", "index"})
+
+
+def execution_param(name: str) -> bool:
+    """True when a parameter's NAME says the call executes something the caller supplies."""
+    if not isinstance(name, str):
+        return False
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", snake) if t]
+    # `commandId`, `scriptName`, `sqlType` refer to a command; they do not carry one to run.
+    if tokens and tokens[-1] in _REFERENCE_SUFFIXES:
+        return False
+    return bool(set(tokens) & EXECUTION_TOKENS)
 
 
 def _pin_basis_of(rec: dict[str, Any]) -> int | None:
@@ -955,6 +980,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         # never ran `approve` that they had (new-developer walk, 2026-09-26).
         head = (f"    ⟳ DRIFT on {name} — changed since first seen"
                 f"{' ' + when if when else ''}; you have not approved this server yet:")
+    elif r.baseline_origin == "unattended":
+        # Approved, but with no person present (an agent session, an agent process, no terminal or
+        # the panel unconfirmed): "since you approved it" would claim a decision nobody made.
+        head = (f"    ⟳ DRIFT on {name} — changed since its baseline, approved"
+                f"{' ' + when if when else ''} without a person present:")
     elif r.baseline_origin == "fleet":
         # First seen, then accepted by `approve --fleet`: an approval, but of the fleet, given
         # after this baseline was recorded — so the date is the sighting's, said as such.

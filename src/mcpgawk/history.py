@@ -152,7 +152,7 @@ def approval_blocked_reason() -> str | None:
                 f"past one. Run this yourself in your own terminal.")
     if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
         return None
-    if not sys.stdin.isatty():
+    if not _stdin_is_tty():
         return ("no interactive terminal. Approving a changed server is a trust decision and needs "
                 "a human present; refusing rather than assuming consent.")
     return None
@@ -168,6 +168,93 @@ def require_human_approval() -> None:
     reason = approval_blocked_reason()
     if reason is not None:
         raise ApprovalBlocked(reason)
+
+
+#: Agents whose children are the agent's own tool calls. MEASURED: `claude` (Claude Code 2.1.289,
+#: 2026-10-05 — `ps` ancestry of a Bash tool call reads zsh → claude → -zsh → login → Terminal). The
+#: rest are those agents' own CLI names, not yet measured. A detached child (`nohup … &` in a
+#: subshell) is reparented to init and escapes this walk — measured the same day — so this is
+#: evidence, never proof.
+AGENT_PROCESS_NAMES = frozenset({"claude", "codex", "gemini", "kimi", "opencode", "goose", "aider",
+                                 "cursor-agent"})
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, OSError):
+        return False
+
+
+def _process_ancestry() -> list[str]:
+    """Names of this process's ancestors, nearest first; [] where they cannot be read."""
+    if os.name != "posix":
+        return []
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    parent: dict[int, int] = {}
+    name: dict[int, str] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            parent[int(parts[0])] = int(parts[1])
+            name[int(parts[0])] = os.path.basename(parts[2].strip())
+    chain: list[str] = []
+    pid, seen = os.getppid(), set()
+    while pid > 1 and pid in name and pid not in seen:
+        seen.add(pid)
+        chain.append(name[pid])
+        pid = parent.get(pid, 0)
+    return chain
+
+
+def agent_process() -> str | None:
+    """The first ancestor that is an agent (`AGENT_PROCESS_NAMES`), or None."""
+    for n in _process_ancestry():
+        if n.lstrip("-").lower() in AGENT_PROCESS_NAMES:
+            return n
+    return None
+
+
+def approval_evidence(source: str = "cli") -> dict[str, Any]:
+    """What this process can show about WHO is approving, recorded beside every approval.
+
+    A person is present only with a terminal, no agent-session marker and no agent process above
+    us. A same-user agent can forge or evade every one of these, so this is never proof: it is what
+    lets every surface NAME an approval that came without a person, instead of showing it as "you
+    approved it" (FOUNDER 2026-10-05, "Block + name it"). A panel approval is never a person's on
+    this evidence alone: the panel's process is the person's, the POST may not be.
+    """
+    markers = [m for m in AGENT_ENV_MARKERS if os.environ.get(m)]
+    proc = agent_process()
+    terminal = _stdin_is_tty()
+    return {"source": source, "terminal": terminal, "agent_markers": markers,
+            "agent_process": proc, "hatch": os.environ.get(APPROVE_OVERRIDE_ENV) == "1",
+            "person_present": source != "panel" and terminal and not markers and proc is None}
+
+
+def evidence_words(ev: Any) -> str | None:
+    """"approved without a person present — <why>", or None when a person was present or the
+    approval predates the evidence (unknown is not re-judged). Never names the hatch's variable: an
+    agent reads these surfaces, and the name is the bypass."""
+    if not isinstance(ev, dict) or ev.get("person_present", True) is not False:
+        return None
+    why: list[str] = []
+    if ev.get("agent_process"):
+        why.append(f"an agent ({ev['agent_process']}) was running it")
+    if ev.get("agent_markers"):
+        why.append("an agent session was marked")
+    if ev.get("source") == "panel":
+        why.append("it came from the panel and was not confirmed at a terminal")
+    elif not ev.get("terminal"):
+        why.append("no terminal")
+    if ev.get("hatch"):
+        why.append("an automation setting allowed it")
+    return "approved without a person present — " + "; ".join(why or ["no sign of a person"])
 
 
 def load(path: str | None = None) -> dict[str, Any]:
@@ -859,8 +946,74 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     return base
 
 
+#: Longest `--reason` kept on an approval record. A reason is a sentence, not a document.
+APPROVAL_REASON_MAX = 500
+
+
+def approval_change(prev: Any, latest: Any) -> dict[str, Any]:
+    """What an approval of `latest` accepts, measured against the previous approval `prev`.
+
+    Names, not content: tools added and removed, descriptions rewritten, inputs reshaped,
+    annotations changed, and permission growth by scan's own rule. `{"first_approval": True}` when
+    nothing was approved before; `{"compared": False}` when the two records cannot be compared
+    (different hashing rules), so the record never claims a diff it did not make."""
+    from . import drift
+    tools = latest.get("tools") if isinstance(latest, dict) else None
+    if not isinstance(prev, dict):
+        return {"first_approval": True, "tools": len(tools) if isinstance(tools, dict) else 0}
+    try:
+        report = drift.compare(prev, latest)
+    except Exception:                                   # noqa: BLE001 — a record must still write
+        report = None
+    if report is None or getattr(report, "unreadable", None):
+        return {"compared": False}
+    split = report.of_kind("tool")
+    growth: dict[str, list[str]] = {}
+    for k in dict.fromkeys(list(report.annotation_changed) + list(report.schema_changed)):
+        if isinstance(k, str) and k.startswith("tool."):
+            grown = report.permission_changes(k)
+            if grown:
+                growth[k[len("tool."):]] = grown
+    return {"tools_added": split["added"], "tools_removed": split["removed"],
+            "descriptions_changed": split["changed"],
+            "schemas_changed": [k[5:] for k in report.schema_changed if k.startswith("tool.")],
+            "annotations_changed": [k[5:] for k in report.annotation_changed
+                                    if k.startswith("tool.")],
+            "permission_growth": growth}
+
+
+def change_words(change: Any) -> str | None:
+    """One line for a person: "+1 tool (forward_note), 2 descriptions rewritten", or None."""
+    if not isinstance(change, dict):
+        return None
+    if change.get("first_approval"):
+        n = change.get("tools") or 0
+        return f"first approval, {n} tool{'s' if n != 1 else ''}"
+    if change.get("compared") is False:
+        return "not comparable with the previous approval"
+
+    def _names(xs: list[str]) -> str:
+        return ", ".join(xs[:3]) + (f" and {len(xs) - 3} more" if len(xs) > 3 else "")
+
+    parts: list[str] = []
+    for field, sign in (("tools_added", "+"), ("tools_removed", "−")):
+        xs = list(change.get(field) or [])
+        if xs:
+            parts.append(f"{sign}{len(xs)} tool{'s' if len(xs) != 1 else ''} ({_names(xs)})")
+    for field, words in (("descriptions_changed", "description{} rewritten"),
+                         ("schemas_changed", "input schema{} reshaped")):
+        n = len(change.get(field) or [])
+        if n:
+            parts.append(f"{n} " + words.format("s" if n != 1 else ""))
+    growth = change.get("permission_growth") or {}
+    if growth:
+        parts.append(f"permission growth on {_names(sorted(growth))}")
+    return ", ".join(parts) or "no change to its tools since the previous approval"
+
+
 def approve(key: str, path: str | None = None, *,
-            expect_pin: str | None = None) -> dict[str, Any] | None:
+            expect_pin: str | None = None, source: str = "cli",
+            reason: str | None = None) -> dict[str, Any] | None:
     """Adopt the most recent sighting of `key` as the approved baseline. Returns it.
 
     The explicit acknowledgement ADR-0012 requires. Until this runs, drift keeps reporting — and
@@ -871,6 +1024,7 @@ def approve(key: str, path: str | None = None, *,
     checks" is a property that decays the moment someone adds a caller, and it did.
     """
     require_human_approval()
+    evidence = approval_evidence(source)
     path = path or default_path()
     with locked(path):
         store = load(path)
@@ -884,6 +1038,14 @@ def approve(key: str, path: str | None = None, *,
         if expect_pin is not None and str(latest.get("pin") or "") != str(expect_pin):
             return None
         entry = server_entry(store, key)
+        # WHAT was accepted, against the previous approval, and WHY if the person said (Yashigani
+        # read, candidate 3): "approved by me at 10:02" never answered "approved what?".
+        entry["approved_change"] = approval_change(entry.get("approved"), latest)
+        _why = (reason or "").strip()
+        if _why:
+            entry["approved_reason"] = _why[:APPROVAL_REASON_MAX]
+        else:
+            entry.pop("approved_reason", None)
         entry["approved"] = latest
         entry.pop(AWAITING_APPROVAL, None)
         # PROVENANCE. `cli status` has printed `approved —` since the field it reads was never
@@ -893,6 +1055,7 @@ def approve(key: str, path: str | None = None, *,
         entry["approved_at"] = _now_iso()
         entry["approved_by"] = _operator()
         entry["approved_via"] = "approve"
+        entry["approved_evidence"] = evidence
         admit_to_fleet(store, key)
         save(store, path)
     return latest
@@ -937,10 +1100,23 @@ def baseline_origin(store: dict[str, Any], key: str) -> str | None:
     keeps the scan, protect, the panel and `baseline` from disagreeing (e2e, 2026-10-05)."""
     e = (store.get("servers") or {}).get(key) or {}
     if e.get("approved_at") or e.get("approved_via") == "approve":
-        return "approve"
+        return "unattended" if evidence_words(e.get("approved_evidence")) else "approve"
     if e.get("approved_via") != "first-sighting":
         return None
-    return "fleet" if fleet_covers(store, key) else "first-sighting"
+    if not fleet_covers(store, key):
+        return "first-sighting"
+    return "unattended" if evidence_words((fleet_baseline(store) or {}).get("evidence")) else "fleet"
+
+
+def unattended_reason(store: dict[str, Any], key: str) -> str | None:
+    """Why this server's baseline was approved without a person present, or None. The one sentence
+    every surface prints for an "unattended" origin (`baseline_origin`)."""
+    e = (store.get("servers") or {}).get(key) or {}
+    if e.get("approved_at") or e.get("approved_via") == "approve":
+        return evidence_words(e.get("approved_evidence"))
+    if e.get("approved_via") == "first-sighting" and fleet_covers(store, key):
+        return evidence_words((fleet_baseline(store) or {}).get("evidence"))
+    return None
 
 
 def fleet_covers(store: dict[str, Any], key: str) -> bool:
@@ -1715,13 +1891,15 @@ def approve_fleet(discovered: dict[str, Any],
     """Record `discovered` as the approved fleet, and adopt every held sighting. Returns (number of
     fleet entries, keys adopted). Gated exactly like `approve`: this moves trust."""
     require_human_approval()
+    evidence = approval_evidence()
     path = path or default_path()
     entries = fleet_targets(discovered)
     adopted: list[str] = []
     with locked(path):
         store = load(path)
         now = _now_iso()
-        store[FLEET_KEY] = {"approved_at": now, "approved_by": _operator(), "entries": entries}
+        store[FLEET_KEY] = {"approved_at": now, "approved_by": _operator(), "entries": entries,
+                            "evidence": evidence}
         for key in held(store):
             latest = last(store, key)
             if latest is None:
@@ -1732,6 +1910,7 @@ def approve_fleet(discovered: dict[str, Any],
             entry["approved_at"] = now
             entry["approved_by"] = _operator()
             entry["approved_via"] = "approve"
+            entry["approved_evidence"] = evidence
             adopted.append(key)
         save(store, path)
     return len(entries), adopted

@@ -155,6 +155,11 @@ def export(path: str | None = None) -> dict[str, Any]:
             "approved_by": entry.get("approved_by"),
             # "approve" / "first-sighting" / None (older than the field). Additive.
             "baseline_origin": history.baseline_origin(store, key),
+            # Why an "unattended" baseline had no person behind it (`history.unattended_reason`), or None.
+            "unattended_reason": history.unattended_reason(store, key),
+            # What the approval accepted against the previous one, and why if the person said.
+            "approved_change": entry.get("approved_change"),
+            "approved_reason": entry.get("approved_reason"),
             "measured_at": rec.get("measured_at"),        # the sighting's time — a different fact
             "aliases": list(entry.get("aliases") or []),
             "annotations": {
@@ -219,6 +224,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
     decision, the same file — correctly refused at exit 4.
     """
     history.require_human_approval()
+    evidence = history.approval_evidence("pillar")
     p = path or history.default_path()
     with history.locked(p):
         store = history.load(p)
@@ -273,6 +279,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             record.pop("annotations", None)
         entry["approved"] = record
         entry["approved_via"] = "approve"     # gated by require_human_approval above
+        entry["approved_evidence"] = evidence
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
         # The same approval, so the same fleet admission: a monitor approve of an appeared server

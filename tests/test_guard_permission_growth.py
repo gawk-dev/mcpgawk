@@ -81,6 +81,32 @@ def test_a_new_destination_parameter_is_refused(tmp_path, strict):
     assert "forward_to" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+@pytest.mark.parametrize("before, after, named", [
+    # exa-mcp-server 3.4.0 -> 3.4.1 (live probe, 2026-10-07): only openWorldHint moved, false -> true.
+    ({"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+     {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+     "openWorldHint"),
+    ({"readOnlyHint": False, "destructiveHint": False}, {"readOnlyHint": False, "destructiveHint": True},
+     "destructiveHint"),
+    ({"idempotentHint": True}, {"idempotentHint": False}, "idempotentHint"),
+])
+def test_every_annotation_escalation_the_docs_name_is_refused(tmp_path, before, after, named):
+    """docs/rugpull.html names four annotation escalations the call-time check refuses; each one is
+    exercised here through the real hook, not only the comparison."""
+    a, b = _tool(), _tool()
+    a["annotations"], b["annotations"] = before, after
+    output = _call(_store(tmp_path, a, b, strict=False))
+    assert output is not None, f"a tool whose {named} escalated after approval was allowed"
+    assert named in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_an_annotation_that_narrows_is_not_refused(tmp_path):
+    """The reverse direction (openWorldHint true -> false) asks for less; refusing it would be noise."""
+    a, b = _tool(), _tool()
+    a["annotations"], b["annotations"] = {"openWorldHint": True}, {"openWorldHint": False}
+    assert _call(_store(tmp_path, a, b, strict=False)) is None
+
+
 def test_an_ordinary_schema_change_still_waits_for_sign_off_and_is_not_refused(tmp_path):
     """FOUNDER 2026-08-15, kept: a widened schema alone does not break the agent."""
     later = _tool(props={"note": {"type": "string"}, "pageId": {"type": "string"}})
@@ -89,8 +115,9 @@ def test_an_ordinary_schema_change_still_waits_for_sign_off_and_is_not_refused(t
 
 
 @pytest.mark.skipif(not DATA.exists(), reason="the live-probe data set lives in the canonical repo only")
-def test_the_destination_rule_on_86_real_releases_flags_only_new_capability():
-    """Every parameter the top servers really added between 10 Mar and 9 Sep (live probe, 4 Oct).
+def test_the_destination_rule_on_real_releases_flags_only_new_capability():
+    """Every parameter the top servers really added between 10 Mar and 9 Sep (live probe: 86 transitions on
+    4 Oct, 107 once all 30 packages completed on 7 Oct; the new ones added no destination parameter).
     The rule must flag the four that add a place to send or write to, and nothing else: a detector
     that fires on honest updates gets switched off."""
     data = json.loads(DATA.read_text(encoding="utf-8"))
@@ -143,3 +170,41 @@ def test_the_panel_says_blocked_for_permission_growth_and_names_it():
     assert "Blocked" in rows.get("grew", "") and "NOT blocked" not in rows.get("grew", ""), rows.get("grew")
     assert "readOnlyHint" in rows.get("grew", ""), rows.get("grew")
     assert "NOT blocked" in rows.get("widened", ""), rows.get("widened")
+
+
+@pytest.mark.parametrize("param", ["command", "sql", "shellScript", "exec_args"])
+def test_a_new_execution_parameter_is_refused(tmp_path, param):
+    """A tool that gains a parameter naming code to run (command, sql, shell, exec) asks for more
+    power than was approved — the same class as a new destination. Driven through the real hook."""
+    later = _tool(props={"note": {"type": "string"}, param: {"type": "string"}})
+    output = _call(_store(tmp_path, _tool(), later, strict=False))
+    assert output is not None, f"a tool that gained the execution parameter {param} was allowed"
+    assert param in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("command", True), ("sql", True), ("shellScript", True), ("cmd", True),
+    ("query", False), ("code", False), ("queryString", False), ("language", False),
+    ("commandId", False), ("scriptName", False), ("runCommand", True)])
+def test_what_counts_as_an_execution_parameter(name, expected):
+    assert drift.execution_param(name) is expected
+
+
+@pytest.mark.skipif(not DATA.exists(), reason="the live-probe data set lives in the canonical repo only")
+def test_the_execution_rule_on_real_releases_flags_nothing():
+    """Measured 2026-10-08: none of the parameters the top servers added in 107 real updates names
+    code to execute, so the rule adds no false refusals on honest releases."""
+    data = json.loads(DATA.read_text(encoding="utf-8"))
+    flagged = []
+    for pkg, p in data["packages"].items():
+        vers = p["versions"]
+        ok = [v for v in p["order"] if vers.get(v, {}).get("status") == "ok"]
+        for a, b in zip(ok, ok[1:]):
+            before = {t["name"]: t for t in vers[a]["tools"]}
+            for t in vers[b]["tools"]:
+                if t["name"] not in before:
+                    continue
+                old = (before[t["name"]].get("inputSchema") or {}).get("properties") or {}
+                new = (t.get("inputSchema") or {}).get("properties") or {}
+                flagged += [f"{t['name']}.{q}" for q in new if q not in old and drift.execution_param(q)]
+    assert flagged == []
