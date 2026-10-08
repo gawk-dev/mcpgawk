@@ -53,8 +53,11 @@ jobs:
         route:
           - name: uv-tool
             install: uv tool install mcpgawk
+            # Used only when PyPI's index still lags a release that just went out (see below).
+            reinstall: uv tool install --force --refresh mcpgawk
           - name: pipx
             install: pipx install mcpgawk && pipx ensurepath
+            reinstall: pipx install --force --pip-args=--no-cache-dir mcpgawk
     name: ${{ matrix.route.name }}
     steps:
       # The container's default step shell is `sh` (dash), and dash rejects `set -o pipefail` —
@@ -126,9 +129,20 @@ jobs:
           with urllib.request.urlopen('https://pypi.org/pypi/mcpgawk/json', timeout=30) as r:
               print(json.load(r)['info']['version'])")
           echo "installed=$INSTALLED published=$published"
+          # Right after a release the JSON API names the new version minutes before the simple
+          # index installers read serves it (measured ~10-13 min, 0.1.65 and 0.1.71), so this job,
+          # triggered by the publish, failed on every release day with nothing wrong. Wait it out:
+          # reinstall without caches for up to ~20 min. A real failure still fails, just later.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            [ "$INSTALLED" = "$published" ] && break
+            echo "attempt $attempt: installed $INSTALLED, PyPI JSON says $published; index lag? retrying in 150 s"
+            sleep 150
+            su - tester -c 'export PATH="$HOME/.local/bin:$PATH"; ${{ matrix.route.reinstall }}' || true
+            INSTALLED=$(su - tester -c 'mcpgawk --version' 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          done
           [ "$INSTALLED" = "$published" ] || {
             echo "::error::installed $INSTALLED but PyPI serves $published — the documented command"
-            echo "does not give a tester the current release."
+            echo "does not give a tester the current release (still true after ~20 min of retries)."
             exit 1; }
 
       - name: The shipped --help must list the free commands
