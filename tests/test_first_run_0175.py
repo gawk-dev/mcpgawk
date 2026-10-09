@@ -232,3 +232,51 @@ def test_a_set_aside_server_is_named_once_and_never_prompted_for(monkeypatch, ca
     cli._offer_batched_auth([_Row("robinhood")], types.SimpleNamespace(yes=False), {})
     out = capsys.readouterr()
     assert "These need credentials" not in out.out and "robinhood" in out.err
+
+
+# --- the walk of every panel tab on the founder's 0.1.75/0.1.76 fleet (2026-10-09, evening) ---------
+
+def test_the_agents_detail_knows_a_server_by_its_config_name():
+    """youspot's record is `mcp:connect` (what the server calls itself) with alias "youspot" (what
+    the config calls it). The Agents detail said "it has no baseline yet — a scan records one"
+    about an approved server."""
+    d = {"entries": {"youspot": {"url": "https://y.test/mcp"}, "fresh": {"url": "https://f.test/mcp"}},
+         "store": {"servers": {"mcp:connect": {"aliases": ["youspot"], "approved": {"items": {}}}}}}
+    out = {r["server"]: r for r in panel.uncovered_reasons(d, {"youspot": 232, "fresh": 3})}
+    assert out["youspot"]["reason"] == "stale", out["youspot"]
+    assert out["fresh"]["reason"] == "unscanned"
+
+
+def test_the_activity_header_counts_the_charts_own_series(monkeypatch, tmp_path):
+    """Header "4729 seen · 167 checked · 2026-10-01 → 10-08" over a chart reading 87 checked,
+    3,510 not checked, 09-26 → 10-09: two windows and two row limits on one page."""
+    today = _today(monkeypatch, tmp_path, entries={"p": {"command": "npx p"}},
+                   calls=[("allow", "p")] * 3 + [("defer", "q")] * 5 + [("deny", "p")])
+    # One row OUTSIDE the chart's 14-day window: summarise() counts it (lifetime over the rows
+    # it reads), the chart does not. The header must follow the chart.
+    import json, os
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(os.environ["MCPGAWK_SPOOL"], "a") as f:
+        f.write(json.dumps({"ts": old, "decision": "allow", "server": "p", "tool": "t"}) + "\n")
+    page = panel.render({"entries": {"p": {"command": "npx p"}}, "store": {"servers": {}}, "pending": [],
+                         "activity": {"calls": 999, "checked": 1, "deferred": 998}, "recent_calls": [],
+                         "findings": [], "unscannable": [], "monitor": {}, "verify_at": ""}, token="t")
+    head = re.search(r"<b>(\d+)</b> seen · <b>(\d+)</b> checked against an approved baseline"
+                     r"(?: · <span class=\"warn\"><b>(\d+)</b> NOT checked)?", page)
+    assert head, "no activity headline"
+    seen, checked, deferred = int(head.group(1)), int(head.group(2)), int(head.group(3) or 0)
+    allowed = int(re.search(r"Checked and allowed \((\d+)\)", page).group(1))
+    blocked = int(re.search(r"Blocked \((\d+)\)", page).group(1))
+    not_checked = int(re.search(r"Not checked — no approved baseline \(([\d,]+)\)", page).group(1).replace(",", ""))
+    assert (seen, checked, deferred) == (allowed + blocked + not_checked, allowed + blocked, not_checked), \
+        (seen, checked, deferred, allowed, blocked, not_checked)
+    assert (checked, deferred) == (4, 5)                      # not summarise's 1 / 998
+
+
+def test_summary_from_series_is_the_chart_arithmetic():
+    series = [{"day": "2026-10-08", "total": 10, "checked": 2, "blocked": 1, "not_checked": 8},
+              {"day": "2026-10-09", "total": 5, "checked": 1, "blocked": 0, "not_checked": 4}]
+    out = panel._summary_from_series(series, {"deferred_unscannable": 7, "calls": 999})
+    assert (out["calls"], out["checked"], out["deferred"], out["deferred_unscannable"]) == (15, 3, 12, 7)
+    assert panel._summary_from_series([], {"calls": 1}) == {"calls": 1}

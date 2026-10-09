@@ -631,7 +631,7 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     rows.append(("Detect and respond to change",
                  "drift is itemised per tool and blocks the server until a person decides; "
                  "verify reproduces behaviour in a sandbox",
-                 f"{len(moved)} server(s) first seen changed in the last 7 days · {pending} awaiting a "
+                 f"{len(moved)} server(s) moved off their baseline in the last 7 days · {pending} awaiting a "
                  f"decision · last verify "
                  f"{_local_stamp(d.get('verify_at')) if d.get('verify_at') else 'never'}",
                  "warn" if pending else "ok"))
@@ -2053,6 +2053,18 @@ def _today_tiles(series: list[dict], unscannable: object, changed: int = 0,
             # said "you approved" over two first-sighting fallbacks).
             + tile(f"Changed {since}", changed, "bad")
             + '</div>')
+
+
+def _summary_from_series(series: list[dict], summary: dict | None = None) -> dict:
+    """The headline's numbers from the chart's own series: seen = total, checked = allow + deny,
+    deferred = not checked. Empty series → the summary as given (nothing to disagree with)."""
+    if not series:
+        return dict(summary or {})
+    out = dict(summary or {})
+    out["calls"] = sum(int(d.get("total") or 0) for d in series)
+    out["checked"] = sum(int(d.get("checked") or 0) for d in series)
+    out["deferred"] = sum(int(d.get("not_checked") or 0) for d in series)
+    return out
 
 
 def _activity_headline(summary: object) -> str:
@@ -3834,8 +3846,17 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 f'<td class="dim">{_esc(a.get("basis") or "")}</td><td>{why_cell}</td></tr>')
 
     act_summary = act if isinstance(act, dict) else {}
-    span_first = all_acts[-1].get("when") if all_acts else None
-    span_last = all_acts[0].get("when") if all_acts else None
+    # ONE WINDOW. spool.summarise() counts the last 5,000 rows; the chart under this line counts
+    # 14 days of up to 200,000. On the founder's machine the header read "4729 seen · 167
+    # checked" over "2026-10-01 → 2026-10-08" above a chart reading 87 checked, 3,510 not, over
+    # 09-26 → 10-09, with Today's tiles a third set (2026-10-09). The header now sums the
+    # chart's series, so the three cannot disagree; the one key the series lacks (which of the
+    # declined went to a browser host) is kept from summarise.
+    act_summary = _summary_from_series(_calls_series, act_summary)
+    span_first = (_calls_series[0]["day"] if _calls_series else
+                  (all_acts[-1].get("when") if all_acts else None))
+    span_last = (_calls_series[-1]["day"] if _calls_series else
+                 (all_acts[0].get("when") if all_acts else None))
     acts_notable = "".join(_act_row(a, expand_why=True) for a in notable) or \
         ('<tr><td colspan="6" class="dim">No call in this log was blocked, and nothing it '
          'covers overstepped its approved baseline.' + monitor_gap_note(d) + '</td></tr>')
@@ -3900,15 +3921,18 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">now declares more '
                         f'power than its baseline — {_esc(_what)}.</span>')
         for t in rep.added[:2]:
-            bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">appeared after you '
-                        'approved this server. A tool that shows up later is how a malicious '
-                        'update arrives.</span>')
+            # "after you approved this server" under a row whose baseline nobody approved
+            # (Decisions tab, walk of 0.1.77): the anchor is the baseline, whoever set it.
+            bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">was not in the '
+                        'baseline and appeared since. A tool that shows up later is how a '
+                        'malicious update arrives.</span>')
         for t in rep.removed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">was removed.</span>')
         for t in plain_changed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its '
                         'description.</span>')
-        for t in rep.annotation_changed[:1]:
+        for t in [x for x in rep.annotation_changed if x not in (_esc_ or [])][:1]:
+            # An escalated key already has its sentence above; this is for a plain relabel.
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its safety '
                         'annotations — a tool relabelled itself.</span>')
         total = (len(rep.hostile) + len(rep.added) + len(rep.removed) + len(plain_changed)
@@ -7682,8 +7706,12 @@ def uncovered_reasons(d: dict[str, Any], by_server: dict[str, int] | None = None
     entries = d.get("entries") or {}
     store = d.get("store") or {}
     known = set()
-    for k in (store.get("servers") or {}):
+    for k, e in (store.get("servers") or {}).items():
         known.add(str(k).split(":", 1)[-1].split("#", 1)[0])
+        # The config name, not only the identity: youspot's record is `mcp:connect` (what the
+        # server calls itself) with alias "youspot" (what the config calls it), and this said
+        # "it has no baseline yet" about an approved server (Agents tab, 2026-10-09).
+        known.update(str(a) for a in ((e or {}).get("aliases") or []))
     out: list[dict[str, Any]] = []
     for name, n in (by_server or {}).items():
         entry = entries.get(name)

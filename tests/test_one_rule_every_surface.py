@@ -87,6 +87,23 @@ def test_the_next_screens_evidence_block_follows_the_same_split():
     assert "rug-pull signature" not in esc, esc
     assert "openWorldHint" in esc, "the /next evidence must say what grew"
     assert esc.count("tool.t —") == 2, esc       # description row + ONE annotation row, not two
+
+
+def test_the_decisions_tab_names_an_escalated_key_once_and_never_as_an_injection():
+    """Walk of 0.1.77: the Decisions tab listed read_notes as "now declares more power" AND as
+    "changed its safety annotations — a tool relabelled itself", and new_tool as "appeared after
+    you approved this server" under a baseline nobody approved."""
+    from mcpgawk import history, panel
+    store = _store_for("first-sighting")
+    store["servers"]["mcp:s"]["history"][-1]["annotations"] = {"tool.read_note": {"openWorldHint": True}}
+    store["servers"]["mcp:s"]["approved"]["annotations"] = {"tool.read_note": {"openWorldHint": False}}
+    d = {"store": store, "entries": {}, "monitor": {}, "verify_at": "", "pending": ["mcp:s"],
+         "activity": {}, "recent_calls": [], "findings": [], "unscannable": []}
+    pane = _pane(panel.render(d, token="T"), "p3")
+    assert "you approved" not in pane, pane
+    assert "rug-pull signature" not in pane, pane
+    assert pane.count("tool.read_note</span>") == 1, pane
+    assert "was not in the baseline and appeared since" in pane, pane
     inj = panel._next_diff(_injected_only())
     assert "rug-pull signature" in inj, inj
 
@@ -160,6 +177,11 @@ def _store_for(origin: str) -> dict:
     return {**store_extras, "servers": {"mcp:s": entry}}
 
 
+def _pane(page: str, pane_id: str) -> str:
+    start = page.index(f'id="{pane_id}"')
+    return page[start:page.index("</section>", start)]
+
+
 def _surfaces(origin: str) -> dict[str, str]:
     store = _store_for(origin)
     key = "mcp:s"
@@ -176,6 +198,8 @@ def _surfaces(origin: str) -> dict[str, str]:
         "since words": history.since_words([report.baseline_origin]),
         "panel next": re.search(r"<h1>(.*?)</h1>", panel.render_next(d, token="T"), re.S).group(1),
         "panel next evidence": panel._next_diff(report),
+        "decisions tab": _pane(panel.render({**d, "pending": [key], "activity": {}, "recent_calls": [],
+                                             "findings": [], "unscannable": []}, token="T"), "p3"),
         "decide page": decide.render_page(decide.pending_decisions(store), "T"),
         "decide evidence": decide._diff_block(report),
     }
