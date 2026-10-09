@@ -136,7 +136,11 @@ def _diff_block(report: drift.DriftReport) -> str:
                 f'<div class="was">{_esc(report.unreadable)}</div>'
                 '<div class="now">Nothing was compared, so there is no diff to judge. Approving '
                 'here would trust a surface no one has seen.</div></div>')
-    for tool in report.hostile:
+    # ONLY AN INJECTED KEY IS "the rug-pull signature". `hostile` is injected ∪ escalated, and a
+    # tool that merely gained openWorldHint has no inserted text to accuse (supademo, 2026-10-09:
+    # three tools were shown as rug-pulls for an annotation flip). The escalated keys get their
+    # own row below, saying what grew; the scan's per-line writer follows the same split.
+    for tool in report.injected:
         before, after = report.texts.get(tool, ("", ""))
         rows.append(
             f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — '
@@ -150,15 +154,18 @@ def _diff_block(report: drift.DriftReport) -> str:
     for tool in report.removed:
         rows.append(f'<div class="ev"><div class="lbl">− {_esc(tool)} — removed</div></div>')
     for tool in report.changed:
-        if tool in report.hostile:
+        if tool in report.injected:
             continue
         before, after = report.texts.get(tool, ("", ""))
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — description changed</div>'
                     + (f'<div class="was">{_esc(before)}</div><div class="now">{_esc(after)}</div>'
                        if before or after else "") + "</div>")
     for tool in report.annotation_changed:
-        rows.append(f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — safety annotations '
-                    f'changed (a tool relabelled itself)</div></div>')
+        grew = report.escalations(tool)
+        what = (f"now declares more power ({', '.join(grew)})" if grew
+                else "safety annotations changed (a tool relabelled itself)")
+        rows.append(f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — {_esc(what)}'
+                    f'</div></div>')
     for tool in report.schema_changed:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'

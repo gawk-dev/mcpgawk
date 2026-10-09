@@ -96,13 +96,15 @@ def test_the_screen_does_not_claim_an_approval_that_never_happened():
     it" about a server nobody had approved (dadan: `approved_at` was None on the same screen)."""
     from mcpgawk import panel
     store = {"mcp:x": {"aliases": ["x"],
-                       "approved": {"items": {"tool.a": "h1"}, "measured_at": "2026-09-01T00:00:00Z",
+                       "approved": {"items": {"tool.a": "h1"}, "measured_at": "2026-09-08T00:00:00Z",
                                     "pin": "p", "cost_index": 1},
                        "history": [{"items": {"tool.a": "h1", "tool.b": "h2"}, "seen": "2026-09-09T00:00:00Z",
                                     "measured_at": "2026-09-09T00:00:00Z", "pin": "p", "cost_index": 2}]}}
     html = panel.render_next({"store": {"servers": store}, "entries": {}, "monitor": {},
                               "verify_at": ""}, token="T")
-    assert "nobody has approved this server yet" in html, html[:400]
+    # Dated after `approve` began stamping approved_at (history.APPROVAL_MARKERS_SINCE) with no
+    # stamp: a first sighting, and said so.
+    assert "you have not approved this server yet" in html, html[:400]
     assert "changed since you approved it" not in html
 
 

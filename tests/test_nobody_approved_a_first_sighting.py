@@ -31,9 +31,13 @@ def test_a_real_approval_still_says_so():
     assert "after you approved it" in drift.render("tiny", _report("approve"))
 
 
-def test_an_unknown_origin_keeps_the_old_wording():
-    # A baseline older than the field: its origin is unknown and is not guessed either way.
-    assert "you approved it" in drift.render("tiny", _report(None))
+def test_an_unknown_origin_is_said_as_unknown():
+    # A baseline older than the field: its origin is unknown and is not guessed either way —
+    # and until 2026-10-09 "not guessed" still printed "you approved it", which IS a guess
+    # (notion, brandfetch: first-sighting fallbacks the scan called approvals).
+    out = drift.render("tiny", _report(None))
+    assert "you approved" not in out, out
+    assert "not on record" in out, out
 
 
 def test_the_scan_path_sets_the_origin(tmp_path, monkeypatch):

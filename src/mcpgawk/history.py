@@ -1139,7 +1139,20 @@ def baseline_origin(store: dict[str, Any], key: str) -> str | None:
     e = (store.get("servers") or {}).get(key) or {}
     if e.get("approved_at") or e.get("approved_via") == "approve":
         return "unattended" if evidence_words(e.get("approved_evidence")) else "approve"
-    if e.get("approved_via") != "first-sighting":
+    via = e.get("approved_via")
+    if via is None:
+        # NO MARKER AT ALL. `approve` has stamped approved_at / approved_by / approved_via on every
+        # path since APPROVAL_MARKERS_SINCE; the first-sighting fallback only began labelling
+        # itself on 2026-09-26. A record from the window between, with no marker, can only be a
+        # first sighting — a real approval would have left its stamp. Older than the window it
+        # is unknown, and unknown is said as unknown, never as "you approved" (notion and
+        # brandfetch, 2026-10-09: the scan told the founder they had approved two servers that
+        # were first-sighting fallbacks from 15 Sep).
+        at = str((e.get("approved") or {}).get("measured_at") or "")
+        if at < APPROVAL_MARKERS_SINCE:
+            return None
+        via = "first-sighting"
+    if via != "first-sighting":
         return None
     if not fleet_covers(store, key):
         return "first-sighting"
@@ -1178,9 +1191,16 @@ def fleet_covers(store: dict[str, Any], key: str) -> bool:
     return any(str(fk).partition("/")[2] in aliases for fk in (fleet.get("entries") or {}))
 
 
-#: Origins whose baseline a person stands behind. None — a baseline recorded before origins were —
-#: keeps the approval wording every surface has always given it: unknown is not re-guessed.
-VOUCHED_ORIGINS = frozenset({"approve", "fleet", None})
+#: `approve` has written approved_at / approved_by / approved_via on every path since this
+#: release date (e133152c, shipped in 0.1.35 on 2026-09-05). A record approved on or after it
+#: with no marker was therefore never through `approve` — see `baseline_origin`.
+APPROVAL_MARKERS_SINCE = "2026-09-05"
+
+#: Origins whose baseline a person stands behind. None — a baseline older than
+#: APPROVAL_MARKERS_SINCE with no marker — is UNKNOWN, and an unknown origin is not a person's
+#: approval: until 2026-10-09 it kept the "you approved" words, which asserted a decision the
+#: record cannot show. Unknown is worded as "its baseline" on every surface.
+VOUCHED_ORIGINS = frozenset({"approve", "fleet"})
 
 
 def vouched(origins: "list[str | None]") -> bool:
@@ -1203,6 +1223,30 @@ def since_words(origins: "list[str | None]", *, plural: bool | None = None) -> s
 def changed_since(store: dict[str, Any], keys: "list[str]", *, plural: bool | None = None) -> str:
     """`since_words` for stored servers."""
     return since_words([baseline_origin(store, k) for k in keys], plural=plural)
+
+
+def changed_head(origin: "str | None", when: "str | None") -> str:
+    """THE sentence for one server that moved off its baseline: "changed since …", worded from
+    `baseline_origin`. The scan's drift head, the panel's /next headline and `baseline` all print
+    this one string, so they cannot disagree about who approved what (2026-10-09: the scan said
+    "since you approved it 23 days ago" and /next said "nobody has approved this server yet" of
+    the same record). `when` is already a phrase — "23 days ago" or "on 2026-09-15" — or None."""
+    w = f" {when}" if when else ""
+    if origin == "first-sighting":
+        # Trust on first use is not a decision (new-developer walk, 2026-09-26).
+        return f"changed since first seen{w}; you have not approved this server yet"
+    if origin == "unattended":
+        # Approved with no person present: "you approved it" claims a decision nobody made.
+        return f"changed since its baseline, approved{w} without a person present"
+    if origin == "fleet":
+        # First seen, then accepted by `approve --fleet`: the date is the sighting's, said so.
+        return f"changed since first seen{w}, the baseline your fleet approval accepted"
+    if origin == "approve":
+        return f"changed since you approved it{w}" if when else "changed after you approved it"
+    # Unknown: a record older than APPROVAL_MARKERS_SINCE with no marker. Neither a person nor
+    # nobody can be asserted; say what the anchor is and that the record does not say who set it.
+    return (f"changed since its baseline, recorded{w}; who approved it is not on record"
+            if when else "changed since its baseline; who approved it is not on record")
 
 
 def changed_within(store: dict[str, Any], days: int = 7,
@@ -1486,7 +1530,12 @@ def display_name(store: dict[str, Any], key: str) -> str:
         return asserted
     if not aliases:
         return key
-    primary = aliases[0]
+    # A CONFIG NAME BEATS A TARGET. Aliases are stored sorted, so a URL alias from `scan --http`
+    # sorted ahead of the config name and the fleet read "https://<host>/mcp (also
+    # configured as notion)" above "approve <name>" (2026-10-09). The ad-hoc targets are how the
+    # server was reached, not what it is called: they are neither the name nor the aside.
+    named = [a for a in aliases if not _is_adhoc_target(a)] or aliases
+    primary = named[0]
 
     # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias, and a
     # fleet then shows two rows reading identically: a user cannot tell which one changed, and
@@ -1497,9 +1546,9 @@ def display_name(store: dict[str, Any], key: str) -> str:
                if k != key and primary in ((v or {}).get("aliases") or [])]
     if sharing:
         return f"{primary} [{key}]"
-    if len(aliases) == 1:
+    if len(named) == 1:
         return primary
-    return f"{primary} (also configured as {', '.join(aliases[1:])})"
+    return f"{primary} (also configured as {', '.join(named[1:])})"
 
 
 def pending(store: dict[str, Any]) -> list[str]:

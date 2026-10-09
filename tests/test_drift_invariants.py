@@ -301,8 +301,10 @@ def test_no_stored_text_degrades_to_the_hash_verdict_not_invented_content():
 def test_the_headline_leads_and_reads_correctly_for_one_and_many():
     """Drift used to print AFTER the fleet list, under a wall of token counts — the one finding an
     agent cannot reproduce arrived last on the path everyone takes."""
-    one = drift.render_headline(["notion"])
-    many = drift.render_headline(["notion", "linear"])
+    one = drift.render_headline(["notion"], origins={"notion": "approve"})
+    many = drift.render_headline(["notion", "linear"], origins={"notion": "approve", "linear": "approve"})
+    # No origin given: nothing is known about who approved, so nothing is claimed (2026-10-09).
+    assert "since its baseline" in drift.render_headline(["notion"])
     assert "1 server has CHANGED since you approved it" in one, one
     assert "2 servers have CHANGED since you approved them" in many, many
     assert "approve" in one, "the headline must say how to clear it"

@@ -590,25 +590,41 @@ def detect_skill_malformed(reason: str, origin: str) -> list[Finding]:
     return [Finding(tool=origin, kind="skill:malformed", evidence=reason[:160])]
 
 
-def detect_shadowing(snaps: list[ServerSnapshot]) -> dict[str, list[Finding]]:
-    """CROSS-SERVER signal: a tool name exposed by more than one server. All connected servers share
-    one context, so a malicious server can register the same name as a trusted one and shadow it
-    (mcp-secret-exfil-threat-model: 'cross-tool shadowing'). Naturally 0-FP — fires only on a genuine
-    collision between distinct servers. Returns {server_name -> [Finding]}.
+def detect_shadowing(snaps: list[ServerSnapshot],
+                     clients: "dict[str, list[str] | tuple[str, ...]] | None" = None,
+                     ) -> dict[str, list[Finding]]:
+    """CROSS-SERVER signal: a tool name exposed by more than one server THAT SHARE A CONTEXT. All
+    servers one agent connects to share its context, so a malicious server can register the same
+    name as a trusted one and shadow it (mcp-secret-exfil-threat-model: 'cross-tool shadowing').
+    Returns {server_name -> [Finding]}, ONE finding per colliding pair naming every shared tool.
+
+    `clients` maps a server name to the agents it is configured in (discover's `_clients`). Two
+    servers in disjoint client sets never sit in one context: kite in Claude Code and kite#2 in
+    Claude Desktop are one server configured twice, and the fleet scan printed 22 "tool-name
+    shadowing" lines for it (2026-10-09) — the detector was written for one client's inventory
+    (83915f48) and the fleet scan (f61c3035) later fed it every client's at once. A server with no
+    attribution is taken to share every context, as before: unknown must not mute the signal.
     """
-    owners: dict[str, set[str]] = {}
-    for s in snaps:
-        for t in s.tools:
-            owners.setdefault(t.get("name", "?"), set()).add(s.name)
+    tools_of = {s.name: {t.get("name", "?") for t in s.tools} for s in snaps}
+
+    def shares_context(a: str, b: str) -> bool:
+        if not clients:
+            return True
+        ca, cb = set(clients.get(a) or ()), set(clients.get(b) or ())
+        return not ca or not cb or bool(ca & cb)
+
     out: dict[str, list[Finding]] = {}
-    for s in snaps:
-        for t in s.tools:
-            nm = t.get("name", "?")
-            others = owners.get(nm, set()) - {s.name}
-            if others:
-                out.setdefault(s.name, []).append(Finding(
-                    tool=nm, kind="shadowing:name-collision",
-                    evidence=f"also exposed by: {', '.join(sorted(others))}"))
+    names = [s.name for s in snaps]
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            shared = sorted(tools_of[a] & tools_of[b])
+            if not shared or a == b or not shares_context(a, b):
+                continue
+            for mine, theirs in ((a, b), (b, a)):
+                listed = ", ".join(shared[:6]) + (f" (+{len(shared) - 6} more)" if len(shared) > 6 else "")
+                out.setdefault(mine, []).append(Finding(
+                    tool=shared[0], kind="shadowing:name-collision",
+                    evidence=f"also exposed by {theirs}: {len(shared)} tool name(s) — {listed}"))
     return out
 
 

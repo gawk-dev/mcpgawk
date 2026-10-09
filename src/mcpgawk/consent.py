@@ -25,6 +25,28 @@ Target = tuple[str, dict[str, Any]]
 #: an explicit yes, and the front door sets it only after a real answer.
 CONSENT_GIVEN_ENV = "MCPGAWK_CONSENT_GIVEN"
 
+#: The front door (`mcpgawk`) asked, with full disclosure, and is dispatching the scan it asked
+#: about IN THIS PROCESS. Never inherited by a child, never read from the environment.
+_FRONT_DOOR_CONSENT = False
+
+
+class front_door_consent:
+    """`with consent.front_door_consent():` around the one scan the front door asked about."""
+
+    def __enter__(self):
+        global _FRONT_DOOR_CONSENT
+        self._prev, _FRONT_DOOR_CONSENT = _FRONT_DOOR_CONSENT, True
+        return self
+
+    def __exit__(self, *exc):
+        global _FRONT_DOOR_CONSENT
+        _FRONT_DOOR_CONSENT = self._prev
+        return False
+
+
+def front_door_consented() -> bool:
+    return _FRONT_DOOR_CONSENT
+
 
 def _format(name: str, entry: dict[str, Any]) -> str:
     cmd = str(entry.get("command", ""))
@@ -60,7 +82,14 @@ def gate_stdio_consent(
     # disclosure, and remembers the answer. Re-announcing here made a first run ask, get an answer,
     # and then immediately restate the warning — which reads as though the answer was ignored and
     # quietly undermines the "asked once" promise the prompt makes.
-    if os.environ.get(CONSENT_GIVEN_ENV) == "1" and assume_yes:
+    # Two carriers, deliberately different in reach. The PROCESS-LOCAL flag is the front door's
+    # own answer, set around the one scan it dispatches in this process and nothing after it;
+    # the front door no longer passes --yes, because --yes also silenced the batched OAuth
+    # offer and told a user in a terminal to "re-run without --yes" (2026-10-09). The env var
+    # keeps its narrower meaning (with --yes only): a child process inherits an env, and the
+    # panel's scan button must never launch local code because its parent once consented
+    # (test_scan_button_respects_the_consent_boundary).
+    if _FRONT_DOOR_CONSENT or (os.environ.get(CONSENT_GIVEN_ENV) == "1" and assume_yes):
         return list(targets)
     isatty = sys.stdin.isatty() if stdin_isatty is None else stdin_isatty
     n = len(stdio)

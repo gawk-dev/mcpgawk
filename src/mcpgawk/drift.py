@@ -930,8 +930,16 @@ def render_headline(names: list[str], hostile: list[str] | None = None,
                          f"like an ATTACK.")
             lines.append("     Do NOT approve until you have read the inserted text below.")
         if esc:
+            # "than you approved" only when a person approved THESE servers' baselines — the
+            # escalated ones, not the fleet-wide mix `since` was built from. supademo 2026-10-09:
+            # "DECLARES MORE POWER than you approved" one line above "you have not approved this
+            # server yet".
+            from .history import vouched
+            esc_v = origins is None or vouched([origins.get(x) for x in esc])
+            than = ("you approved" if esc_v
+                    else ("its baseline" if len(esc) == 1 else "their baselines"))
             lines.append((f"  ⛔ {n} {what} CHANGED, and " if not inj else "     Also: ")
-                         + f"{', '.join(esc)} now DECLARES MORE POWER than you approved "
+                         + f"{', '.join(esc)} now DECLARES MORE POWER than {than} "
                          f"(a tool stopped declaring read-only or idempotent, or started "
                          f"declaring destructive or open-world).")
             lines.append("     Do NOT approve until you have read what it gained below.")
@@ -973,43 +981,28 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                 f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     approval = head is None      # the default caller compares "your approval" with "now"
-    if head is not None:
-        pass
-    elif r.baseline_origin == "first-sighting":
-        # Trust on first use is not a decision. "changed since you approved it" told a user who
-        # never ran `approve` that they had (new-developer walk, 2026-09-26).
-        head = (f"    ⟳ DRIFT on {name} — changed since first seen"
-                f"{' ' + when if when else ''}; you have not approved this server yet:")
-    elif r.baseline_origin == "unattended":
-        # Approved, but with no person present (an agent session, an agent process, no terminal or
-        # the panel unconfirmed): "since you approved it" would claim a decision nobody made.
-        head = (f"    ⟳ DRIFT on {name} — changed since its baseline, approved"
-                f"{' ' + when if when else ''} without a person present:")
-    elif r.baseline_origin == "fleet":
-        # First seen, then accepted by `approve --fleet`: an approval, but of the fleet, given
-        # after this baseline was recorded — so the date is the sighting's, said as such.
-        head = (f"    ⟳ DRIFT on {name} — changed since first seen"
-                f"{' ' + when if when else ''}, the baseline your fleet approval accepted:")
-    elif when:
-        # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
-        # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say
-        # what the timestamp is.
-        head = f"    ⟳ DRIFT on {name} — changed since you approved it {when}:"
-    elif r.prev_at:
-        head = f"    ⟳ DRIFT on {name} — changed since {r.prev_at}, after you approved it:"
-    else:
-        head = f"    ⟳ DRIFT on {name} — changed after you approved it:"
+    if head is None:
+        # ONE sentence, from `history.changed_head`, shared with the panel's /next headline: who
+        # approved this baseline is decided by `baseline_origin`, not by which renderer is
+        # printing. `prev_at` is the APPROVED sighting's time — the age of the baseline, not of
+        # the change ("changed 19 days ago" read as if the change were dated, 2026-09-03).
+        from .history import changed_head
+        head = f"    ⟳ DRIFT on {name} — {changed_head(r.baseline_origin, when or r.prev_at)}:"
     lines = [head]
     for kind in ITEM_KINDS:
         split = r.of_kind(kind)
         if split["changed"]:
             # "(rug-pull signature)" is an ACCUSATION, so it is made only where there is evidence
-            # for it — `r.hostile`, the same set that earns the per-line INJECTION SIGNATURE mark
+            # for it — `r.injected`, the same set that earns the per-line INJECTION SIGNATURE mark
             # below. Printing it on every rewrite meant a typo fix and a poisoning attempt arrived
             # in identical words, which is how a team learns to run `approve --all` without reading.
             # That is the failure this whole module exists to prevent (see `_with_severity`).
+            # NOT `r.hostile`: that is injected ∪ escalated, and an annotation flip is not text.
+            # supademo 2026-10-09: move_demos gained openWorldHint and nothing else, and this line
+            # called it a rug-pull while the headline (3f219d76) had already learned to tell the
+            # two apart. The escalation has its own words on the annotations line below.
             tag = (" (rug-pull signature)"
-                   if any(f"{kind}.{s}" in r.hostile for s in split["changed"]) else "")
+                   if any(f"{kind}.{s}" in r.injected for s in split["changed"]) else "")
             lines.append(f"        ! {kind} description CHANGED{tag}: "
                          f"{', '.join(split['changed'])}")
             # Show WHAT it gained. "helper's description changed" tells a user to go and look;
@@ -1019,7 +1012,7 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                 key = f"{kind}.{short}"
                 gained, lost = r.insertion(key), r.deletion(key)
                 if gained:
-                    mark = "  ← INJECTION SIGNATURE" if key in r.hostile else ""
+                    mark = "  ← INJECTION SIGNATURE" if key in r.injected else ""
                     lines.append(f"            {short} gained: {_excerpt(gained)}{mark}")
                 if lost:
                     # A deleted safety caveat steers the model as effectively as an added

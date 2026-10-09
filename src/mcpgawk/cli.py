@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures as _futures
+import contextlib
 import json
 import os
 import re
@@ -1616,19 +1617,25 @@ def _protect() -> int:
             # compares against LAUNCH_ALL: it happens to behave like remote-only today, and would
             # diverge silently the moment anything compared against REMOTE_ONLY instead.
             choice = protect.REMOTE_ONLY
-    if choice == protect.LAUNCH_ALL:
-        scan_args.append("--yes")
-        # We just asked, with more detail than the scan's own gate gives. Tell it not to ask again.
-        from .consent import CONSENT_GIVEN_ENV
-        os.environ[CONSENT_GIVEN_ENV] = "1"
+    # We just asked, with more detail than the scan's own gate gives. Tell it not to ask again —
+    # through a process-local flag around the one dispatch below, NOT --yes and NOT the env.
+    # --yes also means "never prompt" to the scan's batched OAuth offer, so the bare command
+    # silently dropped the sign-in step for every server that needed one and then printed
+    # "re-run in a terminal without --yes" to a user who had typed neither (2026-10-09).
+    # Consent to launch local code and consent to open a browser are two questions; the flag
+    # was answering both. And an env would be inherited by the panel this process may serve.
+    _consented = choice == protect.LAUNCH_ALL
 
     # This run turns checking on and reports it below, agent by agent. The scan's own "not
     # checking yet — run `mcpgawk`" nudge would tell the user to run what they just ran, and on a
     # first run it fires before the hooks exist, contradicting "Protected: N" a few lines down.
     global _IN_PROTECT_RUN
     _IN_PROTECT_RUN = True
+    # The consent the person just gave covers THIS scan and nothing after it.
+    from . import consent as _consent
     try:
-        rc = _dispatch(scan_args)
+        with (_consent.front_door_consent() if _consented else contextlib.nullcontext()):
+            rc = _dispatch(scan_args)
     finally:
         _IN_PROTECT_RUN = False
 
@@ -1681,6 +1688,14 @@ def _protect() -> int:
     _unchecked = ([(n, "not launched — this run checked remote servers only")
                    for n in sorted(local_servers)]
                   if choice == protect.REMOTE_ONLY else [])
+    # ON EVERY CONSENT CHOICE, the servers this run could not measure for want of a sign-in: the
+    # scan records them (remote_login.record_auth_needed) and nothing here read that record, so
+    # four credential-blocked servers fell out of the closing report entirely (2026-10-09).
+    from . import remote_login as _rl
+    _aside = _rl.signin_aside()
+    for _n in sorted(_rl.auth_needed()):
+        _unchecked.append((_n, "set aside by you — not measured" if _n in _aside
+                           else "needs your sign-in — not measured this run"))
     print(protect.protection_report(store, guard_line, unchecked=_unchecked))
     # ONBOARDING STAGE 5 ([FOUNDER] 2026-08-15: onboarding ends at protect + PANEL, and the
     # first run offers the bridge): until now the flow finished and the control surface was
@@ -2337,7 +2352,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
     #                         the agent uses server B's trusted tool.
     shadow: dict = {}
     if not args.no_signals:
-        shadow = detect_shadowing(snaps)
+        # Scoped to servers that share a client (discover's `_clients`): the same server in two
+        # agents is not shadowing itself (kite / kite#2, 2026-10-09).
+        shadow = detect_shadowing(snaps, clients={n: (e or {}).get("_clients") or ()
+                                                  for n, e in entries.items()})
         for srv, fs in detect_cross_server_reference(snaps).items():
             shadow.setdefault(srv, []).extend(fs)
     labels = [_label_for(sn, m, entries.get(sn.name) or {}, args, shadow)
@@ -2956,7 +2974,11 @@ def _offer_batched_auth(rows: list, args, entries: dict, *,
     # stdin inherited from the tester's terminal) reached input() and DEADLOCKED behind captured
     # output until the 900s timeout, which the walk then recorded as a false "slow scan".
     if getattr(args, "yes", False) or not sys.stdin.isatty():
-        print(f"  {len(pending)} server(s) need credentials. Re-run in a terminal without --yes, "
+        # Name the step the reader can actually take: "re-run without --yes" to someone who
+        # never typed it (the bare command, 2026-10-09) is a dead end.
+        step = ("Re-run without --yes to sign in" if getattr(args, "yes", False) and sys.stdin.isatty()
+                else "Run this in a terminal to sign in")
+        print(f"  {len(pending)} server(s) need credentials. {step}, "
               f"or: mcpgawk scan --http <url> --login\n", file=sys.stderr)
         return {}
 
