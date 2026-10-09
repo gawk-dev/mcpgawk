@@ -154,6 +154,7 @@ def _store_for(origin: str) -> dict:
     entry = {"aliases": ["s"], "approved": _sight("p1", at),
              "history": [_sight("p1", at),
                          {**_sight("p2", "2026-10-04T00:00:00+00:00", "h2"),
+                          "items": {"tool.read_note": "h2", "tool.new_tool": "h9"},
                           "seen": "2026-10-04T00:00:00+00:00"}],
              **extras}
     return {**store_extras, "servers": {"mcp:s": entry}}
@@ -174,6 +175,9 @@ def _surfaces(origin: str) -> dict[str, str]:
         "protect report": protect.protection_report(store, "guard on", unchecked=[]),
         "since words": history.since_words([report.baseline_origin]),
         "panel next": re.search(r"<h1>(.*?)</h1>", panel.render_next(d, token="T"), re.S).group(1),
+        "panel next evidence": panel._next_diff(report),
+        "decide page": decide.render_page(decide.pending_decisions(store), "T"),
+        "decide evidence": decide._diff_block(report),
     }
 
 
@@ -184,13 +188,15 @@ def test_every_surface_agrees_on_who_approved_the_baseline(origin):
         low = text.lower()
         claims_person = "you approved" in low or "fleet approval" in low
         claims_nobody = "not approved" in low or "nobody has approved" in low or "first sighting" in low
+        sentence = surface in ("scan head", "panel next", "since words", "decide page", "protect report")
         if origin in SAYS_A_PERSON_APPROVED:
-            assert claims_person or surface == "scan escalation headline" and "than its baseline" not in low, \
-                (origin, surface, text[:300])
+            # Sentence surfaces must say so; evidence blocks are neutral by design (they list
+            # what changed, not who approved) and must simply never contradict the head.
+            assert claims_person or not sentence, (origin, surface, text[:300])
             assert not claims_nobody, (origin, surface, text[:300])
         elif origin in SAYS_NOBODY_APPROVED:
             assert not claims_person, (origin, surface, text[:300])
-            if surface in ("scan head", "panel next", "since words"):
+            if surface in ("scan head", "panel next", "since words", "decide page"):
                 assert claims_nobody, (origin, surface, text[:300])
         else:   # unattended / unknown: neither a person nor nobody may be asserted
             assert not claims_person, (origin, surface, text[:300])

@@ -2965,7 +2965,17 @@ def _offer_batched_auth(rows: list, args, entries: dict, *,
     redraw the list in place instead of telling the user to run the command again. Default-deny in
     spirit: a blank or unparseable answer authenticates nothing, and a non-interactive run never
     opens a browser at all."""
-    pending = [r for r in rows if r.needs_auth]
+    # A server the person SET ASIDE ("not available to me") is not asked again. The panel has
+    # honoured that record since the set-aside flow shipped; this offer never read it, so the
+    # front door asked the founder to sign in to robinhood-trading 24 days after they recorded
+    # it was not available in their region (2026-10-09). Named once, not prompted for.
+    from . import remote_login as _rl
+    _aside = _rl.signin_aside()
+    held = [r for r in rows if r.needs_auth and r.name in _aside]
+    pending = [r for r in rows if r.needs_auth and r.name not in _aside]
+    if held:
+        print(f"  Set aside by you, not asked: {', '.join(r.name for r in held)} — put it back "
+              f"from the panel's Today page to be asked again.\n", file=sys.stderr)
     if not pending:
         return {}
     # --yes means non-interactive: proceed without asking. OAuth sign-in cannot be automated, so

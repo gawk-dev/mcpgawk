@@ -70,6 +70,16 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
             "since_original": history.since_original(entry, latest),
             "hostile": list(report.hostile),
             "seen_at": latest.get("seen") or "",
+            # THE one sentence (history.changed_head) — "Changed after you approved it" was a
+            # literal here for every origin (2026-10-09).
+            "head": history.changed_head(
+                history.baseline_origin(store, key),
+                ("on " + str(entry.get("approved_at") or approved.get("measured_at") or "")[:10])
+                if (entry.get("approved_at") or approved.get("measured_at")) else None
+            )[:1].upper() + history.changed_head(
+                history.baseline_origin(store, key),
+                ("on " + str(entry.get("approved_at") or approved.get("measured_at") or "")[:10])
+                if (entry.get("approved_at") or approved.get("measured_at")) else None)[1:],
         })
     return out
 
@@ -149,8 +159,8 @@ def _diff_block(report: drift.DriftReport) -> str:
                if before or after else "")
             + "</div>")
     for tool in report.added:
-        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — a tool that did not exist '
-                    f'when you approved this server</div></div>')
+        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — not in the baseline; '
+                    f'added since</div></div>')
     for tool in report.removed:
         rows.append(f'<div class="ev"><div class="lbl">− {_esc(tool)} — removed</div></div>')
     for tool in report.changed:
@@ -218,7 +228,7 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
     <h2>{_esc(it['name'])}</h2>
     <span class="pill">blocked · waiting on you</span>
   </div>
-  <p class="sub">Changed after you approved it{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
+  <p class="sub">{_esc(it.get('head') or 'Changed since its baseline')}{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
      Your agents cannot call it until you decide.</p>
   {_diff_block(r)}
   {_total_line(it.get('since_original'))}
@@ -413,7 +423,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
         # The SAME scoping the page uses. This line is what a user reads before the browser even
         # opens, so an all-clear here is read exactly as hard as one on the page.
         gaps = uncovered(store)
-        log("\n  No server with an approved baseline has changed since you approved it.")
+        log("\n  No server has changed since its baseline.")
         if gaps.get("alerts"):
             who = ", ".join(gaps.get("alert_servers", [])[:6])
             log(f"  ⚠ monitoring is separately holding {gaps['alerts']} unaccepted alert(s) on "

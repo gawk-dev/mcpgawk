@@ -212,3 +212,23 @@ def test_an_uncovered_call_is_told_the_remedy_its_state_allows(monkeypatch):
     assert "sign-in" in panel.uncovered_remedy("zoho", d)
     assert "run a scan" in panel.uncovered_remedy("gitnexus", d)
     assert "no scan can baseline" in panel.uncovered_remedy("claude-in-chrome", d)
+
+
+# --- a server set aside is not asked for a sign-in again ------------------------------------------
+# robinhood-trading was set aside on 15 Sep ("not available to me"); the panel honoured it, the
+# scan's batched offer never read the record and asked again on 2026-10-09.
+
+def test_a_set_aside_server_is_named_once_and_never_prompted_for(monkeypatch, capsys):
+    from mcpgawk import remote_login
+    monkeypatch.setattr(remote_login, "signin_aside", lambda *a, **k: {"robinhood": "2026-09-15"})
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "N")
+    cli._offer_batched_auth([_Row("zoho"), _Row("robinhood")], types.SimpleNamespace(yes=False), {})
+    out = capsys.readouterr()
+    listed = out.out[out.out.index("These need credentials"):]
+    assert "zoho" in listed and "robinhood" not in listed, listed
+    assert "Set aside by you, not asked: robinhood" in out.err, out.err
+    # Only set-aside servers: nothing to ask, and still named.
+    cli._offer_batched_auth([_Row("robinhood")], types.SimpleNamespace(yes=False), {})
+    out = capsys.readouterr()
+    assert "These need credentials" not in out.out and "robinhood" in out.err

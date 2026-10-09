@@ -3960,8 +3960,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         f'<td>{_dec_chip(k)}</td>'
         f'<td>{_dec_action(k)}</td></tr>'
         for k in pending) or \
-        ('<tr><td colspan="4" class="dim">No server with an approved baseline has changed '
-         'since you approved it.' + monitor_gap_note(d) + '</td></tr>')
+        ('<tr><td colspan="4" class="dim">No server has changed since its baseline.'
+         + monitor_gap_note(d) + '</td></tr>')
 
     # While an action runs, the page REFRESHES ITSELF. Telling the user to reload is not a progress
     # indicator: 0.1.20 completed its scan in ~100s and went on showing "Running scan…" forever
@@ -8922,8 +8922,10 @@ def _next_diff(report) -> str:
                     'description since its baseline: the rug-pull signature</div>'
                     + _change_excerpt(*texts.get(tool, ("", ""))) + '</div>')
     for tool in report.added:
-        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — did not exist when you '
-                    'approved this server</div></div>')
+        # "when you approved this server" under a head saying nobody did (notion, /next, the
+        # founder's 0.1.75 panel): the anchor is the baseline, whoever set it.
+        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — not in the baseline; '
+                    'added since</div></div>')
     for tool in report.removed:
         rows.append(f'<div class="ev"><div class="lbl">− {_esc(tool)} — removed</div></div>')
     for tool in report.changed:
