@@ -1,7 +1,7 @@
 {
   "name": "mcpgawk",
   "description": "Measure the MCP servers your agent calls, record the tool surface you approved, and refuse a changed tool until a person has looked. Local-first.",
-  "version": "0.1.74",
+  "version": "0.1.75",
   "author": {
     "name": "Nativerse",
     "email": "hello@nativerse-ventures.com"
@@ -27,7 +27,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "mcpgawk==0.1.74",
+        "mcpgawk==0.1.75",
         "mcpgawk",
         "mcp"
       ]
