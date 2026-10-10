@@ -278,13 +278,22 @@ def _steady_surfaces(origin: str) -> dict[str, str]:
               baseline_words=history.at_baseline_words_for(store, ["mcp:s"]),
               pending=[], pending_keys=[], behaviour_tools=None, enforce_available=False,
               last_activity=None)
-    d = {"store": store, "entries": {}, "monitor": {}, "verify_at": "", "pending": [],
+    d = {"store": store, "entries": {"s": {"url": "https://s.test/mcp", "_clients": ["cursor"]}},
+         "monitor": {}, "verify_at": "", "pending": [], "appeared": {},
          "gateway": {}, "activity": {}, "recent_calls": [], "findings": [], "unscannable": []}
     see = panel.journey_steps(d)[0]["fact"]
+    # /next, the unwatched card: "Nothing is re-checking your N server(s) …" (walk of the built
+    # 0.1.78 wheel, 2026-10-10: it said "2 approved servers" over a first-sighting record).
+    [unwatched] = [it for it in panel.next_queue(d) if it["kind"] == "unwatched"]
+    nxt = panel.render_next(d, token="T")
+    head = nxt[nxt.index("Nothing is re-checking"):]
+    head = head[:head.index("</")]
+    assert str(unwatched["approved"]) in head, head
     return {
         "protect report": protect.protection_report(store, "guard on", unchecked=[]),
         "status count": status.render(**st),
         "panel see step": see,
+        "next unwatched": head,
     }
 
 

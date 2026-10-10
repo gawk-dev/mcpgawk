@@ -8858,13 +8858,17 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
                           "status": str(v.get("status") or ""), "at": str(v.get("at") or "")})
     # 6 — approved servers with nothing re-checking them.
     mon = _dict_at(d, "monitor")
-    approved_n = sum(1 for _n, _e, k, _t in fleet if k and _h.approved(store, k))
+    approved_keys = [k for _n, _e, k, _t in fleet if k and _h.approved(store, k)]
+    approved_n = len(approved_keys)
     if approved_n and not mon.get("running"):
         alerts = [a for a in (mon.get("alerts") or []) if isinstance(a, dict) and a.get("state") == "pending"]
         last = max((str(x.get("last_check") or "") for x in (mon.get("servers") or [])
                     if isinstance(x, dict)), default="")
+        # "approved" is the baseline's origin, not the record's presence (2026-10-10): the words
+        # come from history.at_baseline_words, the one rule every count surface prints from.
         items.append({"kind": "unwatched", "key": "monitor", "name": "monitor",
-                      "approved": approved_n, "alerts": len(alerts), "last_check": last})
+                      "approved": approved_n, "alerts": len(alerts), "last_check": last,
+                      "words": _h.at_baseline_words_for(store, approved_keys, plural=True)})
     # 7 — agents whose calls pass with no check: a hook point not installed, or none at all.
     for client, label, state, n_servers, det in _agent_rows(d):
         if state != "on":
@@ -9457,9 +9461,11 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             eyebrow = f'1 OF {_eyebrow_n} · COULD NOT VERIFY' + (f' · LAST TRY {_esc(_local_stamp(it["at"]))}' if it["at"] else '')
         elif it["kind"] == "unwatched":
             n_ap = it["approved"]
-            head = f'Nothing is re-checking your {n_ap} approved server{"s" if n_ap != 1 else ""}.'
-            sub = ('Monitoring is off. A server that changes after you approved it will not raise '
-                   'an alert until someone scans — the rug-pull case waits for a human to look.')
+            words = it.get("words") or "at a baseline"
+            head = f'Nothing is re-checking your {n_ap} server{"s" if n_ap != 1 else ""} {words}.'
+            sub = ('Monitoring is off. A server that changes after its baseline was recorded will '
+                   'not raise an alert until someone scans — the rug-pull case waits for a human '
+                   'to look.')
             evidence = ('<h2>State</h2><div class="ev"><div class="lbl">monitor not running</div>'
                         + (f'<div class="was"><b>last check</b> {_esc(_local_stamp(it["last_check"]))}</div>' if it["last_check"] else '<div class="was">no sweep recorded</div>')
                         + (f'<div class="was"><b>open alerts</b> {it["alerts"]}</div>' if it["alerts"] else '')

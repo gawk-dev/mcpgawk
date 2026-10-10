@@ -274,8 +274,10 @@ def test_could_not_verify_quotes_the_engine_and_offers_a_rerun(monkeypatch):
 
 def test_unwatched_names_the_count_and_offers_both_starts(monkeypatch):
     html = _one(monkeypatch, {"kind": "unwatched", "key": "monitor", "name": "monitor",
-                              "approved": 9, "alerts": 6, "last_check": "2026-09-05T01:37:58"})
-    assert "Nothing is re-checking your 9 approved servers." in html
+                              "approved": 9, "alerts": 6, "last_check": "2026-09-05T01:37:58",
+                              "words": "at their approved baseline"})
+    # The words come from history.at_baseline_words (origin, not record presence; 2026-10-10).
+    assert "Nothing is re-checking your 9 servers at their approved baseline." in html
     assert 'value="monitor-start"' in html and 'value="monitor-start-local"' in html
     assert html.count("btn primary") == 1, "one accent action"
     assert "<b>open alerts</b> 6" in html
