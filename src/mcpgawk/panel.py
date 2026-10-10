@@ -487,8 +487,8 @@ TIERS = (
                                   "or injected output"),
     # NOT "never watched": a server verify exercised but nobody approved lands here too (A,
     # 2026-10-05) — it was watched, and there was no approval to verify it against.
-    ("unverified", "Unverified", "not verified against anything you approved — absence of a "
-                                 "finding, not safety"),
+    ("unverified", "Unverified", "not verified against a baseline — absence of a finding, "
+                                 "not safety"),
     # OBSERVED IS NOT VERIFIED, AND SAYS SO IN ITS OWN NAME. A session-bound-auth server can never
     # be verified here: the login belongs to the client's live session and verify's own session
     # times out. `wrap` rides that authenticated pipe and watches the real calls — real evidence,
@@ -503,7 +503,8 @@ TIERS = (
     # `mcpgawk status` counts it); this tier also needs behaviour observed. One page read "1 at an
     # approved baseline" beside "At baseline 0" (walk, 2026-10-05): one word, two facts. The
     # tier's own name is now the pair of "Unverified".
-    ("baseline", "Verified", "matches what you approved, and behaviour was observed"),
+    # "its baseline", not "what you approved": the record may be a first sighting (2026-10-09).
+    ("baseline", "Verified", "matches its baseline, and behaviour was observed"),
 )
 
 
@@ -1709,7 +1710,11 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     # The rule `status` and the bare run count by: approved AND not pending. Counting every
     # approved record said "1 at an approved baseline" during drift, beside their 0 (2026-10-05).
     from .protect import at_approved_baseline
-    approved = len(at_approved_baseline({"servers": store}, d.get("pending") or []))
+    # The WHOLE store, not `{"servers": store}`: the origin rule reads the fleet record too, and
+    # a fleet-approved baseline wrapped without it reads as a first sighting (one-rule test).
+    _whole_store = d.get("store") or {"servers": store}
+    _covered = at_approved_baseline(_whole_store, d.get("pending") or [])
+    approved = len(_covered)
     clients = sorted({c for e in entries.values() if isinstance(e, dict)
                       for c in (e.get("_clients") or [])})
     signins = signin_asks(entries)      # ONE source — the briefing strip reads the same list
@@ -1773,7 +1778,11 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     # Approvals are the free-tier spine and belong in the fact line of 'see', not a stage of
     # their own — the founder's flow is fleet → trust → gateway, not a checklist of features.
     if approved:
-        steps[0]["fact"] += f" · {approved} at an approved baseline"
+        # The words follow the records' origins (history's one rule): "approved" only when a
+        # person stands behind every one. Said "at an approved baseline" of first sightings
+        # (walk, 2026-10-09), beside /next's "nobody has approved this server yet".
+        from .history import at_baseline_words_for as _abw
+        steps[0]["fact"] += f" · {approved} {_abw(_whole_store, _covered)}"
     if calls:
         # SEEN, not "checked" — same defect as the Activity headline, second surface. `calls` here
         # is the raw recent-call list; whether the guard actually checked any of them is a
@@ -1982,7 +1991,7 @@ def _calls_chart(series: list[dict]) -> str:
             + "".join(parts) + '</svg><figcaption>'
             f'<span><i class="ok"></i>Checked and allowed ({tot["allowed"]:,})</span>'
             f'<span><i class="bad"></i>Blocked ({tot["blocked"]:,})</span>'
-            f'<span><i class="warn"></i>Not checked — no approved baseline ({tot["not_checked"]:,})</span>'
+            f'<span><i class="warn"></i>Not checked — no baseline ({tot["not_checked"]:,})</span>'
             f'<span class="dim">{_esc(first)} → {_esc(last)}, per UTC day</span></figcaption></figure>')
 
 
@@ -2092,7 +2101,7 @@ def _activity_headline(summary: object) -> str:
         # Written before the distinction existed: say so rather than infer a number.
         return (f"<b>{seen}</b> calls seen · <span class=\"warn\">how many were CHECKED is not "
                 f"recorded in this log</span>")
-    out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against an approved baseline"
+    out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against a baseline"
     if deferred:
         unsc = summary.get("deferred_unscannable") or 0
         scannable = max(deferred - unsc, 0)
@@ -3859,7 +3868,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                  (all_acts[0].get("when") if all_acts else None))
     acts_notable = "".join(_act_row(a, expand_why=True) for a in notable) or \
         ('<tr><td colspan="6" class="dim">No call in this log was blocked, and nothing it '
-         'covers overstepped its approved baseline.' + monitor_gap_note(d) + '</td></tr>')
+         'covers overstepped its baseline.' + monitor_gap_note(d) + '</td></tr>')
     acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
     if _foreign_acts:
@@ -5545,11 +5554,11 @@ def role_evidence(d: dict[str, Any]) -> str:
     basis is a guess wearing a name."""
     roles = roles_from_baseline(d)
     if not roles:
-        return ("No approved baseline yet, so there is nothing to build roles from. Scan and "
+        return ("No baseline yet, so there is nothing to build roles from. Scan and "
                 "approve a server first — a role is a statement about tools we have seen.")
     reads = len([g for g in roles.get("admin", []) if g == "read"])
     writes = len([g for g in roles.get("admin", []) if g.startswith("write:")])
-    return (f"Built from your approved baselines: "
+    return (f"Built from your baselines: "
             f"{'read-only tools' if reads else 'no read-only tools'}, {writes} write/destructive "
             f"tool(s)"
             + (" · tools your servers left unannotated are granted only to admin"

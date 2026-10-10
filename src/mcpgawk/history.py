@@ -1249,6 +1249,30 @@ def changed_head(origin: "str | None", when: "str | None") -> str:
             if when else "changed since its baseline; who approved it is not on record")
 
 
+def at_baseline_words(origins: "list[str | None]", *, plural: bool = False) -> str:
+    """THE words after "N server(s)" for records sitting at their baseline, from `baseline_origin`:
+    "at an approved baseline" only when a person stands behind every one (`vouched`); "at a
+    baseline with no person's approval on record" when none does; the split when mixed. The bare run's Protected
+    line, `status`'s EXPECTED BEHAVIOUR count and the panel's See step print this one string
+    (2026-10-09: all three said "at an approved baseline" of first-sighting records). An empty
+    set describes nothing and keeps the plain words."""
+    if not origins or vouched(origins):
+        return "at their approved baseline" if plural else "at an approved baseline"
+    # Not vouched: a first sighting (nobody), an unattended approval (no person present) or a
+    # record older than the markers (not on record). One phrase that is true of all three and
+    # asserts neither "you approved" nor "nobody did" — the same line `changed_head` walks.
+    n_v = sum(1 for o in origins if o in VOUCHED_ORIGINS)
+    if n_v == 0:
+        return "at a baseline with no person's approval on record"
+    return (f"at a baseline — {n_v} you approved, {len(origins) - n_v} with no person's "
+            f"approval on record")
+
+
+def at_baseline_words_for(store: dict[str, Any], keys: "list[str]", *, plural: bool = False) -> str:
+    """`at_baseline_words` for stored servers."""
+    return at_baseline_words([baseline_origin(store, k) for k in keys], plural=plural)
+
+
 def changed_within(store: dict[str, Any], days: int = 7,
                    now: "float | None" = None) -> list[tuple[str, str]]:
     """Servers whose surface first MOVED from its approved pin within the last `days`, as

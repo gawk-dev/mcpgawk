@@ -255,3 +255,58 @@ def test_a_config_name_beats_an_adhoc_target_whatever_the_alias_order():
     # Only ad-hoc targets: the asserted name (unchanged rule).
     store = {"servers": {"mcp:tiny": {"aliases": ["https://t.test/mcp"]}}}
     assert history.display_name(store, "mcp:tiny") == "tiny"
+
+
+# --- "N at an approved baseline": the steady-state words follow the same origin rule ---------- #
+# The bare run's Protected line, `status`'s EXPECTED BEHAVIOUR count and the panel's See step all
+# said "at an approved baseline" of first-sighting records (walk, 2026-10-09) while /next said
+# "nobody has approved this server yet" of the same store. One helper, three surfaces.
+
+from mcpgawk import status
+
+
+def _store_at_baseline(origin: str) -> dict:
+    """`_store_for` with no drift: the latest sighting IS the baseline."""
+    extras, store_extras, at = ORIGINS[origin]
+    entry = {"aliases": ["s"], "approved": _sight("p1", at), "history": [_sight("p1", at)], **extras}
+    return {**store_extras, "servers": {"mcp:s": entry}}
+
+
+def _steady_surfaces(origin: str) -> dict[str, str]:
+    store = _store_at_baseline(origin)
+    st = dict(hook_health={}, guard_path=None, agents={}, baseline_total=1,
+              baseline_words=history.at_baseline_words_for(store, ["mcp:s"]),
+              pending=[], pending_keys=[], behaviour_tools=None, enforce_available=False,
+              last_activity=None)
+    d = {"store": store, "entries": {}, "monitor": {}, "verify_at": "", "pending": [],
+         "gateway": {}, "activity": {}, "recent_calls": [], "findings": [], "unscannable": []}
+    see = panel.journey_steps(d)[0]["fact"]
+    return {
+        "protect report": protect.protection_report(store, "guard on", unchecked=[]),
+        "status count": status.render(**st),
+        "panel see step": see,
+    }
+
+
+@pytest.mark.parametrize("origin", sorted(ORIGINS))
+def test_every_count_surface_agrees_on_whether_the_baseline_was_approved(origin):
+    out = _steady_surfaces(origin)
+    for surface, text in out.items():
+        low = text.lower()
+        assert "1 " in text or "protected:" in low, (surface, text[:200])
+        says_approved = "approved baseline" in low or "you approved" in low
+        if origin in SAYS_A_PERSON_APPROVED:
+            assert says_approved, (origin, surface, text[:300])
+        else:
+            assert not says_approved, (origin, surface, text[:300])
+            assert "no person's approval on record" in low, (origin, surface, text[:300])
+            # Neither "nobody approved" nor "you approved" is asserted of an unattended or
+            # unknown record; the first-sighting cases are covered by the drift test above.
+            assert "nobody" not in low and "you have not" not in low, (origin, surface, text[:300])
+
+
+def test_a_mixed_fleet_states_the_split():
+    assert history.at_baseline_words(["approve", "first-sighting", None]) == \
+        "at a baseline — 1 you approved, 2 with no person's approval on record"
+    assert history.at_baseline_words(["approve", "fleet"], plural=True) == "at their approved baseline"
+    assert history.at_baseline_words([]) == "at an approved baseline"

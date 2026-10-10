@@ -101,6 +101,7 @@ def hook_health_by_client() -> dict[str, str]:
 
 def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path | None",
            agents: dict[str, int], baseline_total: int, pending: list[str],
+           baseline_words: str | None = None,
            pending_keys: list[str] | None = None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
@@ -173,7 +174,8 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
         out.append(f"      ⚠ could not read your approved baseline ({baseline_error}) — the "
                    f"number of approved servers is UNKNOWN, not zero.")
     else:
-        out.append(f"      {baseline_total} server(s) at an approved baseline (what they may expose)")
+        out.append(f"      {baseline_total} server(s) "
+                   f"{baseline_words or 'at a baseline'} (what they may expose)")
     if behavioural_unavailable:
         # B5 — never a silent fallback: the missing dependency is named BEFORE any name-only
         # posture is described, and no dead command (`mcpgawk verify` cannot run here) is offered.
@@ -252,7 +254,7 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
             out.append("      how many were actually CHECKED is not recorded in this log "
                        "(written before the distinction existed)")
         else:
-            out.append(f"      {checked} actually checked against an approved baseline")
+            out.append(f"      {checked} actually checked against a baseline")
         if deferred:
             out.append(f"      ⚠ {deferred} call(s) NOT checked — the guard declined (no or stale "
                        f"baseline projection) and let them through. Run `mcpgawk scan`.")
@@ -328,12 +330,17 @@ def collect() -> dict:
         # approved — was counted here as "at an approved baseline" (walk, 2026-10-05). The panel's
         # policy row and protect's "Protected" count already asked this question.
         from .protect import at_approved_baseline
-        baseline_total = len(at_approved_baseline(store, pending_keys))
+        _covered = at_approved_baseline(store, pending_keys)
+        baseline_total = len(_covered)
+        # The words follow the records' origins — history's one rule, shared with the bare
+        # run's Protected line and the panel's See step (2026-10-09).
+        baseline_words = history.at_baseline_words_for(store, _covered)
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
     except Exception as exc:                       # noqa: BLE001
         pending, pending_keys, baseline_total, muted_total = [], [], 0, 0
+        baseline_words = None
         baseline_error = f"{type(exc).__name__}: {exc}"
         store = None
 
@@ -448,7 +455,8 @@ def collect() -> dict:
 
     return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   agents_error=agents_error,
-                  baseline_total=baseline_total, pending=pending, pending_keys=pending_keys,
+                  baseline_total=baseline_total, baseline_words=baseline_words,
+                  pending=pending, pending_keys=pending_keys,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,

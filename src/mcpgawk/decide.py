@@ -214,7 +214,7 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
                          f'changed or stopped answering is not a server that matches. '
                          f'See <code>mcpgawk monitor status</code>.</p>')
         body = ('<div class="done"><h1>Nothing is waiting on you.</h1>'
-                '<p>Every server with an approved baseline still matches it. '
+                '<p>Every server with a baseline still matches it. '
                 'This page opens when that stops being true.</p>'
                 + "".join(notes) + '</div>')
     else:

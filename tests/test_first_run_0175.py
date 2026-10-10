@@ -262,13 +262,13 @@ def test_the_activity_header_counts_the_charts_own_series(monkeypatch, tmp_path)
     page = panel.render({"entries": {"p": {"command": "npx p"}}, "store": {"servers": {}}, "pending": [],
                          "activity": {"calls": 999, "checked": 1, "deferred": 998}, "recent_calls": [],
                          "findings": [], "unscannable": [], "monitor": {}, "verify_at": ""}, token="t")
-    head = re.search(r"<b>(\d+)</b> seen · <b>(\d+)</b> checked against an approved baseline"
+    head = re.search(r"<b>(\d+)</b> seen · <b>(\d+)</b> checked against a baseline"
                      r"(?: · <span class=\"warn\"><b>(\d+)</b> NOT checked)?", page)
     assert head, "no activity headline"
     seen, checked, deferred = int(head.group(1)), int(head.group(2)), int(head.group(3) or 0)
     allowed = int(re.search(r"Checked and allowed \((\d+)\)", page).group(1))
     blocked = int(re.search(r"Blocked \((\d+)\)", page).group(1))
-    not_checked = int(re.search(r"Not checked — no approved baseline \(([\d,]+)\)", page).group(1).replace(",", ""))
+    not_checked = int(re.search(r"Not checked — no baseline \(([\d,]+)\)", page).group(1).replace(",", ""))
     assert (seen, checked, deferred) == (allowed + blocked + not_checked, allowed + blocked, not_checked), \
         (seen, checked, deferred, allowed, blocked, not_checked)
     assert (checked, deferred) == (4, 5)                      # not summarise's 1 / 998

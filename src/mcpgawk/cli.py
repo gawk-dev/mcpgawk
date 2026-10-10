@@ -1308,7 +1308,7 @@ def _approve(args) -> int:
                 print("Nothing to compare — the approval store is unreadable, so whether anything "
                       "changed is UNKNOWN. See the warning above.")
                 return 4   # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
-            print("Nothing to approve — every tracked server matches its approved baseline.")
+            print("Nothing to approve — every tracked server matches its baseline.")
             return 0
         print(f"{len(waiting)} server(s) changed since their baseline:\n")
         for key in waiting:

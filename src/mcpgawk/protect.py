@@ -161,7 +161,8 @@ def protection_report(store: dict[str, Any], guard_line: str,
         out.append("    Accept it:       mcpgawk approve <name>")
         out.append("")
 
-    out.append(f"  Protected: {len(covered)} server(s) at their approved baseline.")
+    out.append(f"  Protected: {len(covered)} server(s) "
+               f"{history.at_baseline_words_for(store, covered, plural=True)}.")
     out.append(f"  {guard_line}")
 
     if appeared:
