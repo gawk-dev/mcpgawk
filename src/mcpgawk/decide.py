@@ -173,8 +173,29 @@ def _diff_block(report: drift.DriftReport) -> str:
     for tool in report.annotation_changed:
         rows.append(_hint_row(report, tool, mark="⚠ "))
     for tool in report.schema_changed:
-        rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
+        rows.append(_param_row(report, tool, mark="⚠ "))
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
+
+
+def _param_row(report: drift.DriftReport, tool: str, mark: str = "") -> str:
+    """The schema row with each parameter's was/now — the old and new side by side that the
+    article promises for a held tool (2026-11-04). Red only when a constraint loosened; a moved
+    default or a new optional flag is shown as one plain line, never as danger. Same shape as
+    `_hint_row`, and the panel imports it: a rule in one file is not a rule."""
+    moves = report.param_moves(tool)
+    widened = bool(report.loosenings(tool))
+    cls = "ev danger" if widened else "ev"
+    head = mark if widened else "~ "
+    if not moves:
+        body = ""
+    elif widened:
+        body = (f'<div class="was">{_esc(chr(10).join(f"{n}: {w}" for n, w, _ in moves))}</div>'
+                f'<div class="now">{_esc(chr(10).join(f"{n}: {v}" for n, _, v in moves))}</div>')
+    else:
+        body = (f'<div class="moves">'
+                f'{_esc(chr(10).join(f"{n}: {w} → {v}" for n, w, v in moves))}</div>')
+    return (f'<div class="{cls}"><div class="lbl">{head}{_esc(tool)} — '
+            f'{_esc(report.schema_summary(tool))}</div>{body}</div>')
 
 
 def _hint_row(report: drift.DriftReport, tool: str, mark: str = "") -> str:

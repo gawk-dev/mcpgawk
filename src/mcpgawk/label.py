@@ -138,7 +138,9 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
             "tool_count": m.tool_count,
             "prompt_count": m.prompt_count,
             "resource_count": m.resource_count,
-            "integrity_pin": m.integrity_pin,        # EXACT — rug-pull anchor
+            # EXACT — rug-pull anchor. None on a failed scan: nothing was seen, and the pin of an
+            # empty surface (e3b0c442…) published as the server's pin is a claim about nobody.
+            "integrity_pin": None if m.is_failure else m.integrity_pin,
             "top_heavy_tools": [{"name": t.name, "tokens": t.tokens} for t in heavy],
             "trust_surface": _ts,
             # The risk CLASSIFICATION, kept machine-readable. The human headline is now a sentence
@@ -150,7 +152,9 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
                 "unannotated": g.total > 0 and g.annotated == 0,
             },
             "annotation_completeness": {
-                "score": g.hygiene_score, "annotated": g.annotated, "total": g.total,
+                # None at 0 tools: 100% of nothing is not a score (it read as full marks on failed
+                # and empty scans alike).
+                "score": g.hygiene_score if g.total else None, "annotated": g.annotated, "total": g.total,
             },
             # server's self-declaration checked against what we measured (http/sse only)
             "server_card": (compare_to_reality(snap.server_card, [t.name for t in m.tools])
@@ -592,11 +596,14 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "failure": failure,
         "dispatch": has_dispatch,
-        "cost_sentence": (f"{n} tool{'s' if n != 1 else ''} costing {cost:,} tokens — {window}, spent on "
+        # None on a failed scan: "0 tools costing 0 tokens … Lean for a server this size" is a
+        # verdict on a server that was never measured.
+        "cost_sentence": (None if failed else
+                          f"{n} tool{'s' if n != 1 else ''} costing {cost:,} tokens — {window}, spent on "
                           f"every message before you type a word. {phrase.capitalize()}."),
         # An absolute reference point, from measured servers — one sentence, engine-owned, so the
         # CLI and the web quote the same numbers (the web used to carry its own and drift).
-        "cost_context": cost_context(cost),
+        "cost_context": None if failed else cost_context(cost),
         "concerns": [{"title": t, "body": b} for t, b in concerns],
         # The named tools behind the exposure, as structure — the CLI table and the web report
         # both render this, so they name the same tools with the same verdict. Gated on has_risk to

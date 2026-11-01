@@ -736,12 +736,17 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     given: set = set()
     if url:
         from .redact import redact_url
-        mine = {url, redact_url(url) or url}
-        given = {s.error_kind for label, s in attempts if label.split(" ", 1)[-1] in mine}
+        # Candidates label a bare host with its normalised `host/`; the config says `host`. Same URL.
+        mine = {u.rstrip("/") for u in (url, redact_url(url) or url)}
+        given = {s.error_kind for label, s in attempts if label.split(" ", 1)[-1].rstrip("/") in mine}
     # THE USER'S OWN URL TIMING OUT outranks a guessed path's web page (30-server rescan,
     # 2026-09-26): bureau's /mcp timed out once, `/` and `/sse` answered 405/404/HTML, and the
     # report said NOT AN MCP ENDPOINT, "It answered" — about paths nobody named. A re-run was CLEAN.
     own_url_timed_out = "timed-out" in given and "not-an-mcp-endpoint" not in given
+    # And it outranks a guessed path's sign-in wall (Drift Watch, 2026-10-27): LastPing's own `/`
+    # timed out once, the guessed `/mcp` said 401, and the report said "retry with --login" about a
+    # URL that needs no sign-in. The 401 stays in the lines below; it just doesn't headline.
+    guessed_auth = own_url_timed_out and not given & {"access-denied", "auth-required"}
     # Most specific, most actionable kind wins — each one sends the user somewhere different.
     if "registration-refused" in kinds:
         kind = "registration-refused"
@@ -749,9 +754,9 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         kind = "sign-in-incomplete"
     elif "sign-in-failed" in kinds:
         kind = "sign-in-failed"
-    elif "access-denied" in kinds:
+    elif "access-denied" in kinds and not guessed_auth:
         kind = "access-denied"
-    elif "auth-required" in kinds:
+    elif "auth-required" in kinds and not guessed_auth:
         kind = "auth-required"
         try:
             from .oauth_login import stored_login_unreadable
@@ -798,6 +803,8 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
                else "endpoint found, it needs credentials" if kind in (
                    "auth-required", "sign-in-failed", "sign-in-incomplete", "registration-refused",
                    "login-unreadable")
+               else "a guessed path needs credentials" if guessed_auth and kinds & {
+                   "access-denied", "auth-required"}
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
         lines.append(f"  - not attempted ({why}): " + ", ".join(skipped))
     if kind == "login-unreadable":

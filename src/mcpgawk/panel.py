@@ -8984,7 +8984,9 @@ def _next_diff(report) -> str:
         from .decide import _hint_row
         rows.append(_hint_row(report, tool))
     for tool in report.schema_changed:
-        rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
+        # The same row the decide page writes, with each parameter's was/now.
+        from .decide import _param_row
+        rows.append(_param_row(report, tool, mark="⚠ "))
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
 
 

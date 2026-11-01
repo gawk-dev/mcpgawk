@@ -234,6 +234,99 @@ def _item_props(snap: ServerSnapshot) -> dict[str, list[str]]:
     return out
 
 
+_PARAM_CAP = 40        # parameters kept per item (matches _item_props)
+_ENUM_CAP = 20         # enum values kept per parameter
+_VALUE_CAP = 60        # characters kept of any single value
+
+
+def _short(v: Any) -> str:
+    text = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
+    return text if len(text) <= _VALUE_CAP else text[: _VALUE_CAP - 1] + "…"
+
+
+def _param_summary(prop: Any, required: bool) -> dict[str, Any]:
+    """The constraints of ONE top-level parameter, as small values: what the tool can be made to
+    SEND through it. Not the schema (no description, no nesting) — enough to show an approver the
+    was/now, bounded so a record stays small enough to keep forever."""
+    out: dict[str, Any] = {}
+    if not isinstance(prop, dict):
+        return {"type": _short(prop)}
+    t = prop.get("type")
+    if t is not None:
+        out["type"] = _short(t)
+    if required:
+        out["required"] = True
+    if isinstance(prop.get("enum"), list):
+        out["enum"] = [_short(v) for v in prop["enum"][:_ENUM_CAP]]
+        if len(prop["enum"]) > _ENUM_CAP:
+            out["enum_more"] = len(prop["enum"]) - _ENUM_CAP
+    if "default" in prop:
+        out["default"] = _short(prop["default"])
+    if isinstance(prop.get("format"), str):
+        out["format"] = _short(prop["format"])
+    if "pattern" in prop:
+        out["pattern"] = True
+    for k in ("minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"):
+        if k in prop:
+            out[k] = _short(prop[k])
+    if "properties" in prop or "items" in prop:
+        out["nested"] = True
+    return out
+
+
+def _item_params(snap: ServerSnapshot) -> dict[str, dict[str, Any]]:
+    """`{kind}.{name}` -> {"params": {name: summary}, "additionalProperties": value|None}.
+    Additive beside `schemas`/`props`: the hash still decides WHETHER the schema moved; this says
+    WHAT moved, parameter by parameter, so decide/panel can show old and new side by side instead
+    of "inputs changed" (the article's promise, 2026-11-04)."""
+    out: dict[str, dict[str, Any]] = {}
+    for k, it in _iter_items(snap):
+        schema = it.get("inputSchema") or {}
+        if not isinstance(schema, dict):
+            continue
+        props = schema.get("properties") or {}
+        req = schema.get("required") or []
+        req = set(req) if isinstance(req, list) else set()
+        summary = ({n: _param_summary(props[n], n in req) for n in sorted(props)[:_PARAM_CAP]}
+                   if isinstance(props, dict) else {})
+        ap = schema.get("additionalProperties")
+        out[k] = {"params": summary,
+                  "additionalProperties": ap if isinstance(ap, bool) else None}
+    return out
+
+
+def _param_words(summary: Any) -> str:
+    """One parameter's summary as a reading line: `string, required, enum [a, b], default 10`."""
+    if summary is None:
+        return "absent"
+    if not isinstance(summary, dict):
+        return _short(summary)
+    bits: list[str] = []
+    if "type" in summary:
+        bits.append(str(summary["type"]))
+    if summary.get("required"):
+        bits.append("required")
+    if "enum" in summary:
+        more = summary.get("enum_more")
+        bits.append("enum [" + ", ".join(summary["enum"]) + (f", +{more} more" if more else "") + "]")
+    if "default" in summary:
+        bits.append(f"default {summary['default']}")
+    if "format" in summary:
+        bits.append(f"format {summary['format']}")
+    if summary.get("pattern"):
+        bits.append("pattern")
+    for k in ("minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"):
+        if k in summary:
+            bits.append(f"{k} {summary[k]}")
+    if summary.get("nested"):
+        bits.append("nested")
+    return ", ".join(bits) or "unconstrained"
+
+
+def _open_words(v: Any) -> str:
+    return "not set (means open)" if v is None else ("open" if v else "closed")
+
+
 def _item_annotations(snap: ServerSnapshot) -> dict[str, dict[str, Any]]:
     """The declared behaviour hints, stored as VALUES not hashes: they are small, structured, and
     the difference between `readOnlyHint: true` and its absence is the finding itself."""
@@ -273,6 +366,7 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
         # missing map as "this surface had no baseline" rather than as "everything changed".
         "schemas": _item_schemas(snap),
         "props": _item_props(snap),
+        "params": _item_params(snap),      # per-parameter constraints, so the diff can be SHOWN
         "annotations": _item_annotations(snap),
     }
 
@@ -341,6 +435,10 @@ class DriftReport:
     props: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
     #: `{kind}.{name}` -> (before, after) annotation dicts.
     annos: dict[str, tuple[dict, dict]] = field(default_factory=dict)
+    #: `{kind}.{name}` -> (before, after) parameter summaries (`_item_params` shape) for each
+    #: schema change where BOTH records stored one. Absent key = an older record: "inputs changed"
+    #: with nothing to show, never a false diff.
+    params: dict[str, tuple[dict, dict]] = field(default_factory=dict)
     #: B3 — (before, after) transport, when a server moved between stdio/http/sse. Local→remote is a
     #: real trust-posture change (a network endpoint now), so it surfaces for acknowledgement rather
     #: than re-baselining in silence. None on older records that never stored transport.
@@ -501,6 +599,71 @@ class DriftReport:
         if grew:
             return f"now declares more power ({', '.join(grew)})"
         return "safety hints changed — nothing widened"
+
+    def param_moves(self, key: str) -> list[tuple[str, str, str]]:
+        """Each top-level parameter whose constraints moved, as `(name, was, now)` display
+        strings — the old and new side by side that a held schema change owes its approver.
+        Empty when the change is below the top level, or when either record predates `params`."""
+        before, after = self.params.get(key, (None, None))
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return []
+        bp, ap = before.get("params") or {}, after.get("params") or {}
+        out = []
+        for name in sorted(set(bp) | set(ap)):
+            if bp.get(name) != ap.get(name):
+                out.append((name, _param_words(bp.get(name)), _param_words(ap.get(name))))
+        bo, ao = before.get("additionalProperties"), after.get("additionalProperties")
+        if bo != ao:
+            out.append(("additionalProperties", _open_words(bo), _open_words(ao)))
+        return out
+
+    def loosenings(self, key: str) -> list[str]:
+        """Schema changes that WIDEN what the tool can be made to SEND: an enum dropped or
+        widened, a pattern/format/bound dropped, a type changed, additionalProperties opened.
+        A new parameter is named by permission_changes only when it names a destination or
+        code; otherwise it is shown, not flagged. Mirrors `escalations` for hints.
+
+        Deliberately NOT a loosening: a `required` parameter becoming optional (the tool can be
+        sent less, not more), and a change to a parameter's description (shown by the hash, not
+        here — the summary keeps no prose). An enum past `_ENUM_CAP` is compared truncated."""
+        before, after = self.params.get(key, (None, None))
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return []
+        bp, ap = before.get("params") or {}, after.get("params") or {}
+        out: list[str] = []
+        for name in sorted(set(bp) & set(ap)):
+            b, a = bp[name], ap[name]
+            if not isinstance(b, dict) or not isinstance(a, dict):
+                continue
+            if b.get("type") != a.get("type") and b.get("type") is not None:
+                out.append(f"type changed on {name}")
+            if "enum" in b and "enum" not in a:
+                out.append(f"enum dropped on {name}")
+            elif "enum" in b and "enum" in a and set(a["enum"]) - set(b["enum"]):
+                out.append(f"enum widened on {name}")
+            for c in ("pattern", "format"):
+                if c in b and c not in a:
+                    out.append(f"{c} dropped on {name}")
+            for c in ("minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"):
+                if c in b and c not in a:
+                    out.append(f"{c} dropped on {name}")
+        bo, ao = before.get("additionalProperties"), after.get("additionalProperties")
+        if bo is False and ao is not False:
+            out.append("additionalProperties opened")
+        return out
+
+    def schema_summary(self, key: str) -> str:
+        """One sentence for the schema row: what loosened, that nothing did, or that the change
+        sits where the summary cannot see (nested) or predates it."""
+        loose = self.loosenings(key)
+        if loose:
+            return f"now accepts more ({', '.join(loose)})"
+        if key not in self.params:
+            return "inputs changed"
+        if not self.param_moves(key):
+            return ("inputs changed in a part this summary does not show (a nested schema or a "
+                    "parameter's wording) — nothing loosened among the top-level constraints")
+        return "inputs changed — nothing loosened"
 
     def permission_changes(self, key: str) -> list[str]:
         """What this item can now do that the person never approved: an annotation escalation, a
@@ -807,6 +970,9 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     pp, cp = prev.get("props") or {}, curr.get("props") or {}
     props = {k: (pp.get(k, []), cp.get(k, [])) for k in schema_changed}
     annos = {k: ((pan or {}).get(k, {}), (can or {}).get(k, {})) for k in anno_changed}
+    ppar, cpar = prev.get("params"), curr.get("params")
+    params = ({k: (ppar[k], cpar[k]) for k in schema_changed if k in ppar and k in cpar}
+              if isinstance(ppar, dict) and isinstance(cpar, dict) else {})
 
     # B3. Guarded like the C1 maps: a record predating transport/protocol storage compares as None,
     # so the first run after this ships never false-alarms a switch that didn't happen.
@@ -849,7 +1015,7 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
         schema_changed=schema_changed,
         annotation_changed=anno_changed,
         props=props,
-        annos=annos,
+        annos=annos, params=params,
         transport_changed=transport_changed,
         protocol_changed=protocol_changed,
     ))
@@ -1078,7 +1244,12 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                 params += f" — gained parameter(s): {', '.join(added_params)}"
             if dropped_params:
                 params += f" — removed: {', '.join(dropped_params)}"
-            lines.append(f"        ! {kind} input schema CHANGED: {short}{params}")
+            loose = r.loosenings(key)
+            mark = (f" ({', '.join(loose)})  ← ACCEPTS MORE" if loose
+                    else (" — nothing loosened" if key in r.params else ""))
+            lines.append(f"        ! {kind} input schema CHANGED: {short}{params}{mark}")
+            for name, was, now in r.param_moves(key):
+                lines.append(f"            {name}: {was} → {now}")
         for key in [k for k in r.annotation_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
             esc = r.escalations(key)
