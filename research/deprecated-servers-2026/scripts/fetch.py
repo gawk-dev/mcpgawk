@@ -16,7 +16,7 @@ PACKAGES = [
     "@modelcontextprotocol/server-brave-search",
     "@circleci/mcp-server-circleci",
 ]
-START, END = "2025-06-01", "2026-10-21"
+START, END = "2025-06-01", "2026-11-03"
 
 
 def get(url):

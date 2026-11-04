@@ -17,12 +17,14 @@ All five npm READMEs still show an `"npx", "-y"` install line. Only server-githu
 notice (pointing at github/github-mcp-server).
 
 ## Downloads
-- The five reference servers, per month: 407,645 in June 2025, 1,738,924 in July 2026. 15,794,694 from
-  2025-06-01 to 2026-10-21. That total is a floor: npm reports some whole days as zero (see `zero_days`).
-- Week 21–27 Sep 2026, all six packages: 455,402. server-postgres alone: 109,622.
-- Do not use the week 12–18 Oct 2026 (215,807): it contains zero days across every package, a stats gap.
-- For comparison, maintained reference servers over the same months: server-filesystem 174,541 → 2,399,054;
-  server-memory 93,023 → 535,816.
+- The five reference servers, per month: 407,645 in June 2025, 1,794,602 in July 2026 (npm has backfilled July
+  since our 22 Oct snapshot, which read 1,738,924). 17,163,025 from 2025-06-01 to 2026-11-03. That total is a floor:
+  npm reports some whole days as zero (see `zero_days`).
+- Week 26 Oct–1 Nov 2026 (no zero days), all six packages: 632,516. server-postgres alone: 164,787.
+  The earlier figure, week 21–27 Sep 2026: 455,402 and 109,622.
+- Do not use October 2026 as a month, or the week 12–18 Oct: both contain zero days across every package, a stats gap.
+- For comparison, maintained reference servers, June 2025 → July 2026: server-filesystem 174,541 → 2,499,106
+  (backfilled; read 2,399,054 on 22 Oct); server-memory 93,023 → 535,816 (22 Oct reading).
 - Downloads count CI jobs and mirrors as well as people. They are not users.
 
 ## server-postgres: a known bug, fix merged, never published
@@ -37,5 +39,5 @@ With a fresh npm cache, `npx -y @modelcontextprotocol/server-postgres <url>` pri
 stderr on the first start. A second start, from npx's cache, prints nothing.
 
 ## Rerun
-`python scripts/fetch.py > data/snapshot-$(date +%F).json` (standard library only). `data/snapshot-2026-10-22.json`
+`python scripts/fetch.py > data/snapshot-$(date +%F).json` (standard library only). `data/snapshot-2026-11-04.json` (current) and `data/snapshot-2026-10-22.json`
 holds this snapshot: version, deprecation text, monthly and daily downloads, zero days.
