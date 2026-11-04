@@ -48,6 +48,7 @@ def _serve_in_thread():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     seen: list[str] = []
+    _serve_in_thread.seen = seen  # type: ignore[attr-defined]
     threading.Thread(target=lambda: panel.serve(port=port, open_browser=False, log=seen.append),
                      daemon=True).start()
     url = ""
@@ -61,6 +62,16 @@ def _serve_in_thread():
     assert url, f"panel did not start; log was {seen!r}"
     return url, parse_qs(urlparse(url).query)["t"][0], port
 
+
+
+def _approval_code() -> str:
+    """The approval code the last-started panel printed to its terminal (a person reads it there)."""
+    import re as _re
+    for line in getattr(_serve_in_thread, "seen", []):
+        m = _re.search(r"approval code — ([A-Z0-9]{4}-[A-Z0-9]{4})", line)
+        if m:
+            return m.group(1)
+    raise AssertionError("the panel printed no approval code")
 
 def test_the_queue_serves_the_refused_server_first_then_the_sign_in(monkeypatch):
     servers = {**_store("gitnexus", "2026-09-04T09:00:00Z"), **_store("notion", "2026-09-05T01:00:00Z")}
@@ -326,7 +337,7 @@ def test_mute_from_next_is_token_gated_and_records_the_finding(tmp_path, monkeyp
         raise AssertionError("a POST without the token must be refused")
     except urllib.error.HTTPError as e:
         assert e.code == 403
-    body = urlencode({"token": token, "act": "mute", "key": "mcp:gitnexus", "finding_id": "t/EG", "back": "next"}).encode()
+    body = urlencode({"token": token, "act": "mute", "key": "mcp:gitnexus", "finding_id": "t/EG", "back": "next", "code": _approval_code()}).encode()
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):
@@ -358,7 +369,7 @@ def test_mute_from_next_is_human_gated_like_wrong(tmp_path, monkeypatch):
     url, token, port = _serve_in_thread()
     base = f"http://127.0.0.1:{port}/"
     body = urlencode({"token": token, "act": "mute", "key": "mcp:gitnexus", "finding_id": "t/EG",
-                      "back": "next"}).encode()
+                      "back": "next", "code": _approval_code()}).encode()
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):

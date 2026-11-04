@@ -217,4 +217,33 @@ class LocalScanConsentTest {
         assertFalse(shouldLaunchLocal(CANCEL_INDEX))
         assertTrue(CANCEL_INDEX != LAUNCH_INDEX)
     }
+
+    @Test
+    fun `a config URL carrying shell syntax is never typed into the terminal`() {
+        for (bad in listOf(
+            "https://x.example/mcp\$(touch /tmp/pwned)",
+            "https://x.example/mcp`id`",
+            "https://x.example/mcp;id",
+            "https://x.example/mcp&id",
+            "https://x.example/mcp|id",
+            "https://x.example/mcp'id",
+            "https://x.example/mcp\"id",
+            "https://x.example/mcp id",
+            "file:///etc/passwd",
+        )) {
+            assertNull(Fleet.signInShellLine("mcpgawk", bad), bad)
+        }
+    }
+
+    @Test
+    fun `a plain URL becomes a single-quoted sign-in line`() {
+        assertEquals(
+            "'mcpgawk' 'scan' '--http' 'https://mcp.example.com/v1?x=1' '--login'",
+            Fleet.signInShellLine("mcpgawk", "https://mcp.example.com/v1?x=1"),
+        )
+        assertEquals(
+            "'/opt/it'\\''s/mcpgawk' 'scan' '--http' 'https://a.example/' '--login'",
+            Fleet.signInShellLine("/opt/it's/mcpgawk", "https://a.example/"),
+        )
+    }
 }

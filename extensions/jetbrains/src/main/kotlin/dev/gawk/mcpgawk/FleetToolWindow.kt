@@ -1,6 +1,5 @@
 package dev.gawk.mcpgawk
 
-import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -143,7 +142,16 @@ class FleetPanel(private val project: Project) : JPanel(BorderLayout()) {
             }
             // A visible terminal, not a silent background call: this opens a browser and obtains a
             // credential, and the user should watch it happen.
-            val cmd = GeneralCommandLine(settingsCommand()).withParameters(Fleet.signInArgs(server.url))
+            val line = Fleet.signInShellLine(settingsCommand(), server.url)
+            if (line == null) {
+                Messages.showWarningDialog(
+                    project,
+                    "This server's URL contains characters that a shell would run, so mcpgawk will not " +
+                        "type it into a terminal. Check the config that defines it.",
+                    "mcpgawk",
+                )
+                return
+            }
             // The Terminal plugin is an OPTIONAL dependency (see plugin.xml) so this plugin loads in
             // EVERY JetBrains IDE. Reached reflectively for that reason: a hard reference would make
             // this class fail to load wherever the terminal is absent, taking the whole panel with
@@ -155,13 +163,13 @@ class FleetPanel(private val project: Project) : JPanel(BorderLayout()) {
                     .getMethod("createLocalShellWidget", String::class.java, String::class.java)
                     .invoke(mgr, project.basePath, "mcpgawk sign-in")
                 widget.javaClass.getMethod("executeCommand", String::class.java)
-                    .invoke(widget, cmd.commandLineString)
+                    .invoke(widget, line)
             }.isSuccess
             if (!opened) {
                 // Still actionable without a terminal: hand the user the exact command.
                 Messages.showInfoMessage(
                     project,
-                    "Run this to sign in:\n\n${cmd.commandLineString}",
+                    "Run this to sign in:\n\n$line",
                     "mcpgawk",
                 )
             }
@@ -196,6 +204,7 @@ fun iconFor(state: String): Icon = when (state) {
     "FAILED" -> AllIcons.General.Error
     "TIMED-OUT" -> AllIcons.General.Warning
     "UNREACHABLE" -> AllIcons.General.Warning
+    "NOT-MCP" -> AllIcons.General.Warning
     "SKIPPED" -> AllIcons.General.InspectionsEye
     "NOT-SCANNABLE" -> AllIcons.General.Web
     "REVIEW" -> AllIcons.General.BalloonWarning

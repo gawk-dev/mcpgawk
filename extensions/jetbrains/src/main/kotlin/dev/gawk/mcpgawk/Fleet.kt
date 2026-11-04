@@ -18,7 +18,7 @@ import com.google.gson.JsonParser
 
 /** Bumped only on a breaking payload change. Pinned so an old plugin against a new engine fails
  *  loudly rather than half-rendering someone's security posture. */
-const val SUPPORTED_SCHEMA = "mcpgawk.fleet/2"
+const val SUPPORTED_SCHEMA = "mcpgawk.fleet/3"
 
 /** The four places the engine is normally installed. Prepended to PATH so the CLI is found even
  *  when the IDE's environment does not include them. */
@@ -201,4 +201,20 @@ object Fleet {
      *  in a VISIBLE terminal: it opens a browser and obtains a credential, and the user should see
      *  that happen rather than find out afterwards. */
     fun signInArgs(url: String): List<String> = listOf("scan", "--http", url, "--login")
+
+    /**
+     * The sign-in command is TYPED INTO A SHELL (the terminal widget only takes a string), and the
+     * URL comes from a config file a cloned repo can ship. commandLineString only adds double quotes,
+     * so `$()`, backticks, `;` and `&` in that URL ran. Only a plain http(s) URL made of characters
+     * that are inert in every shell is accepted; anything else returns null and nothing is typed.
+     */
+    private val SAFE_URL = Regex("^https?://[A-Za-z0-9._~:/?#@%=+,\\[\\]-]+$")
+
+    fun isShellSafeUrl(url: String): Boolean = SAFE_URL.matches(url)
+
+    /** POSIX single-quoting for each argument; null when the URL is not shell-safe. */
+    fun signInShellLine(command: String, url: String): String? {
+        if (!isShellSafeUrl(url)) return null
+        return (listOf(command) + signInArgs(url)).joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
+    }
 }

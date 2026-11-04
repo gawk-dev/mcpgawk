@@ -210,8 +210,20 @@ class Panel:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
 
+    def approval_code(self) -> str:
+        """The code the panel printed to its terminal — read off stdout, as a person reads it."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            codes = re.findall(r"approval code — ([A-Z0-9]{4}-[A-Z0-9]{4})", "\n".join(self._stdout))
+            if codes:
+                return codes[-1]
+            time.sleep(0.1)
+        pytest.fail("panel never printed its approval code:\n" + "\n".join(self._stdout[-30:]))
+
     def post(self, act: str, token: str | None = None, **fields: str) -> tuple[int, str]:
         data = {"token": self.token if token is None else token, "act": act, **fields}
+        if act in ("approve", "mute", "pin", "protect") and "code" not in fields:
+            data["code"] = self.approval_code()      # trust actions need the terminal's code (0.1.83)
         req = urllib.request.Request(self.base + "/",
                                      urllib.parse.urlencode(data).encode(), method="POST")
         try:

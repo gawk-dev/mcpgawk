@@ -2249,6 +2249,23 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
         # only a person knows when the browser said yes: this button is that "yes". Re-asking
         # the server's login tool would mint a NEW link each time (measured on kite, 2026-09-04),
         # so the panel never polls — it waits for the click, exactly as the CLI waits for Enter.
+        _nc = action.get("need_code") or {}
+        if _nc and token:
+            # The approval code box: the code itself is never on any page — only the terminal.
+            done_link_html += (
+                f'<form method="POST" action="/" style="margin-top:8px">'
+                f'<input type="hidden" name="token" value="{_esc(token)}">'
+                f'<input type="hidden" name="act" value="unlock">'
+                f'<input type="hidden" name="then" value="{_esc(_nc.get("then"))}">'
+                f'<input type="hidden" name="key" value="{_esc(_nc.get("key"))}">'
+                f'<input type="hidden" name="finding_id" value="{_esc(_nc.get("finding_id"))}">'
+                f'<input type="hidden" name="tab" value="{_esc(_nc.get("tab"))}">'
+                f'<input type="hidden" name="back" value="{_esc(_nc.get("back"))}">'
+                f'<input type="text" name="code" placeholder="XXXX-XXXX" maxlength="12" '
+                f'autocomplete="off" spellcheck="false" required '
+                f'style="font-family:ui-monospace,monospace;letter-spacing:1px"> '
+                f'<button class="gbtn" type="submit">Confirm {_esc(_nc.get("then"))}</button>'
+                f'</form>')
         _pending = action.get("signin_pending") or ""
         if _pending and token:
             done_link_html += (
@@ -2268,7 +2285,7 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
         # A pending in-band sign-in keeps the record OPEN on every load: the person leaves for the
         # browser and comes back to a self-refreshed page, and the "I have signed in" button must
         # not be folded away behind the summary (advisor, 2026-09-04, before the founder's walk).
-        _open = " open" if (fresh or action.get("signin_pending")) else ""
+        _open = " open" if (fresh or action.get("signin_pending") or action.get("need_code")) else ""
         banner = (f'<details{_open} class="amodal"><summary><b>{subject}</b> — finished {when}'
                   f'<span class="aclose"></span></summary>'
                   f'<div class="abanner done {_esc(worst)}" role="dialog">'
@@ -5248,7 +5265,7 @@ def _begin_action(label: str) -> None:
     A banner that mixes two actions' state is wrong twice at once."""
     _ACTION.update(label=label, message="", rows=[], notice="", level="",
                    secret="", snippet="", login_url="", setup_text="", setup_key="",
-                   signin_pending="", at=_now())
+                   signin_pending="", need_code=None, at=_now())
 
 
 def _open_login_in_browser(url: str) -> None:
@@ -9559,7 +9576,27 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
 </div></body></html>"""
 
 
-def _startup_banner(url: str, first: str) -> str:
+#: The panel actions that move trust or rewrite config. Each needs the approval code printed in
+#: the terminal that started the panel, on top of the page token (see serve()).
+_TRUST_ACTS = ("approve", "mute", "pin", "protect")
+_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"     # no 0/O, 1/I/L: it is read off a screen
+_CODE_MAX_FAILS = 10
+_UNLOCK_SECONDS = 15 * 60
+
+
+def _new_approval_code() -> str:
+    import secrets as _s
+    raw = "".join(_s.choice(_CODE_ALPHABET) for _ in range(8))
+    return f"{raw[:4]}-{raw[4:]}"
+
+
+def _norm_code(value: str) -> str:
+    """Case-insensitive, separators optional: `k7qx m4pd` == `K7QX-M4PD`."""
+    raw = "".join(ch for ch in (value or "").upper() if ch.isalnum())
+    return f"{raw[:4]}-{raw[4:]}" if len(raw) == 8 else raw
+
+
+def _startup_banner(url: str, first: str, code: str = "") -> str:
     """What the terminal says when the panel comes up.
 
     SAY THAT THE LINK KEEPS WORKING. The founder had tabs die under them all day — clicks doing
@@ -9567,8 +9604,11 @@ def _startup_banner(url: str, first: str) -> str:
     """
     stable = ("" if os.environ.get("MCPGAWK_PANEL_TOKEN_EPHEMERAL") == "1"
               else "\n  this link stays valid across restarts.")
+    code_line = (f"\n  approval code — {code}  (the panel asks for it before it approves, mutes, "
+                 f"pins or protects;\n  it is shown only here and never written to disk)"
+                 if code else "")
     return (f"\n  mcpgawk control panel — {url}\n  what needs you, one at a time — {first}"
-            f"{stable}\n  Ctrl-C to close.\n")
+            f"{stable}{code_line}\n  Ctrl-C to close.\n")
 
 
 def _panel_token_path() -> Path:
@@ -9629,6 +9669,13 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
     which also means an agent that can read the operator's files can read it and press the
     buttons. The token still gates every action, a request without it is still refused, and
     `MCPGAWK_PANEL_TOKEN_EPHEMERAL=1` restores the old behaviour for anyone who wants it.
+
+    THE APPROVAL CODE closes what the persistent token opened [FOUNDER 2026-11-05, option (a)].
+    approve, mute, pin and protect also need an 8-character code minted per process, held only
+    in memory and printed only in the terminal that started the panel. An agent that reads the
+    token file still cannot approve: the code is in no file and no page. A correct code unlocks
+    that browser for 15 minutes through an HttpOnly cookie whose value lives only in this
+    process. Ten wrong codes replace the code and print the new one here.
     """
     import secrets
     import threading
@@ -9638,6 +9685,9 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
 
     token = _panel_token()
     load_last_action()
+    gate = {"code": _new_approval_code(), "fails": 0}
+    unlocks: dict[str, float] = {}               # cookie value -> expiry (monotonic); memory only
+    cookie_name = f"mcpgawk_unlock_{port}"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_a):
@@ -9651,7 +9701,47 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             self.end_headers()
             self.wfile.write(body)
 
+        _set_cookie = ""
+
+        def end_headers(self):                   # noqa: D401 — carries the unlock cookie
+            if self._set_cookie:
+                self.send_header("Set-Cookie", self._set_cookie)
+                self._set_cookie = ""
+            super().end_headers()
+
+        def _unlocked(self) -> bool:
+            from http.cookies import SimpleCookie
+            try:
+                jar = SimpleCookie(self.headers.get("Cookie") or "")
+            except Exception:                    # noqa: BLE001 — a bad cookie is no cookie
+                return False
+            morsel = jar.get(cookie_name)
+            now = time.monotonic()
+            for k in [k for k, exp in unlocks.items() if exp < now]:
+                unlocks.pop(k, None)
+            return bool(morsel and morsel.value in unlocks)
+
+        def _refuse_foreign_host(self) -> bool:
+            """DNS rebinding guard: the panel binds 127.0.0.1, but a web page whose own hostname
+            re-resolves to 127.0.0.1 reaches it with that foreign name in Host and can then read
+            the token-free pages (state, call log, exports). Only loopback names are served; a
+            cross-site browser request (Sec-Fetch-Site) is refused too. Returns True when refused."""
+            host = (self.headers.get("Host") or "").strip().lower()
+            name = host.rsplit("]", 1)[0].lstrip("[") if host.startswith("[") else host.split(":", 1)[0]
+            site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+            if name in ("127.0.0.1", "localhost", "::1") and site != "cross-site":
+                return False
+            body = b"forbidden: the mcpgawk panel answers only local requests"
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+
         def do_GET(self):                        # noqa: N802
+            if self._refuse_foreign_host():
+                return
             path = self.path.split("?", 1)[0]
             if path == "/brand.svg":
                 from ._brand import NATIVERSE_MARK_SVG
@@ -9761,7 +9851,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.send_header("Content-Security-Policy",
                                  "default-src 'none'; style-src 'unsafe-inline'; "
-                                 "img-src 'self'; form-action 'self'")
+                                 "img-src 'self'; form-action 'self'; frame-ancestors 'self'")
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -9814,6 +9904,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             self.wfile.write(body)
 
         def do_POST(self):                       # noqa: N802
+            if self._refuse_foreign_host():
+                return
             length = int(self.headers.get("Content-Length", 0) or 0)
             form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             got = (form.get("token") or [""])[0]
@@ -9830,6 +9922,50 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             # (see _action_banner) and a later refresh shows the collapsed record instead.
             _back = _post_back(token, (form.get("tab") or [""])[0], (form.get("back") or [""])[0],
                                skip=(form.get("skip") or [""])[0][:4000])
+            if act in _TRUST_ACTS or act == "unlock":
+                # THE APPROVAL CODE (see serve's docstring). Checked before anything else runs.
+                then = (form.get("then") or [""])[0] if act == "unlock" else act
+                supplied = (form.get("code") or [""])[0]
+                if then not in _TRUST_ACTS:
+                    act = ""
+                elif self._unlocked():
+                    act = then
+                elif supplied and secrets.compare_digest(_norm_code(supplied), gate["code"]):
+                    gate["fails"] = 0
+                    cookie = secrets.token_urlsafe(24)
+                    unlocks[cookie] = time.monotonic() + _UNLOCK_SECONDS
+                    self._set_cookie = (f"{cookie_name}={cookie}; Path=/; HttpOnly; "
+                                        f"SameSite=Strict; Max-Age={_UNLOCK_SECONDS}")
+                    act = then
+                else:
+                    if supplied:
+                        gate["fails"] += 1
+                        if gate["fails"] >= _CODE_MAX_FAILS:
+                            gate["code"], gate["fails"] = _new_approval_code(), 0
+                            log(f"\n  {_CODE_MAX_FAILS} wrong approval codes — the old one is void."
+                                f"\n  new approval code — {gate['code']}\n")
+                    _k = (form.get("key") or [""])[0]
+                    _msg = (("That code does not match. " if supplied else "")
+                            + f"{then} needs the approval code from the terminal where you ran "
+                              "`mcpgawk panel`. An agent cannot see it there.")
+                    if _ACTION.get("running"):
+                        _ACTION.update(notice=_msg)
+                        self.send_response(303)
+                        self.send_header("Location", _back)
+                        self.end_headers()
+                        return
+                    _begin_action(f"{then} · {_k}" if _k else then)
+                    _ACTION.update(
+                        level="warn", message=_msg,
+                        need_code={"then": then, "key": _k,
+                                   "finding_id": (form.get("finding_id") or [""])[0][:200],
+                                   "tab": (form.get("tab") or [""])[0][:20],
+                                   "back": (form.get("back") or [""])[0][:20]})
+                    self.send_response(303)
+                    self.send_header("Location", _back)
+                    self.end_headers()
+                    return
+                _ACTION.pop("need_code", None)
             if act == "login-cancel":
                 # The way out. Allowed WHILE a sign-in runs — that is its whole point — so it
                 # never goes through the one-at-a-time gate below. The running work thread
@@ -10018,7 +10154,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
     # leaked. Carrying it in the URL keeps it where the docstring always said it was: this terminal
     # and the browser the human opens from it.
     url, first = panel_urls(port, token)
-    log(_startup_banner(url, first))
+    log(_startup_banner(url, first, gate["code"]))
     if open_browser and not os.environ.get("MCPGAWK_NO_BROWSER"):
         threading.Timer(0.4, lambda: webbrowser.open(first)).start()
     try:

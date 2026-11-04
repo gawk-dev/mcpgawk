@@ -44,11 +44,14 @@ runs:
         python-version: '3.12'
     - name: Install mcpgawk
       shell: bash
+      # Through env, never ${{ }} inside run: — an expression is pasted into the script as code.
+      env:
+        MCPGAWK_VERSION: ${{ inputs.version }}
       run: |
-        if [ "${{ inputs.version }}" = "latest" ]; then
+        if [ "$MCPGAWK_VERSION" = "latest" ]; then
           pip install --quiet --disable-pip-version-check mcpgawk
         else
-          pip install --quiet --disable-pip-version-check "mcpgawk==${{ inputs.version }}"
+          pip install --quiet --disable-pip-version-check "mcpgawk==$MCPGAWK_VERSION"
         fi
     - name: Scan and gate
       shell: bash
