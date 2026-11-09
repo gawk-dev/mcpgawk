@@ -1,13 +1,3 @@
 {
-  "mcpServers": {
-    "mcpgawk": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "mcpgawk==0.1.83",
-        "mcpgawk",
-        "mcp"
-      ]
-    }
-  }
+  "mcpServers": {}
 }

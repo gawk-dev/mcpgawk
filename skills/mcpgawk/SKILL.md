@@ -20,7 +20,9 @@ Install once (ask before running an installer):
    on purpose: accepting a changed tool surface is the person's decision. Print the exact command
    and let the user run it in their own terminal.
 2. Relay consent questions verbatim. A bare `mcpgawk` asks before it launches a local server;
-   `mcpgawk verify` launches servers in a sandbox and says so. Do not answer for the user.
+   `mcpgawk verify` launches servers in a sandbox and says so. Do not answer for the user, and
+   never add `--yes` (it skips that prompt; scanning a stdio server runs its code) unless the user
+   has told you to in this conversation.
 3. Report coverage statements exactly as printed. mcpgawk distinguishes "clean" from "not checked";
    that distinction is the point. Never summarise a partial picture as a clean one.
 4. If a call is refused with a `[mcpgawk guard] SECURITY BLOCK` message: stop, do not retry, do not
@@ -80,9 +82,24 @@ A public test server flips its tool surface every ten minutes, harmless by const
 Scan, let the user approve, wait for the flip, scan again, and the change is reported. With the
 guard installed, the changed tool's call is refused. Walkthrough: https://mcp.gawk.dev/docs/rugpull.html
 
-## Run mcpgawk as an MCP server
+## Reading results as data
 
-Any MCP client can call mcpgawk's own scan tools: `mcpgawk-mcp` over stdio (from 0.1.68 also
-`mcpgawk mcp`). Useful when the agent should audit the servers it is sitting next to.
+Use the CLI with JSON output rather than parsing tables:
+
+    mcpgawk scan --fleet-json                    # one row per server, grouped by the client it lives in
+    mcpgawk scan --http <url> --json             # one server
+    mcpgawk changes <server> --json
+    mcpgawk status --json
+
+`baseline`, `skills` and `runs` take `--json` too. Run without a terminal, as you are, mcpgawk
+skips local (stdio) servers rather than launching them, and the output says so; to include them the
+user runs it in their own terminal, or tells you to add `--yes` (rule 2).
+
+## Optional: mcpgawk as an MCP server
+
+This plugin does not load mcpgawk's own MCP server; the CLI above covers everything it does. For a
+client with no shell (Zed, for example), add it yourself: `mcpgawk mcp` over stdio. Its two tools,
+`scan_mcp_fleet` and `scan_mcp_server`, can launch local servers when asked to, so they are not
+read-only.
 
 Docs: https://mcp.gawk.dev/docs/ · Source: https://github.com/gawk-dev/mcpgawk (Apache-2.0)
