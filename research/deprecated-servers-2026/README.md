@@ -13,6 +13,11 @@ CircleCI's npm package, deprecated in favour of its hosted server.
 | @modelcontextprotocol/server-brave-search | 0.6.2 | 2024-12-04 | same |
 | @circleci/mcp-server-circleci | 0.20.0 | 2026-08-06 | "Deprecated: use CircleCI's hosted MCP server or CircleCI CLI MCP instead…" |
 
+The messages above are as of 22 Oct 2026. **Changed 5 Nov 2026** (rechecked 10 Nov): server-github, server-postgres and
+server-puppeteer now read "Archived and unmaintained; no security guarantees. See
+https://github.com/modelcontextprotocol/servers-archived". server-slack and server-brave-search are unchanged.
+Versions are unchanged; postgres is still 0.6.2.
+
 All five npm READMEs still show an `"npx", "-y"` install line. Only server-github's carries a deprecation
 notice (pointing at github/github-mcp-server).
 
@@ -42,5 +47,5 @@ With a fresh npm cache, `npx -y @modelcontextprotocol/server-postgres <url>` pri
 stderr on the first start. A second start, from npx's cache, prints nothing.
 
 ## Rerun
-`python scripts/fetch.py > data/snapshot-$(date +%F).json` (standard library only). `data/snapshot-2026-11-04.json` (current) and `data/snapshot-2026-10-22.json`
-holds this snapshot: version, deprecation text, monthly and daily downloads, zero days.
+`python scripts/fetch.py > data/snapshot-$(date +%F).json` (standard library only). Each snapshot holds version, deprecation text, monthly and daily downloads, and zero days.
+`data/snapshot-2026-11-04.json` is the latest; `data/snapshot-2026-10-22.json` is the first.
