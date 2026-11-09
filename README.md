@@ -228,8 +228,11 @@ repo, not a cloud.
 Let your coding agent run the checks itself — whenever it adds, upgrades or audits an MCP server:
 
 ```bash
-# Claude Code (similar for other agents: copy the folder into their skills directory)
-mkdir -p ~/.claude/skills && cp -r skills/mcpgawk ~/.claude/skills/mcpgawk
+# Claude Code: install the plugin (the skill, nothing else)
+/plugin install mcpgawk --marketplace gawk-dev/mcpgawk
+
+# Any other agent: copy the skill folder into its skills directory
+mkdir -p ~/.claude/skills && cp -r plugin/skills/mcpgawk ~/.claude/skills/mcpgawk
 ```
 
 The skill teaches the agent to measure a server BEFORE trusting it, audit an MCP-2 upgrade as a
