@@ -20,6 +20,9 @@ notice (pointing at github/github-mcp-server).
 - The five reference servers, per month: 407,645 in June 2025, 1,794,602 in July 2026 (npm has backfilled July
   since our 22 Oct snapshot, which read 1,738,924). 17,163,025 from 2025-06-01 to 2026-11-03. That total is a floor:
   npm reports some whole days as zero (see `zero_days`).
+- Rechecked 9 Nov 2026: npm backfilled more October days. 2025-06-01 to 2026-11-03 now reads 17,312,978; to
+  2026-11-08 it reads 17,695,421 (the "about 17.7 million" in the write-up). Still a floor: 9 zero days per
+  package remain in that range. Every other figure on this page was unchanged on 9 Nov.
 - Week 26 Oct–1 Nov 2026 (no zero days), all six packages: 632,516. server-postgres alone: 164,787.
   The earlier figure, week 21–27 Sep 2026: 455,402 and 109,622.
 - Do not use October 2026 as a month, or the week 12–18 Oct: both contain zero days across every package, a stats gap.
