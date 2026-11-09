@@ -8,12 +8,12 @@
     "url": "https://github.com/gawk-dev/mcpgawk",
     "source": "github"
   },
-  "version": "0.1.84",
+  "version": "0.1.85",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcpgawk",
-      "version": "0.1.84",
+      "version": "0.1.85",
       "runtimeHint": "uvx",
       "packageArguments": [
         {

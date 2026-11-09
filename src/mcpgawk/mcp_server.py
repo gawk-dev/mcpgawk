@@ -45,14 +45,16 @@ from .discover import detect_unscannable, discover_servers
 from .label import build_label, render_cli
 from .measure import measure
 from .probe import probe, probe_stdio, probe_url
-from .signals import as_dicts, detect, detect_card_mismatch, detect_dynamic_dispatch
 
 SERVER_NAME = "mcpgawk"
 
 
-def _label_of(snap) -> dict[str, Any]:
-    sigs = (as_dicts(detect(snap)) + as_dicts(detect_card_mismatch(snap))
-            + as_dicts(detect_dynamic_dispatch(snap)))
+def _label_of(snap, entry: dict[str, Any] | None = None, shadow: dict | None = None) -> dict[str, Any]:
+    """The same signals `mcpgawk scan` computes (cli.bounded_signals_for): config-entry findings
+    and inventory shadowing included. They were missing here until 2026-11-10, so an agent asking
+    through these tools got a different verdict for the same fleet than the person at the terminal."""
+    from .cli import bounded_signals_for
+    sigs = bounded_signals_for(snap, entry or {}, shadow)
     return build_label(snap, measure(snap), bounded_signals=(sigs or None))
 
 
@@ -63,8 +65,10 @@ async def _scan_fleet(launch_local: bool) -> dict[str, Any]:
     targets = [(n, e) for n, e in configured.items() if launch_local or not e.get("command")]
     skipped = [(n, e) for n, e in configured.items() if not launch_local and e.get("command")]
     snaps = await asyncio.gather(*(probe(e, n) for n, e in targets)) if targets else []
-    labels = [_label_of(s) for s in snaps]
-    from .cli import _known_names
+    from .cli import _known_names, inventory_shadowing
+    entries = dict(targets)
+    shadow = inventory_shadowing(list(snaps), entries)
+    labels = [_label_of(s, entries.get(s.name), shadow) for s in snaps]
     rows = fleet.build_rows(labels, dict(targets), skipped,
                             detect_unscannable(exclude=_known_names(dict(targets), skipped)))
     return fleet.to_json(rows)
@@ -73,6 +77,7 @@ async def _scan_fleet(launch_local: bool) -> dict[str, Any]:
 async def _scan_one(url: str | None, command: str | None) -> dict[str, Any]:
     if url:
         snap = await probe_url("requested", url)
+        entry: dict[str, Any] = {"url": url}
     else:
         parts = (command or "").split()
         if not parts:
@@ -90,7 +95,8 @@ async def _scan_one(url: str | None, command: str | None) -> dict[str, Any]:
                 "`mcpgawk scan --stdio \"<command>\"` yourself, where the consent gate applies. "
                 "Set MCPGAWK_MCP_ALLOW_LAUNCH=1 to allow it deliberately.")
         snap = await probe_stdio("requested", parts[0], parts[1:])
-    label = _label_of(snap)
+        entry = {"command": parts[0], "args": parts[1:]}
+    label = _label_of(snap, entry)
     return {"report": render_cli(label), "label": label}
 
 

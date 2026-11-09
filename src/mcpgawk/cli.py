@@ -26,7 +26,8 @@ from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_report
-from .label import (build_label, display_name, lead_concern, render_cli, render_summary,
+from .label import (build_label, build_narrative, display_name, lead_concern, render_cli,
+                    render_summary, standing_lines,
                     signal_lead)
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
@@ -490,18 +491,39 @@ def _measure_through_signin(approved: list[tuple[str, dict]]) -> dict[str, Serve
         held.close()
 
 
+def bounded_signals_for(sn: ServerSnapshot, entry: dict, shadow: dict | None = None) -> list[dict]:
+    """Every bounded signal for one server: what its tools say, what its config entry says, and
+    what the whole inventory says about it (`shadow`, from `inventory_shadowing`).
+
+    ONE definition for the CLI and the MCP tools. Until 2026-11-10 `mcp_server._label_of` built its
+    own list without the config checks or shadowing, so the same fleet got a different verdict
+    through `scan_mcp_fleet` than through `mcpgawk scan`. Config-only findings ride the same carrier
+    as bounded signals so every renderer keyed on the kind prefix carries them — but they come from
+    the ENTRY, not the snapshot, so a server also gets them when probing found nothing to say."""
+    return (as_dicts(detect(sn)) + as_dicts((shadow or {}).get(sn.name, []))
+            + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn))
+            + as_dicts(configcheck.check(sn.name, entry)))
+
+
+def inventory_shadowing(snaps: list[ServerSnapshot], entries: dict) -> dict:
+    """Findings that need the whole inventory. Two DISTINCT techniques:
+      name-collision   — two servers expose the same tool name (one shadows the other)
+      cross-server-ref — a server's description instructs the agent about ANOTHER server's tool
+                         (Invariant E002): server A rewriting how the agent uses server B's tool.
+    Scoped to servers that share a client (discover's `_clients`): the same server in two agents is
+    not shadowing itself (kite / kite#2, 2026-10-09)."""
+    shadow = detect_shadowing(snaps, clients={n: (e or {}).get("_clients") or ()
+                                              for n, e in entries.items()})
+    for srv, fs in detect_cross_server_reference(snaps).items():
+        shadow.setdefault(srv, []).extend(fs)
+    return shadow
+
+
 def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = None) -> dict:
     """Build one server's label. Extracted so the post-sign-in re-scan produces an IDENTICAL label
     to the original pass — a second, drifting definition of "what a label is" is exactly how the
     refreshed row would start disagreeing with the row it replaced."""
-    sigs = None
-    if not args.no_signals:
-        # Config-only findings ride the same carrier as bounded signals so every renderer keyed on
-        # the kind prefix carries them — but they come from the ENTRY, not the snapshot, so a
-        # server also gets them when probing found nothing to say (see configcheck.py).
-        sigs = (as_dicts(detect(sn)) + as_dicts((shadow or {}).get(sn.name, []))
-                + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn))
-                + as_dicts(configcheck.check(sn.name, entry)))
+    sigs = None if args.no_signals else bounded_signals_for(sn, entry, shadow)
     label = build_label(sn, m, bounded_signals=(sigs or None))
     # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a credential the
     # user already supplied (no egress, but still consent-gated).
@@ -512,7 +534,17 @@ def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = N
             entry["_supply_chain"] if "_supply_chain" in entry else
             _supply_chain_record(check_supply_chain(entry["command"], entry.get("args") or [])))
     if args.oauth_scopes:
-        label["x-mcpgawk"]["oauth_scopes"] = inspect_oauth_scopes(entry.get("headers"))
+        scopes = inspect_oauth_scopes(entry.get("headers"))
+        exp = scopes.get("exp") if isinstance(scopes, dict) else None
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+            # The renderers never read the clock; the scan does, once, here.
+            scopes["expired"] = exp < datetime.now(timezone.utc).timestamp()
+        label["x-mcpgawk"]["oauth_scopes"] = scopes
+    if args.supply_chain:
+        # The narrative was written inside build_label, before the registry's answer was attached.
+        # Re-derive it so the report's headline and the fleet row agree (a deprecated package must
+        # not head a CLEAN report while its row says REVIEW).
+        label["x-mcpgawk"]["narrative"] = build_narrative(label)
     return label
 
 
@@ -2445,7 +2477,10 @@ def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
 
 
 def _unshown_exit_reasons(labels: list, shown: dict[str, str]) -> list[str]:
-    """What sets the exit code that the fleet view's rows do not already say.
+    """What sets the exit code, named as the exit reason under the fleet table.
+
+    Since 2026-11-10 the rows carry these too (fleet._exit_reason_bits), so `--fleet-json` and the
+    IDE see them; this line stays because it says why the exit code is 1 and where to look next.
 
     A row names a probe failure (its state), injection and secret findings (counted on the row),
     and a dynamic catalog (INCOMPLETE). Everything else `_scan_failed` counts — a live signal of any
@@ -2597,14 +2632,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     #   cross-server-ref    — a server's description instructs the agent about ANOTHER server's tool
     #                         (Invariant E002). The names differ; the danger is server A rewriting how
     #                         the agent uses server B's trusted tool.
-    shadow: dict = {}
-    if not args.no_signals:
-        # Scoped to servers that share a client (discover's `_clients`): the same server in two
-        # agents is not shadowing itself (kite / kite#2, 2026-10-09).
-        shadow = detect_shadowing(snaps, clients={n: (e or {}).get("_clients") or ()
-                                                  for n, e in entries.items()})
-        for srv, fs in detect_cross_server_reference(snaps).items():
-            shadow.setdefault(srv, []).extend(fs)
+    shadow: dict = {} if args.no_signals else inventory_shadowing(snaps, entries)
     labels = [_label_for(sn, m, entries.get(sn.name) or {}, args, shadow)
               for sn, m in zip(snaps, measurements)]
 
@@ -2729,6 +2757,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
             hd["changed_back"] = True
             hd["changed_at"] = _held.get("measured_at")
             lab["x-mcpgawk"]["held_change"] = hd
+        if any(k in lab["x-mcpgawk"] for k in ("drift", "held_change", "reidentified_from")):
+            # The narrative was written before the change was known; re-derive it so the headline
+            # (and `narrative.verdict` in --json) cannot say CLEAN next to `rug_pull: true`.
+            lab["x-mcpgawk"]["narrative"] = build_narrative(lab)
 
     # ONE exit code for both output modes (see _scan_failed). `--json` used to `return 0`
     # unconditionally — so a failed probe or a detected rug-pull reported success to CI, the same
@@ -2940,6 +2972,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 else:
                     print(f"\n  ✓ {shown}: no change since your baseline "
                           f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
+                # UNCHANGED IS NOT THE WHOLE ANSWER. The opt-in registry and token checks, and
+                # under-documented write tools, hold whether or not the server changed; this tick
+                # printed none of them until 2026-11-10.
+                for _ln in standing_lines(lab):
+                    print(_ln)
     # A ROW WITHOUT A LABEL STILL RENDERS. The narrative above walks `labels`, and a server we
     # declined to launch (or a capability no local scan can reach) has no label — it only has a
     # fleet row. The fleet view renders those rows, but this path is taken whenever there is at

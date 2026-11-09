@@ -67,6 +67,10 @@ class FleetRow:
     # so the "re-run with --yes" next step, which would not launch it, is never offered for it.
     # Terminal-only: not part of the fleet-json payload (its `detail` already says why).
     refused: bool = False
+    # The server changed since its baseline (drift, a change it made and reverted, or a new
+    # identity). Additive in the fleet-json payload — no new STATE, which would break installed IDE
+    # extensions (see FLEET_SCHEMA) — so a front-end can mark the row without re-deriving drift.
+    changed: bool = False
 
     @property
     def needs_auth(self) -> bool:
@@ -82,7 +86,122 @@ def _spec_of(entry: dict[str, Any]) -> dict[str, Any] | None:
     return {k: v for k, v in entry.items() if not k.startswith("_")}
 
 
+_REGISTRY_NAME = {"npm": "npm", "pypi": "PyPI"}
+
+
+def _supply_chain_bits(sc: dict[str, Any] | None) -> tuple[list[str], bool]:
+    """`--supply-chain`'s answer as row text, and whether it is a finding.
+
+    Until 2026-11-10 the fleet rows never read it: a multi-server scan asked npm about every stdio
+    server, got "deprecated" back, and showed it nowhere (docs/audit-computed-never-shown-2026-11-10.md).
+
+    A finding flips CLEAN to REVIEW. That is right only because the check is OPT-IN: whoever passed
+    the flag asked "is this package still maintained, is this name old enough to trust?", and a "no"
+    must not sit on a CLEAN row. Could-not-check is detail only — not checked is not clean, but it is
+    not a finding either. MISSING never reaches here as a finding: that server was not launched and
+    has its own state (see the not-launched branch of `_measured_state`)."""
+    if not sc or sc.get("checked") is False or sc.get("missing"):
+        return [], False
+    registry = _REGISTRY_NAME.get(sc.get("ecosystem"), sc.get("ecosystem") or "its registry")
+    if sc.get("error"):
+        return [f"supply-chain not checked ({registry} did not answer)"], False
+    bits: list[str] = []
+    if sc.get("deprecated"):
+        why = (sc.get("detail") or "").strip()
+        # npm's message often trails into a URL; the first sentence is the part a row can carry.
+        first = why.split(". ", 1)[0].rstrip(".")
+        why = first + "." if first and first != why.rstrip(".") else why
+        if len(why) > 90:
+            why = why[:89].rstrip() + "…"
+        bits.append(f"⚠ deprecated on {registry}" + (f": {why}" if why else ""))
+    if sc.get("young"):
+        age, n = sc.get("age_days"), sc.get("release_count")
+        bits.append("⚠ young package name" + (f", first published {age} day{'' if age == 1 else 's'} ago"
+                                               if isinstance(age, int) else "")
+                    + (f", {n} release{'' if n == 1 else 's'}" if isinstance(n, int) else ""))
+    return bits, bool(bits)
+
+
+def _change_bits(x: dict[str, Any]) -> tuple[list[str], list[str], bool]:
+    """Drift and its relatives, as (lead bits, trailing bits, is-a-change).
+
+    THE PRODUCT'S OWN FINDING was missing from the fleet rows until 2026-11-10: cli.py writes drift,
+    held_change, reidentified_from and pin_not_compared onto the label, and nothing here read them —
+    so the VS Code extension, which renders these rows, showed CLEAN during a rug pull whose new
+    surface was otherwise benign, while the exit code said 1. Change LEADS the row, as it leads the
+    terminal view: inventory and cost are commodities, "this changed after you approved it" is the
+    product."""
+    lead: list[str] = []
+    tail: list[str] = []
+    d = x.get("drift")
+    if d:
+        since = "since approval" if d.get("baseline_origin") == "approve" else "since first seen"
+        if d.get("compared") is False:
+            lead.append("⚠ baseline could not be compared — treat as unreviewed")
+        else:
+            parts = []
+            for key, word in (("added", "added"), ("removed", "removed"), ("changed", "rewritten")):
+                if d.get(key):
+                    parts.append(f"{len(d[key])} {word}")
+            if not parts and d.get("pin_changed"):
+                parts.append("definitions differ")
+            if parts:
+                lead.append(f"⚠ CHANGED {since}: " + ", ".join(parts)
+                            + (" — injection or escalation" if d.get("hostile") else ""))
+    if x.get("held_change"):
+        lead.append("⚠ changed and changed back since approval — held for review")
+    if x.get("reidentified_from"):
+        lead.append(f"⚠ now identifies as a different server (was {x['reidentified_from']}) — "
+                    f"not compared; treat as unreviewed")
+    if x.get("pin_not_compared"):
+        tail.append(f"pin not compared this run ({x['pin_not_compared']})")
+    return lead, tail, bool(lead)
+
+
+def _exit_reason_bits(x: dict[str, Any]) -> list[str]:
+    """What fails the scan (cli._scan_failed) that the measured row does not already say: a live
+    signal of another kind (tool-name shadowing, a server-card mismatch, hidden characters) or a
+    caveat on a server that answered (a corrected transport). The terminal printed these under the
+    table (cli._unshown_exit_reasons); `--fleet-json`, which the IDE renders, read CLEAN with exit 1."""
+    if x.get("is_failure"):
+        return []
+    from .label import signal_lead
+    out = []
+    for sgn in x.get("bounded_signals") or []:
+        kind = sgn.get("kind") or ""
+        if (sgn.get("muted") or kind.startswith(("config:", "secret:", "dispatch:"))
+                or is_instruction_finding(kind)):
+            continue
+        out.append(f"⚠ {signal_lead(kind)} {sgn.get('tool', '?')}")
+    out += [f"⚠ {c}" for c in (x.get("caveats") or [])]
+    # A caveat can carry the resolved URL (a corrected transport). `to_json` redacts `url`, the
+    # field; this is free text in `detail`, so it is redacted here, before it reaches any output.
+    from .redact import redact_urls_in_text
+    return list(dict.fromkeys(redact_urls_in_text(b) or b for b in out))
+
+
 def state_of(label: dict[str, Any]) -> tuple[str, str]:
+    """(state, one-line detail) for a scanned server: what was measured, plus every opt-in or
+    after-the-fact finding the label carries. Each such finding must reach this row — the fleet row
+    is what a multi-server scan and the IDE show, so a finding missing here is missing for them."""
+    state, detail = _measured_state(label)
+    x = label["x-mcpgawk"]
+    lead, tail, changed = _change_bits(x)
+    bits, finding = _supply_chain_bits(x.get("supply_chain"))
+    exit_bits = _exit_reason_bits(x)
+    bits = exit_bits + bits
+    finding = finding or bool(exit_bits)
+    if (x.get("oauth_scopes") or {}).get("expired"):
+        # Detail only: an expired token explains a failed sign-in; it is not a finding about the server.
+        bits.append("⚠ token expired")
+    detail = " · ".join([*lead, detail, *tail, *bits])
+    # REVIEW, not a new state: STATES is pinned by the IDE extension (FLEET_SCHEMA).
+    if (finding or changed) and state == "CLEAN":
+        state = "REVIEW"
+    return state, detail
+
+
+def _measured_state(label: dict[str, Any]) -> tuple[str, str]:
     """(state, one-line detail) for a scanned server, derived from the SAME typed fields the
     per-server report uses — never by parsing its prose. A fleet view that disagreed with the
     detailed report would be worse than no fleet view."""
@@ -182,6 +301,13 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         mark = "⚠ " if risky_config else ""
         bits.append(f"{mark}{len(config)} config finding{'s' if len(config) != 1 else ''}")
 
+    under = x.get("underdocumented") or []
+    if under:
+        # Detail only, never a state change: a terse tool is badly documented, not an attack
+        # (grade._is_underdocumented), and a REVIEW that fires on hygiene teaches people to ignore REVIEW.
+        bits.append(f"{len(under)} write tool{'s' if len(under) != 1 else ''} "
+                    f"{'says' if len(under) == 1 else 'say'} almost nothing about "
+                    f"{'itself' if len(under) == 1 else 'themselves'}")
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
@@ -217,6 +343,7 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
         summary = configcheck.summarize(configcheck.check(name, entry))
         if summary:
             detail += f" · {summary}"
+        detail = " · ".join([detail, *_supply_chain_bits(entry.get("_supply_chain"))[0]])
         return FleetRow(
             name=name, state="UNREACHABLE", detail=detail,
             clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
@@ -228,6 +355,10 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
     summary = configcheck.summarize(configcheck.check(name, entry))
     if summary:
         detail += f" · {summary}"
+    # The registry was asked BEFORE the consent prompt (cli._registry_gate), so the answer exists for
+    # a server the person then declined — and a declined server is exactly where "this package is
+    # deprecated" decides whether to launch it at all. Dropping it here was the 2026-11-10 bug.
+    detail = " · ".join([detail, *_supply_chain_bits(entry.get("_supply_chain"))[0]])
     return FleetRow(name=name, state="SKIPPED", detail=detail,
                     clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
 
@@ -256,7 +387,8 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
                              clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
                              spec=_spec_of(entry) if with_spec else None,
-                             refused=lab["x-mcpgawk"].get("error_kind") == "not-launched"))
+                             refused=lab["x-mcpgawk"].get("error_kind") == "not-launched",
+                             changed=_change_bits(lab["x-mcpgawk"])[2]))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
         if with_spec:
@@ -419,6 +551,8 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
              # What each client calls it, so a front-end can label a row the way the reader's own
              # config does without the name ceasing to work as the join key. Omitted when empty.
              **({"names": dict(r.names)} if r.names else {}),
+             # Additive (no schema bump): present only when the server changed since its baseline.
+             **({"changed": True} if r.changed else {}),
              # `spec` present only under --with-spec; `scannable` is the safe, secret-free signal a
              # front-end uses to decide whether to offer a "verify by click" action.
              **({"spec": r.spec, "scannable": True} if r.spec else {})}
@@ -434,6 +568,10 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
             "unscannable": counts["NOT-SCANNABLE"],
             # Carried explicitly so a front-end cannot quietly present this list as complete.
             "unscannable_may_be_incomplete": bool(counts["NOT-SCANNABLE"]),
+            # Additive: the servers that changed since their baseline, so a front-end can lead with
+            # them the way the terminal does, without re-deriving drift from labels.
+            **({"changed": sorted(r.name for r in rows if r.changed)}
+               if any(r.changed for r in rows) else {}),
         },
     }
 
