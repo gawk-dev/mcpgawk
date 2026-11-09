@@ -126,7 +126,11 @@ class Panel:
         env = dict(os.environ)
         env.update({
             "HOME": str(self.home),
-            "PYTHONPATH": str(REPO / "src"),
+            # PREPEND, never replace: the suite's PYTHONPATH carries the CI process-tree emulation
+            # (tests/fixtures/ci_ancestry). Replacing it let the panel see the agent that launched
+            # pytest and refuse the approve button (measured 2026-11-06, full suite under claude).
+            "PYTHONPATH": os.pathsep.join(
+                p for p in (str(REPO / "src"), os.environ.get("PYTHONPATH")) if p),
             "MCPGAWK_HISTORY": str(self.history),
             "MCPGAWK_RUNS": str(self.state / "runs.db"),
             "GAWK_BEHAVIOUR_PROFILE": str(self.state / "gawk" / "behaviour.json"),

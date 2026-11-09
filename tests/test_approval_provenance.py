@@ -74,15 +74,32 @@ def test_an_approval_through_the_hatch_with_no_terminal_is_named(tmp_path, autom
     assert "you approved" not in history.changed_since(store, ["mcp:srv1"])
 
 
-def test_an_agent_process_above_the_approval_is_named_even_with_its_markers_stripped(
+def test_an_agent_process_above_the_approval_is_refused_even_with_its_markers_stripped(
         tmp_path, automation, monkeypatch):
-    """Route A as measured: CLAUDECODE unset, but `claude` is still a visible ancestor."""
+    """Route A as measured: CLAUDECODE unset, but `claude` is still a visible ancestor. Until
+    2026-11-06 this was recorded and NAMED but allowed; re-measured 2026-11-05 (design doc run 2) it
+    moved the baseline with exit 0. Now the write is refused and nothing moves."""
     monkeypatch.setattr(history, "_process_ancestry", lambda: ["zsh", "claude", "-zsh", "login"])
     path = _store_with_sighting(tmp_path)
-    history.approve("mcp:srv1", path)
-    ev = _entry(path)["approved_evidence"]
-    assert ev["agent_process"] == "claude" and ev["person_present"] is False
-    assert "claude" in history.unattended_reason(history.load(path), "mcp:srv1")
+    before = history.load(path)
+    with pytest.raises(history.ApprovalBlocked) as refused:
+        history.approve("mcp:srv1", path)
+    assert "claude" in refused.value.reason
+    assert history.load(path) == before, "a refused approval must not touch the store"
+
+
+def test_a_stored_approval_made_under_an_agent_process_is_still_named(tmp_path):
+    """Records written before the refusal existed keep their evidence; surfaces still name them."""
+    path = _store_with_sighting(tmp_path)
+    store = history.load(path)
+    entry = store["servers"]["mcp:srv1"]
+    entry.update({"approved": dict(SIGHTING), "approved_via": "approve",
+                  "approved_at": "2026-11-01T00:00:00+00:00",
+                  "approved_evidence": {"source": "cli", "terminal": True, "agent_markers": [],
+                                        "agent_process": "claude", "hatch": False,
+                                        "person_present": False}})
+    assert history.baseline_origin(store, "mcp:srv1") == "unattended"
+    assert "claude" in history.unattended_reason(store, "mcp:srv1")
 
 
 def test_a_panel_approval_is_not_a_person_until_confirmed_at_a_terminal(tmp_path, person):

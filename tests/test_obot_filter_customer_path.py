@@ -70,7 +70,12 @@ def test_a_tool_that_appears_after_a_real_approve_is_denied(real_store):
     verdict = obot_filter.evaluate(_call("tool_that_was_never_approved"), server=key,
                                    store_path=store, record=False)
     assert verdict["accept"] is False
-    assert "not in the approved baseline" in verdict["reason"]
+    from mcpgawk import decision
+    assert decision.reason_code(verdict["reason"]) == decision.REASON_TOOL_ADDED
+    # The fixture approves through the CI hatch (no terminal): the record says no person was
+    # present, and since 2026-11-06 the denial says what the record says, not "you approved".
+    assert "approved without a person present" in verdict["reason"]
+    assert "they approved" not in verdict["reason"]
 
 
 def test_the_real_store_key_is_usable_as_MCPGAWK_SERVER_verbatim(real_store):

@@ -16,6 +16,7 @@ The security-relevant asymmetries, each pinned:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,14 @@ APPROVED = {"servers": {"mcp:notes": {"aliases": ["notes"],
                                       "approved": {"tools": {"read_note": "h1"}}}}}
 
 
+
+
+def _test_harness_env() -> dict[str, str]:
+    """The test-only harness variables a from-scratch child env must still carry: PYTHONPATH to
+    tests/fixtures/ci_ancestry and MCPGAWK_TEST_ANCHOR_DIR — CI's process tree and no approval
+    anchor (see tests/conftest.py). The product reads neither."""
+    return {k: os.environ[k] for k in ("PYTHONPATH", "MCPGAWK_TEST_ANCESTRY",
+                                       "MCPGAWK_TEST_ANCHOR_DIR") if k in os.environ}
 
 def _no_verdict(out: str) -> bool:
     """A pass may carry CONTEXT for the agent (Claude Code only, slice 5, 2026-09-05) — never a
@@ -53,7 +62,7 @@ def _run(fmt: str, event: dict, store: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(HOOK), "--format", fmt], input=json.dumps(event), text=True,
         capture_output=True, timeout=60,
-        env={"MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(store.parent / "c.jsonl"),
+        env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(store.parent / "c.jsonl"),
              "PATH": "/usr/bin:/bin", "HOME": str(store.parent)})
 
 
@@ -529,7 +538,7 @@ def _run_behavioural(tmp_path: Path, event: dict, profile: dict) -> subprocess.C
     return subprocess.run(
         [sys.executable, str(HOOK)], input=json.dumps(event), text=True, capture_output=True,
         timeout=60,
-        env={"MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(tmp_path / "c.jsonl"),
+        env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(tmp_path / "c.jsonl"),
              "GAWK_BEHAVIOUR": str(behaviour), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
 
 
@@ -581,7 +590,11 @@ def test_the_profile_never_clears_a_declared_deny_in_the_hook(tmp_path):
     r = _run_behavioural(tmp_path, evt, _PROFILE)
     payload = json.loads(r.stdout)
     assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "approved baseline" in payload["hookSpecificOutput"]["permissionDecisionReason"]
+    # The DECLARED added-tool denial, identified by its code — its words now follow who set the
+    # baseline (2026-11-06), and this store's record carries no approval marker.
+    from mcpgawk import decision
+    reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
+    assert decision.reason_code(reason) == decision.REASON_TOOL_ADDED, reason
 
     from mcpgawk import spool
 
@@ -597,7 +610,7 @@ def test_no_profile_leaves_the_hook_exactly_as_before(tmp_path):
         input=json.dumps({"tool_name": "mcp__notes__read_note", "tool_input": {},
                           "session_id": "s"}),
         text=True, capture_output=True, timeout=60,
-        env={"MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(tmp_path / "c.jsonl"),
+        env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "MCPGAWK_SPOOL": str(tmp_path / "c.jsonl"),
              "GAWK_BEHAVIOUR": str(tmp_path / "absent.json"),
              "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
     assert r.returncode == 0 and _no_verdict(r.stdout)

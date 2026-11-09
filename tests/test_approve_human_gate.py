@@ -20,6 +20,47 @@ from mcpgawk import baseline, guard_hook
 def _clear(monkeypatch):
     for marker in baseline.AGENT_ENV_MARKERS + (baseline.APPROVE_OVERRIDE_ENV,):
         monkeypatch.delenv(marker, raising=False)
+    # A person's shell, not the real ancestry: this suite is itself often run from inside an agent.
+    from mcpgawk import history
+    monkeypatch.setattr(history, "_process_ancestry", lambda: ["zsh", "login", "Terminal"])
+
+
+def _under_agent(monkeypatch):
+    from mcpgawk import history
+    monkeypatch.setattr(history, "_process_ancestry", lambda: ["zsh", "claude", "-zsh", "login"])
+
+
+def test_an_agent_process_above_may_not_approve_even_with_its_markers_stripped(monkeypatch):
+    """MEASURED 2026-11-05 (docs/design-approve-presence-2026-11-05.md run 2): from a Claude Code
+    tool call, `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u AI_AGENT script -q /dev/null mcpgawk
+    approve` moved the baseline with exit 0. The markers were gone and `script` supplied a terminal,
+    but `claude` was still an ancestor; it was recorded, never refused."""
+    _clear(monkeypatch)
+    _under_agent(monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    reason = baseline.approval_blocked_reason()
+    assert reason and "claude" in reason
+
+
+def test_the_ci_hatch_never_waives_an_agent_process(monkeypatch):
+    _clear(monkeypatch)
+    _under_agent(monkeypatch)
+    monkeypatch.setenv(baseline.APPROVE_OVERRIDE_ENV, "1")
+    for tty in (True, False):
+        monkeypatch.setattr("sys.stdin.isatty", lambda tty=tty: tty)
+        assert baseline.approval_blocked_reason(), "an env var is what an agent with a shell sets"
+
+
+def test_the_agent_process_refusal_does_not_teach_the_way_around(monkeypatch):
+    """Naming the process is fine (surfaces already do). Describing the walk, or that a detached
+    process escapes it (measured run 4), would hand the agent the next bypass."""
+    _clear(monkeypatch)
+    _under_agent(monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    reason = baseline.approval_blocked_reason().lower()
+    for word in ("ancestor", "parent", "detach", "nohup", "fork", "setsid", "process tree",
+                 baseline.APPROVE_OVERRIDE_ENV.lower()):
+        assert word not in reason
 
 
 @pytest.mark.parametrize("marker", baseline.AGENT_ENV_MARKERS)

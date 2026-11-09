@@ -689,6 +689,20 @@ def build_parser() -> argparse.ArgumentParser:
                         "that appears later is named instead of trusted")
     a.add_argument("--reason", metavar="TEXT",
                    help="why you are accepting this change; kept on the approval record")
+    a.add_argument("--name-only", action="store_true", dest="name_only",
+                   help="locked machines: allow a server mcpgawk has never seen (one built into "
+                        "your agent) by its name alone; its tools are not checked")
+
+    al_p = sub.add_parser(
+        "approvals",
+        help="lock approvals behind a passphrase only you know",
+        description="Lock approving on this machine behind an approval passphrase. Once locked, "
+                    "every approval is signed with a key only your passphrase unlocks, and the "
+                    "public key that checks those signatures is placed where only an admin can "
+                    "change it (one sudo step). An agent running as you cannot type a passphrase "
+                    "it was never told. `status` says whether this machine is locked.")
+    al_p.add_argument("action", choices=["lock", "status"],
+                      help="lock: set the passphrase and place the public key; status: show it")
 
     w = sub.add_parser(
         "wrong",
@@ -748,7 +762,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "waiting on you. A control surface, not a viewer: re-scan, verify, sign-in, "
                     "approve and protect all live here — but only on the tokened URL this command "
                     "prints. A bare 127.0.0.1:7718 (bookmark, restored tab) renders read-only "
-                    "with no buttons, by design. Drift decisions also live in `mcpgawk decide`.")
+                    "with no buttons, by design. Approve, mute, pin and protect also ask for an "
+                    "approval code that this command prints in this terminal only — it is on no "
+                    "page and in no file — and a correct code unlocks them for 15 minutes. Drift "
+                    "decisions also live in `mcpgawk decide`.")
     pn.add_argument("--port", type=int, default=7718, help="local port (default: 7718)")
     pn.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
@@ -1285,12 +1302,32 @@ def _approve(args) -> int:
         return 4
     if getattr(args, "fleet", False):
         return _approve_fleet()
+    if getattr(args, "name_only", False):
+        return _approve_name_only(args.server)
     path = history.default_path()
     store, _store_err = _store_or_say_why(path)
     _warn_if_store_unreadable(_store_err)
     waiting = history.pending(store)
+    # LOCKED (approval_lock): a baseline no valid signature vouches for waits for the person too —
+    # an approval from before the lock, a first sighting, or a record written into the store by
+    # hand. Measured 2026-11-05 (run 3): unlocked, a hand-edited store read "every server matches".
+    unsigned = [k for k in history.needs_signature(store) if k not in waiting]
 
     if args.list or (not args.server and not args.all):
+        by_name = history.name_only_approvals(store)
+        if by_name and approval_lock_trusted():
+            print(f"{len(by_name)} server(s) allowed by name only — mcpgawk has never seen their "
+                  f"tools, so none of their calls are checked:\n")
+            for name in sorted(by_name):
+                print(f"    {name}  (allowed {by_name[name].get('approved_at') or 'at an unrecorded time'})")
+            print()
+        if unsigned:
+            print(f"{len(unsigned)} server(s) hold a baseline this machine cannot verify — no valid "
+                  f"approval signature. Approve each with your passphrase once you have reviewed "
+                  f"it:\n")
+            for key in unsigned:
+                print(f"    mcpgawk approve {shlex.quote(key)}")
+            print()
         appeared = history.held(store)
         if appeared:
             print(f"{len(appeared)} server(s) appeared after your fleet approval and have no "
@@ -1301,7 +1338,7 @@ def _approve(args) -> int:
             for key in appeared:
                 print(f"    mcpgawk approve {shlex.quote(key)}")
             print()
-        if not waiting and appeared:
+        if not waiting and (appeared or unsigned):
             return 0 if args.list else 1
         if not waiting:
             if _store_err:
@@ -1324,7 +1361,8 @@ def _approve(args) -> int:
             print("    or all of them: mcpgawk approve --all")
         return 0 if args.list else 1
 
-    targets = waiting if args.all else [k for k in [history.resolve(store, args.server)] if k]
+    targets = (waiting + unsigned) if args.all else [k for k in [history.resolve(store, args.server)]
+                                                     if k]
     if not targets:
         # Ambiguity gets its own message. "No tracked server matches" would be a lie when the
         # problem is that SEVERAL do, and approving the wrong one moves a baseline the operator
@@ -1338,10 +1376,18 @@ def _approve(args) -> int:
             return 2
         print(f"No tracked server matches {args.server!r}. "
               f"Try `mcpgawk approve --list`.", file=sys.stderr)
+        if approval_lock_trusted():
+            print(f"If your agent calls {args.server!r} but mcpgawk has never seen it (a server "
+                  f"built into the agent), you can allow it by name only — its tools will not be "
+                  f"checked: mcpgawk approve {shlex.quote(args.server)} --name-only",
+                  file=sys.stderr)
         return 2
 
+    signer, refused = _approval_signer(path)
+    if refused is not None:
+        return refused
     for key in targets:
-        rec = history.approve(key, path=path, reason=getattr(args, "reason", None))
+        rec = history.approve(key, path=path, reason=getattr(args, "reason", None), signer=signer)
         if rec is None:
             print(f"Nothing recorded for {key} yet — scan it first.", file=sys.stderr)
             return 2
@@ -1349,6 +1395,177 @@ def _approve(args) -> int:
         # Name what was approved. "Approved." alone leaves a user unsure WHAT they just trusted.
         print(f"✓ approved {names} — {rec.get('tool_count', '?')} tools, "
               f"as seen {rec.get('measured_at') or 'just now'}. Future drift is measured from here.")
+    return 0
+
+
+def _approval_signer(path: str | None) -> "tuple[Any, int | None]":
+    """(signer, None) to go ahead — signer is None on an unlocked machine — or (None, exit code)
+    after saying why. On a LOCKED machine the passphrase is read from the terminal, never stdin or
+    the environment (approval_lock); nothing moves until it unlocks the key the anchor trusts."""
+    from .approval_lock import signer_for
+    signer, say, refused = signer_for(path)
+    for line in say:
+        print(f"mcpgawk approve: {line}", file=sys.stderr)
+    return (None, 4) if refused else (signer, None)
+
+
+def _approvals(args) -> int:
+    """`mcpgawk approvals lock|status` — the approval passphrase and the root-owned anchor."""
+    from . import approval_lock as al
+    anchor = al.read_anchor()
+    path = history.default_path()
+
+    if args.action == "status":
+        if anchor.status == "trusted":
+            store, _err = _store_or_say_why(path)
+            unsigned = history.needs_signature(store)
+            print(f"LOCKED — approvals on this machine need your passphrase (anchor: {anchor.path}).")
+            if unsigned:
+                print(f"{len(unsigned)} server(s) hold a baseline with no valid signature, so "
+                      f"the agent hook refuses calls to them; `mcpgawk approve --list` names them.")
+            by_name = history.name_only_approvals(store)
+            if by_name:
+                print(f"{len(by_name)} server(s) allowed by name only, their tools NOT checked: "
+                      f"{', '.join(sorted(by_name))}.")
+            return 0
+        if anchor.status == "unsupported":
+            print(f"NOT LOCKED — {anchor.why}. Approvals rely on the agent checks only.")
+            return 0
+        if anchor.status == "untrusted":
+            print(f"NOT LOCKED — a file at {anchor.path} is ignored: {anchor.why}.")
+            return 1
+        print("NOT LOCKED — `mcpgawk approvals lock` sets an approval passphrase.")
+        return 0
+
+    # lock
+    from .baseline import approval_blocked_reason
+    blocked = approval_blocked_reason()
+    if blocked:
+        print(f"mcpgawk approvals lock: refusing — {blocked}", file=sys.stderr)
+        return 4
+    if anchor.status == "trusted":
+        print(f"Already locked (anchor: {anchor.path}). Nothing changed.")
+        return 0
+    if anchor.status == "unsupported":
+        print(f"mcpgawk approvals lock: {anchor.why}.", file=sys.stderr)
+        return 2
+    if anchor.status == "untrusted":
+        print(f"mcpgawk approvals lock: a file already sits at {anchor.path} and is not trusted "
+              f"({anchor.why}). Look at it and remove it yourself before locking.", file=sys.stderr)
+        return 2
+
+    kp = al.key_path(path)
+    try:
+        if kp.exists() and al.ask(f"An approval key already exists at {kp} but no anchor trusts "
+                                  f"it. Replace it? [y/N] ").lower() not in ("y", "yes"):
+            print("Nothing changed.")
+            return 1
+        print("Once this machine is locked, your agents can call a server only after you approve "
+              "it with your passphrase. Servers approved before the lock are refused until you sign "
+              "them (offered at the end).\n")
+        print(f"Choose an approval passphrase (at least {al.MIN_PASSPHRASE} characters). Only "
+              f"you should know it: never type it into an agent's chat.")
+        first = al.read_passphrase("Approval passphrase: ")
+        if len(first) < al.MIN_PASSPHRASE:          # say it before asking a second time
+            print(f"mcpgawk approvals lock: the passphrase must be at least {al.MIN_PASSPHRASE} "
+                  f"characters. Nothing changed.", file=sys.stderr)
+            return 1
+        if al.read_passphrase("Again: ") != first:
+            print("mcpgawk approvals lock: the two passphrases differ. Nothing changed.",
+                  file=sys.stderr)
+            return 1
+    except al.NoTerminal:
+        print("mcpgawk approvals lock: there is no terminal to type the passphrase in. Run it "
+              "yourself, in your own terminal.", file=sys.stderr)
+        return 4
+    try:
+        doc, pub = al.create_key(first)
+    except ValueError as exc:
+        print(f"mcpgawk approvals lock: {exc}. Nothing changed.", file=sys.stderr)
+        return 1
+    al.write_key(doc, kp)
+    print(f"\nKey written to {kp} (encrypted with your passphrase). Now the one admin step: the "
+          f"public key goes to {al.anchor_path()}, where only an admin can change it. Your "
+          f"computer's password is asked for next.")
+    result = al.install_anchor(pub)
+    if result.status != "trusted" or result.public_key != pub:
+        why = result.why or result.status
+        print(f"mcpgawk approvals lock: NOT locked — {why}. Run `mcpgawk approvals lock` again.",
+              file=sys.stderr)
+        return 4
+    print("✓ locked — every approval on this machine now needs your passphrase.")
+
+    store, _err = _store_or_say_why(path)
+    pending = history.needs_signature(store)
+    # Only a PERSON'S approval can be signed as it stands (history.sign_approvals). A baseline taken
+    # at first sighting was never approved by anyone: say so, and name the command, rather than
+    # offer it for signing and then sign fewer than offered (founder's first lock, 2026-11-06:
+    # offered 17, signed 5, the other 12 unexplained).
+    servers = store.get("servers") or {}
+    unsigned = [k for k in pending if (servers.get(k) or {}).get("approved_at")]
+    never = [k for k in pending if k not in unsigned]
+    if never:
+        print(f"\n{len(never)} server(s) were never approved — mcpgawk took their baseline when it "
+              f"first saw them. Until you approve them, the agent hook refuses your agents' calls "
+              f"to them. Review each, then `mcpgawk approve <server>`:")
+        for key in never:
+            print(f"    {history.display_name(store, key)} ({key})")
+    if not unsigned:
+        return 0
+    print(f"\n{len(unsigned)} server(s) you approved before the lock. Until they are signed, "
+          f"the agent hook refuses your agents' calls to them:")
+    for key in unsigned:
+        print(f"    {history.display_name(store, key)} ({key})")
+    try:
+        if al.ask("Sign these approvals now, as they stand? [y/N] ").lower() not in ("y", "yes"):
+            print("Left unsigned — the agent hook refuses calls to them. `mcpgawk approve --list` names them.")
+            return 0
+        signer = al.unlock(al.read_passphrase("Approval passphrase: "), path)
+    except al.NoTerminal:
+        print("Left unsigned (no terminal) — the agent hook refuses calls to them. `mcpgawk approve --list` "
+              "names them.")
+        return 0
+    except (al.WrongPassphrase, al.NotTheAnchoredKey) as exc:
+        print(f"Left unsigned — {exc}. The agent hook refuses calls to them; `mcpgawk approve --list` names "
+              f"them.", file=sys.stderr)
+        return 1
+    signed = history.sign_approvals(unsigned, signer, path)
+    print(f"✓ signed {len(signed)} approval{'s' if len(signed) != 1 else ''}.")
+    return 0
+
+
+def approval_lock_trusted() -> bool:
+    from . import approval_lock
+    return approval_lock.read_anchor().status == "trusted"
+
+
+def _approve_name_only(name: str | None) -> int:
+    """`mcpgawk approve <name> --name-only` — see history.approve_name_only."""
+    if not name:
+        print("mcpgawk approve --name-only: name the server, as your agent calls it.",
+              file=sys.stderr)
+        return 2
+    if not approval_lock_trusted():
+        print("mcpgawk approve --name-only: this machine is not locked, so a server mcpgawk has "
+              "never seen is already let through (unchecked). Nothing changed.", file=sys.stderr)
+        return 2
+    path = history.default_path()
+    store, _err = _store_or_say_why(path)
+    if history.resolve(store, name) or history.resolve_all(store, name):
+        print(f"mcpgawk approve --name-only: mcpgawk has seen {name!r}, so it is approved with its "
+              f"tools, not by name: `mcpgawk approve --list` names the command. Nothing changed.",
+              file=sys.stderr)
+        return 2
+    signer, refused = _approval_signer(path)
+    if refused is not None:
+        return refused
+    try:
+        history.approve_name_only(name, signer, path)
+    except history.ApprovalBlocked as exc:
+        print(f"mcpgawk approve: refusing — {exc}", file=sys.stderr)
+        return 4
+    print(f"✓ allowed {name} by name only — mcpgawk has never seen its tools, so none of its calls "
+          f"are checked for drift. Your passphrase signed it.")
     return 0
 
 
@@ -1360,8 +1577,11 @@ def _approve_fleet() -> int:
         print(f"mcpgawk approve --fleet: could not read your agent configs ({exc}).",
               file=sys.stderr)
         return 4
+    signer, refused = _approval_signer(None)
+    if refused is not None:
+        return refused
     try:
-        n, adopted = history.approve_fleet(found)
+        n, adopted = history.approve_fleet(found, signer=signer)
     except history.ApprovalBlocked as exc:
         print(f"mcpgawk approve: refusing — {exc}", file=sys.stderr)
         return 4
@@ -2283,6 +2503,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if args.cmd == "approve":
         return _approve(args)
+
+    if args.cmd == "approvals":
+        return _approvals(args)
 
     if args.cmd == "wrong":
         return _wrong(args)

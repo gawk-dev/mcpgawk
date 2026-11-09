@@ -34,6 +34,57 @@ DENY = "deny"
 DEFER = "defer"
 
 
+#: HOW THE BASELINE WAS SET, as every denial says it. The values are `history.baseline_origin`'s,
+#: carried to the hook in the projection row ("unknown" = history could not tell; None = the caller
+#: did not say). The words are `history.changed_head`'s — the one sentence the scan, /next and
+#: `baseline` print — which this module cannot import (stdlib only, loaded by path), so
+#: tests/test_guard_words_who_set_the_baseline.py pins that the two agree.
+#: FOUND 2026-11-06: every denial said "CHANGED since you approved it" of a first-sighting baseline
+#: nobody approved, while the scan beside it said "you have not approved this server yet" — the
+#: 2026-10-09 rule had reached every surface but this one. "you approved it" stays where a person
+#: did (FOUNDER 2026-11-06, "leave you approved it").
+def _anchor(origin: str | None) -> dict[str, str]:
+    if origin == "approve":
+        return {"since": "since you approved it", "they": "after they approved it",
+                "they_added": "since they approved it", "in": "the approved baseline",
+                "note": "", "appeared": "after this server was approved", "after": "after approval",
+                "label": "approved",
+                "trusted": "a tool you trusted", "more": "more than was approved",
+                "props": "when the user approved it", "never": "you never approved",
+                "covered": "the approved baseline", "was_there": "when you approved this server"}
+    if origin == "fleet":
+        since = "since first seen, the baseline your fleet approval accepted"
+        they = "since their fleet approval accepted it"
+        note, trusted = "accepted by your fleet approval", "a tool your fleet approval accepted"
+    elif origin == "first-sighting":
+        since = "since first seen; you have not approved this server yet"
+        they = "since it was first seen (they have not approved this server yet)"
+        note, trusted = "first seen; you have not approved this server yet", "a tool already in use"
+    elif origin == "unattended":
+        since = "since its baseline, approved without a person present"
+        they = "since its baseline, which was approved without a person present"
+        note, trusted = "approved without a person present", "a tool already in use"
+    elif origin == "unsigned":
+        # A locked machine (approval_lock) holding an approval no valid signature vouches for.
+        since = "since its baseline; this machine cannot verify who approved it"
+        they = "since its baseline (this machine cannot verify who approved it)"
+        note, trusted = "this machine cannot verify who approved it", "a tool already in use"
+    elif origin == "unknown":
+        since = "since its baseline; who approved it is not on record"
+        they = "since its baseline (who approved it is not on record)"
+        note, trusted = "who approved it is not on record", "a tool already in use"
+    else:
+        # The caller did not say. Claim nothing about who set the baseline — not even that the
+        # record does not say, which a caller that never looked cannot know.
+        since, they, note, trusted = ("since its baseline", "since its baseline was recorded", "",
+                                      "a tool already in use")
+    return {"since": since, "they": they, "they_added": they, "in": "the baseline",
+            "note": f" ({note})" if note else "", "appeared": "after the baseline was recorded",
+            "after": "after the baseline was recorded", "label": "baseline", "trusted": trusted, "more": "more than its baseline allowed",
+            "props": "in its baseline", "never": "not in its baseline",
+            "covered": "its baseline", "was_there": "when its baseline was recorded"}
+
+
 def content_hash(description: str | None) -> str:
     """The approved-surface fingerprint of one tool's model-visible text.
 
@@ -77,8 +128,12 @@ def declared_verdict(server: str, tool: str,
                      approved_props: list[str] | None = None,
                      seen_at: str | None = None,
                      permission_changes: list[str] | None = None,
-                     reverted: dict | None = None) -> tuple[str, str, str | None]:
+                     reverted: dict | None = None,
+                     origin: str | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
+
+    `origin` is how the baseline was set (`_anchor`); it changes the WORDS of a denial, never the
+    decision.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
     nothing has ever been approved for it. None and `{}` mean different things (see
@@ -108,23 +163,24 @@ def declared_verdict(server: str, tool: str,
     if approved is None:
         return DEFER, BASIS_DECLARED, None
     if tool not in approved:
-        return DENY, BASIS_DECLARED, deny_reason(server, tool)
+        return DENY, BASIS_DECLARED, deny_reason(server, tool, origin)
     approved_hash = approved.get(tool)
     # Both sides must be present. A record written before hashes existed, or a caller that could
     # not compute one, is missing evidence — and missing evidence is never a deny here.
     if live_hash and approved_hash and live_hash != approved_hash:
-        return DENY, BASIS_DECLARED, changed_reason(server, tool, approved_hash, live_hash, seen_at)
+        return DENY, BASIS_DECLARED, changed_reason(server, tool, approved_hash, live_hash, seen_at,
+                                                    origin)
     # PERMISSION GROWTH. The description hash above cannot see a dropped read-only or a new
     # destination parameter; the projection carries them, judged by scan's own compare
     # (FOUNDER 2026-10-06, "Block permission growth"). Any other schema change still waits for
     # sign-off without blocking (FOUNDER 2026-08-15, below).
     if permission_changes:
         return DENY, BASIS_DECLARED, permission_changed_reason(server, tool, permission_changes,
-                                                               seen_at)
+                                                               seen_at, origin)
     if reverted:
         return DENY, BASIS_DECLARED, reverted_reason(server, tool,
                                                      reverted.get("at") if isinstance(reverted, dict)
-                                                     else None)
+                                                     else None, origin)
     # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
     # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
     # call is FILLING a parameter the human never approved, and it is credential-shaped
@@ -137,16 +193,17 @@ def declared_verdict(server: str, tool: str,
         # the agent is told to stop and tell the user — a denial that hands the agent a bypass
         # has enforced nothing (proven end to end 2026-07-27).
         named = ", ".join(smuggled)
+        a = _anchor(origin)
         return DENY, BASIS_DECLARED, (
             f"SECURITY BLOCK (mcpgawk). This call to '{server}.{tool}' fills parameter(s) that "
-            f"were not part of the tool when the user approved it, and they look like "
-            f"credentials: {named}. A parameter that appears after approval and asks for a "
+            f"were not part of the tool {a['props']}, and they look like "
+            f"credentials: {named}. A parameter that appears {a['after']} and asks for a "
             f"secret is the smuggled-field shape of a malicious update.\n"
             f"This decision is final for this session. Do not retry it, do not move the value "
             f"into a different parameter or tool, and do not run any mcpgawk command to change "
             f"the baseline — approval requires the person at the keyboard.\n"
             f"Tell the user exactly this: '{tool}' on '{server}' gained parameter(s) {named} "
-            f"since they approved it, mcpgawk blocked a call that was filling them, and they "
+            f"{a['they_added']}, mcpgawk blocked a call that was filling them, and they "
             f"should run `mcpgawk scan` themselves to review the change before deciding."
         )
     return DEFER, BASIS_DECLARED, None
@@ -160,7 +217,8 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
             approved_props: list[str] | None = None,
             seen_at: str | None = None,
             permission_changes: list[str] | None = None,
-            reverted: dict | None = None) -> tuple[str, str, str | None]:
+            reverted: dict | None = None,
+            origin: str | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -180,7 +238,7 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
                                                args=args, approved_props=approved_props,
                                                seen_at=seen_at,
                                                permission_changes=permission_changes,
-                                               reverted=reverted)
+                                               reverted=reverted, origin=origin)
     if decision == DENY:
         return decision, basis, reason
 
@@ -212,39 +270,42 @@ def behavioural_deny_reason(server: str, tool: str, src_server: str, src_tool: s
 
 
 def changed_reason(server: str, tool: str, approved_hash: str, live_hash: str,
-                   seen_at: str | None = None) -> str:
+                   seen_at: str | None = None, origin: str | None = None) -> str:
     """The denial for the RUG-PULL: same tool name, different content. Same load-bearing
     properties as `deny_reason` (no executable remedy, no override, stop and tell the user).
     `seen_at` set means the evidence is the last sighting, not this call — say so, because a
-    deny that claims more than it measured is the false reassurance this product exists to end."""
+    deny that claims more than it measured is the false reassurance this product exists to end.
+    `origin` words who set the baseline (`_anchor`)."""
     when = (f"last seen {seen_at} — not this call; a change since then is not yet measured"
             if seen_at else "now")
+    a = _anchor(origin)
     return (
-        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
-        f"approved it — same name, different content (approved {approved_hash}, {when}: "
-        f"{live_hash}). This is the rug-pull shape: a tool you trusted, rewritten to say "
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED {a['since']} "
+        f"— same name, different content ({a['label']} {approved_hash}, {when}: "
+        f"{live_hash}). This is the rug-pull shape: {a['trusted']}, rewritten to say "
         f"something else.\n"
         f"This decision is final for this session. Do not retry it, do not call a different "
         f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
         f"baseline — approval requires the person at the keyboard, and attempting it from "
         f"inside an agent session is itself treated as a red flag.\n"
-        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
-        f"they approved it, mcpgawk blocked the call, and they should run `mcpgawk decide` "
+        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' "
+        f"{a['they']}, mcpgawk blocked the call, and they should run `mcpgawk decide` "
         f"themselves to read what changed before deciding whether to trust it."
     )
 
 
 def permission_changed_reason(server: str, tool: str, changes: list[str],
-                              seen_at: str | None = None) -> str:
+                              seen_at: str | None = None, origin: str | None = None) -> str:
     """The denial for permission growth after approval: same name, and the tool can now do more
     than the person approved (declared escalation or a new destination parameter). Same properties
     as `changed_reason`, and its wording, so it classifies as REASON_TOOL_CHANGED."""
     when = (f"as last seen {seen_at} — not this call; a change since then is not yet measured"
             if seen_at else "now")
     what = "; ".join(changes)
+    a = _anchor(origin)
     return (
-        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
-        f"approved it — it can now do more than was approved ({what}, {when}). A tool that "
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED {a['since']} "
+        f"— it can now do {a['more']} ({what}, {when}). A tool that "
         f"quietly gains the power to write, send or stop being read-only is how a malicious update "
         f"arrives without changing a word of its description.\n"
         f"This decision is final for this session. Do not retry it, do not call a different "
@@ -252,25 +313,27 @@ def permission_changed_reason(server: str, tool: str, changes: list[str],
         f"baseline — approval requires the person at the keyboard, and attempting it from "
         f"inside an agent session is itself treated as a red flag.\n"
         f"Tell the user exactly this: the MCP server '{server}' changed what the tool '{tool}' "
-        f"can do after they approved it ({what}), mcpgawk blocked the call, and they should run "
+        f"can do {a['they']} ({what}), mcpgawk blocked the call, and they should run "
         f"`mcpgawk decide` themselves to review the change before deciding whether to trust it."
     )
 
 
-def reverted_reason(server: str, tool: str, at: str | None = None) -> str:
+def reverted_reason(server: str, tool: str, at: str | None = None,
+                    origin: str | None = None) -> str:
     """The denial for THE LATCH: the tool changed after approval and changed back. Same properties
     and the same classifying phrase as `changed_reason` (REASON_TOOL_CHANGED)."""
     when = f"on {at[:10]}" if isinstance(at, str) and at else "at an earlier sighting"
+    a = _anchor(origin)
     return (
-        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
-        f"approved it — it was seen changed {when} and changed back since. A tool that changes "
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED {a['since']} "
+        f"— it was seen changed {when} and changed back since. A tool that changes "
         f"and then reverts before anyone looks is still a change you never reviewed.\n"
         f"This decision is final for this session. Do not retry it, do not call a different "
         f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
         f"baseline — approval requires the person at the keyboard, and attempting it from "
         f"inside an agent session is itself treated as a red flag.\n"
-        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
-        f"they approved it and changed it back, mcpgawk blocked the call, and they should run "
+        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' "
+        f"{a['they']} and changed it back, mcpgawk blocked the call, and they should run "
         f"`mcpgawk decide` themselves to read what changed before deciding whether to trust it."
     )
 
@@ -288,9 +351,12 @@ def reason_code(reason: str | None) -> str | None:
     """The code for one of this module's own denial texts; None for anything else."""
     if not reason:
         return None
-    if "has CHANGED since you approved it" in reason:
+    # The phrases EVERY origin's wording shares (`_anchor`), and that texts written before
+    # 2026-11-06 — spool rows, logs — also carry: "has CHANGED since you approved it" and
+    # "is not in the approved baseline for MCP server" both still classify.
+    if "has CHANGED since" in reason:
         return REASON_TOOL_CHANGED
-    if "is not in the approved baseline" in reason:
+    if "is not in the " in reason and " baseline for MCP server '" in reason:
         return REASON_TOOL_ADDED
     if "fills parameter(s)" in reason:
         return REASON_CREDENTIAL_SMUGGLED
@@ -301,16 +367,18 @@ def reason_code(reason: str | None) -> str | None:
     return None
 
 
-def human_line(server: str, tool: str, code: str | None) -> str:
+def human_line(server: str, tool: str, code: str | None, origin: str | None = None) -> str:
     """ONE line for the person at the keyboard (Claude Code shows `systemMessage` to the user).
-    Same properties as the agent text: no override, no `approve` — the agent can read this too."""
+    Same properties as the agent text: no override, no `approve` — the agent can read this too.
+    `origin` words who set the baseline (`_anchor`), exactly as the agent text does."""
+    a = _anchor(origin)
     what = {
-        REASON_TOOL_ADDED: "a tool that was not there when you approved this server",
-        REASON_TOOL_CHANGED: "its content changed since you approved it",
-        REASON_CREDENTIAL_SMUGGLED: "the call fills a credential-shaped parameter you never approved",
+        REASON_TOOL_ADDED: f"a tool that was not there {a['was_there']}",
+        REASON_TOOL_CHANGED: f"its content changed {a['since']}",
+        REASON_CREDENTIAL_SMUGGLED: f"the call fills a credential-shaped parameter {a['never']}",
         REASON_TOXIC_FLOW: "an observed sink ran after an observed source this session",
         REASON_NO_BASELINE_STRICT: "it has no baseline on this machine and the guard is strict",
-    }.get(code or "", "the approved baseline did not cover this call")
+    }.get(code or "", f"{a['covered']} did not cover this call")
     # `decide` lists changes to approved servers; a server with no baseline is named by `scan`.
     where = "mcpgawk scan" if code == REASON_NO_BASELINE_STRICT else "mcpgawk decide"
     return (f"mcpgawk blocked {server}.{tool} — {what}. "
@@ -336,22 +404,24 @@ def strict_no_baseline_reason(server: str, tool: str) -> str:
     )
 
 
-def deny_reason(server: str, tool: str) -> str:
+def deny_reason(server: str, tool: str, origin: str | None = None) -> str:
     """The canonical denial text, shared by every path that applies a declared-tier deny.
 
     Its properties are load-bearing and pinned by tests/test_approve_human_gate.py: it contains no
     executable remedy, never names any override, and tells the agent to stop and tell the user —
-    a denial that hands the agent a bypass has enforced nothing.
+    a denial that hands the agent a bypass has enforced nothing. `origin` words who set the
+    baseline (`_anchor`).
     """
+    a = _anchor(origin)
     return (
-        f"SECURITY BLOCK (mcpgawk). '{tool}' is not in the approved baseline for MCP server "
-        f"'{server}'. A tool that appeared after this server was approved is how a malicious "
+        f"SECURITY BLOCK (mcpgawk). '{tool}' is not in {a['in']} for MCP server "
+        f"'{server}'{a['note']}. A tool that appeared {a['appeared']} is how a malicious "
         f"update arrives.\n"
         f"This decision is final for this session. Do not retry it, do not call a different "
         f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
         f"baseline — approval requires the person at the keyboard, and attempting it from "
         f"inside an agent session is itself treated as a red flag.\n"
         f"Tell the user exactly this: the MCP server '{server}' added a tool called '{tool}' "
-        f"since they approved it, mcpgawk blocked the call, and they should run `mcpgawk scan` "
+        f"{a['they_added']}, mcpgawk blocked the call, and they should run `mcpgawk scan` "
         f"themselves to see what changed before deciding whether to trust it."
     )

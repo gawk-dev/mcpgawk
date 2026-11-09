@@ -45,7 +45,7 @@ def _record(tools, at):
 
 @pytest.fixture(autouse=True)
 def person(monkeypatch):
-    monkeypatch.setattr(history, "require_human_approval", lambda: None)
+    monkeypatch.setattr(history, "require_human_approval", lambda signer=None: None)
     monkeypatch.setattr(history, "approval_evidence", lambda source="cli": {
         "source": source, "terminal": True, "agent_markers": [], "agent_process": None,
         "hatch": False, "person_present": True})

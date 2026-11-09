@@ -353,6 +353,7 @@ class _DecideServer(ThreadingHTTPServer):
     the auth token."""
 
     token: str = ""
+    signer: Any = None
     note: str = ""
 
 
@@ -441,7 +442,8 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         key, action = form.get("key", ""), form.get("action", "")
         note = ""
         if action == "approve" and key:
-            rec = history.approve(key, path=history.default_path())
+            rec = history.approve(key, path=history.default_path(),
+                                  signer=self._decide_server().signer)
             note = (f"Approved. {key} is trusted again and your agents can call it."
                     if rec else f"Nothing recorded for {key} yet — scan it first.")
         elif action == "keep":
@@ -463,10 +465,19 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
     if blocked:
         log(f"mcpgawk decide: refusing — {blocked}")
         return 4
+    # LOCKED machine: the passphrase is typed once, here in the person's terminal, and the
+    # unlocked key lives only in this process for as long as the screen is open (approval_lock).
+    from .approval_lock import signer_for
+    signer, say, refused = signer_for(history.default_path())
+    for line in say:
+        log(f"mcpgawk decide: {line}")
+    if refused:
+        return 4
 
     token = secrets.token_urlsafe(24)
     httpd = _DecideServer((HOST, port), _Handler)
     httpd.token = token
+    httpd.signer = signer
     httpd.note = ""
     # The FULL token. A 6-char prefix authorised nothing, which is why the real one had to be
     # baked into every served page for the form to work — and that is how it leaked to any local

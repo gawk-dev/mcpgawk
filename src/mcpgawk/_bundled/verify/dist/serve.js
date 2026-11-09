@@ -480,7 +480,8 @@ function isLocalRequest(req) {
         return false;
     // A cross-site <img>/<script> GET sends no Origin but does send Sec-Fetch-Site; refuse it.
     const site = req.headers["sec-fetch-site"];
-    if (site === "cross-site" || site === "same-site") return false;
+    if (site === "cross-site")
+        return false;
     const origin = req.headers.origin;
     if (origin) {
         try {

@@ -206,7 +206,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             alias: str | None = None, path: str | None = None,
             annotations: dict[str, dict[str, Any]] | None = None,
             signals: dict[str, list[str]] | None = None,
-            tools_basis: int | None = None) -> None:
+            tools_basis: int | None = None, signer: Any = None) -> None:
     """Write an approval INTO the spine from another pillar.
 
     The read path (`export`) alone makes the spine a one-way mirror: verify and monitor could see
@@ -223,7 +223,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
     reached this write with no human present and exited 0, while `mcpgawk approve` — the same
     decision, the same file — correctly refused at exit 4.
     """
-    history.require_human_approval()
+    history.require_human_approval(signer=signer)
     evidence = history.approval_evidence("pillar")
     p = path or history.default_path()
     with history.locked(p):
@@ -282,6 +282,12 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         history.clear_review(entry)           # the held change is answered by this approval
         entry["approved_via"] = "approve"     # gated by require_human_approval above
         entry["approved_evidence"] = evidence
+        # Signed on a locked machine over what is STORED (the reader recomputes from the same).
+        if signer is not None:
+            entry["approved_sig"] = signer.sign(
+                history.approval_payload(key, record, entry.get("approved_at")))
+        else:
+            entry.pop("approved_sig", None)
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
         # The same approval, so the same fleet admission: a monitor approve of an appeared server
@@ -337,11 +343,12 @@ def last_pin(key: str, path: str | None = None) -> str | None:
     return str(latest.get("pin")) if latest and latest.get("pin") else None
 
 
-def approve_full(key: str, *, expect_pin: str, path: str | None = None) -> dict[str, Any] | None:
+def approve_full(key: str, *, expect_pin: str, path: str | None = None,
+                 signer: Any = None) -> dict[str, Any] | None:
     """Adopt the newest FULL sighting as the approved baseline — but only if it is the one the
     operator reviewed (`expect_pin`). None when there is no such record: the caller then falls back
     to `publish`, which can only carry hashes. Gated like every approve."""
-    return history.approve(key, path=path, expect_pin=expect_pin)
+    return history.approve(key, path=path, expect_pin=expect_pin, signer=signer)
 
 
 def resolve(name: str, path: str | None = None) -> str | None:

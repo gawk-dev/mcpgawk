@@ -5005,8 +5005,10 @@ def state(d: dict[str, Any] | None = None) -> dict[str, Any]:
         "verify_blocked": d.get("verify_blocked"),
         # The UI must know whether an action is POSSIBLE before it offers it. A button that is
         # rendered and then refuses is the thing this layer exists to stop.
-        "can_act": _b.approval_blocked_reason() is None,
-        "act_blocked_reason": _b.approval_blocked_reason(),
+        # ONE call: since 2026-11-06 the gate walks the process table (`ps`), and this payload is
+        # rebuilt on every state poll. Dict displays evaluate left to right, so both keys see it.
+        "can_act": (_act_blocked := _b.approval_blocked_reason()) is None,
+        "act_blocked_reason": _act_blocked,
         "errors": d.get("errors") or {},
     }
 

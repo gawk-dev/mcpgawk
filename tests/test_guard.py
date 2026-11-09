@@ -11,6 +11,7 @@ Two things get pinned here that are easy to get wrong and expensive to get wrong
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,14 @@ from mcpgawk.guard_hook import approved_for, decide, parse_mcp_tool_name
 
 HOOK_SCRIPT = Path(guard.hook_script_path())
 
+
+
+def _test_harness_env() -> dict[str, str]:
+    """The test-only harness variables a from-scratch child env must still carry: PYTHONPATH to
+    tests/fixtures/ci_ancestry and MCPGAWK_TEST_ANCHOR_DIR — CI's process tree and no approval
+    anchor (see tests/conftest.py). The product reads neither."""
+    return {k: os.environ[k] for k in ("PYTHONPATH", "MCPGAWK_TEST_ANCESTRY",
+                                       "MCPGAWK_TEST_ANCHOR_DIR") if k in os.environ}
 
 def _store(tmp_path: Path, servers: dict) -> Path:
     """Written through the CANONICAL writer (history.save), which also regenerates the hot-path
@@ -35,9 +44,13 @@ def _store(tmp_path: Path, servers: dict) -> Path:
 
 
 def _approved(tools: dict[str, str], aliases: list[str] | None = None) -> dict:
-    # Mirrors what baseline.publish() actually writes: `aliases` is a SIBLING of `approved`.
+    # Mirrors what baseline.publish() actually writes: `aliases` is a SIBLING of `approved`, and
+    # `approved_via: "approve"` marks a person's approval (baseline.py). Without the marker the
+    # record is "unknown origin" and, since 2026-11-06, every denial says so instead of claiming
+    # "you approved it" — the helper had omitted it, so these tests pinned the false claim.
     rec: dict = {"approved": {"pin": "abc123", "tools": tools,
-                              "measured_at": "2026-07-27T00:00:00Z"}}
+                              "measured_at": "2026-07-27T00:00:00Z"},
+                 "approved_via": "approve"}
     if aliases:
         rec["aliases"] = aliases
     return rec
@@ -287,7 +300,7 @@ def test_the_projection_name_matches_the_canonical_writer(tmp_path):
 def _run_hook(event: dict, store: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(HOOK_SCRIPT)], input=json.dumps(event), text=True,
-        capture_output=True, env={"MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
+        capture_output=True, env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
                                  "HOME": str(store.parent)}, timeout=60,
     )
 
@@ -309,7 +322,7 @@ def test_hook_exits_zero_and_stays_silent_on_garbage_input(tmp_path):
                               capture_output=True, timeout=60,
                               # HOME too: without it the child resolves ~ to the DEVELOPER's real
                               # home and writes ~/.mcpgawk state, which the suite tripwire catches.
-                              env={"MCPGAWK_HISTORY": str(store), "HOME": str(store.parent)})
+                              env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "HOME": str(store.parent)})
         assert proc.returncode == 0, bad
         assert proc.stdout.strip() == "", bad
 
@@ -724,7 +737,7 @@ def test_the_person_line_is_claude_code_only(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(HOOK_SCRIPT), "--format", "cursor"],
         input=json.dumps({"tool_name": "mcp__figma__evil", "tool_input": {}}), text=True,
-        capture_output=True, env={"MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
+        capture_output=True, env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
                                  "HOME": str(store.parent)}, timeout=60)
     payload = json.loads(proc.stdout)
     assert payload["permission"] == "deny" and "systemMessage" not in payload
@@ -735,7 +748,7 @@ def test_the_person_line_is_claude_code_only(tmp_path):
 def _hook(event: dict, store: Path, fmt: str = "claude") -> subprocess.CompletedProcess:
     argv = [sys.executable, str(HOOK_SCRIPT)] + (["--format", fmt] if fmt != "claude" else [])
     return subprocess.run(argv, input=json.dumps(event), text=True, capture_output=True, timeout=60,
-                          env={"MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
+                          env={**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "PATH": "/usr/bin:/bin",
                                "HOME": str(store.parent)})
 
 

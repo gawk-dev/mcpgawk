@@ -310,6 +310,64 @@ def tools_comparable(server: str, store_path: Path) -> bool:
     return "seen_not_compared" not in record
 
 
+#: Where approval_lock keeps the anchor, duplicated ONLY as the fail-closed fallback for when that
+#: module cannot be loaded (pinned equal to approval_lock.ANCHOR_DIRS/ANCHOR_FILE by
+#: tests/test_guard_locked_signatures.py). A hook that could not load the lock code and then read
+#: "not locked" would be fail-open on exactly the machine that locked itself.
+_ANCHOR_FALLBACK = {"darwin": "/Library/Application Support/mcpgawk/approval-anchor.json",
+                    "linux": "/etc/mcpgawk/approval-anchor.json"}
+
+def _lock_module():
+    """approval_lock — the package's copy when it is already imported (in-process callers and
+    tests), else loaded by path like every sibling here. Stdlib-only at import."""
+    return sys.modules.get("mcpgawk.approval_lock") or _load_sibling("approval_lock")
+
+
+def _lock_state() -> bytes | None:
+    """None: this machine is not locked. bytes: LOCKED — the anchor's public key, or b"" when it is
+    locked but the key cannot be read here (every row then fails to verify: deny, never defer).
+    NOT cached: a long-running reader (the gateway filter) must see a lock made after it started,
+    and the cost is one stat and one small read."""
+    plat = "darwin" if sys.platform == "darwin" else ("linux" if sys.platform.startswith("linux")
+                                                       else "")
+    fallback = _ANCHOR_FALLBACK.get(plat)
+    mod = _lock_module()
+    state: bytes | None = None
+    try:
+        if mod is None:
+            raise RuntimeError("approval_lock could not be loaded")
+        state = mod.trusted_public_key()
+    except Exception:                               # noqa: BLE001 - see below
+        # The lock code failed. If an anchor file sits at the fixed path, the person locked this
+        # machine: refuse everything (b"") rather than read "not locked".
+        state = b"" if fallback and os.path.exists(fallback) else None
+    return state
+
+
+def _signed(key: str, row: dict, public_key: bytes) -> bool:
+    """Whether this projection row's approval verifies against the anchor's key, over the payload
+    rebuilt from the row itself (approval_lock.payload — the writer's own definition)."""
+    if not public_key or not isinstance(row.get("tools"), dict):
+        return False
+    mod = _lock_module()
+    if mod is None:
+        return False
+    try:
+        return bool(mod.verify(public_key, mod.payload(key, row.get("tools"), row.get("props"),
+                                                       row.get("approved_at")), row.get("sig")))
+    except Exception:                               # noqa: BLE001 - cannot verify = not signed
+        return False
+
+
+#: The refusal on a locked machine. Names no override: the person approves in their own terminal.
+LOCKED_REFUSAL = ("this machine is locked, and {server} has no approval signed with the approval "
+                  "passphrase that this machine can verify, so mcpgawk refuses every call to it "
+                  "until the person at this machine reviews and approves it.")
+LOCKED_HUMAN = ("mcpgawk blocked {server}.{tool} — this machine is locked and {server} has no "
+                "approval signed with your passphrase. Review it, then approve it in your own "
+                "terminal.")
+
+
 def _strict(store_path: Path) -> bool:
     """Whether the projection says the guard is in strict mode. Read only when a call has no
     baseline, so the common path pays nothing for it. Unreadable → False: the projection reader
@@ -397,6 +455,27 @@ def _could_be_adhoc_target(name: str) -> bool:
     return "/" in name or any(c.isspace() for c in name)
 
 
+#: A pass on a LOCKED machine for a server the person allowed BY NAME ONLY (history.approve_name_only).
+#: Carried as the lookup's note, so the agent's context line says the call was not checked.
+NAME_ONLY_NOTE = ("you allowed {server} by name only, without a tool list, so its tools are not "
+                  "checked for drift")
+
+
+def _name_only_signed(server: str, raw: dict, public_key: bytes) -> bool:
+    """Whether a FRESH projection carries a name-only approval for exactly `server` whose signature
+    verifies over approval_lock.name_only_payload. The name is matched as the agent sent it."""
+    rows = raw.get("name_only")
+    row = rows.get(server) if isinstance(rows, dict) else None
+    mod = _lock_module()
+    if not isinstance(row, dict) or not public_key or mod is None:
+        return False
+    try:
+        return bool(mod.verify(public_key, mod.name_only_payload(server, row.get("approved_at")),
+                               row.get("sig")))
+    except Exception:                               # noqa: BLE001 - cannot verify = not approved
+        return False
+
+
 def _lookup(server: str, store_path: Path, *,
             rewritten: bool = True) -> tuple[dict | None, str | None, bool, list[tuple[str, dict]]]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
@@ -427,6 +506,23 @@ def _lookup(server: str, store_path: Path, *,
         history_stat = os.stat(store_path)
     except OSError:
         history_stat = None
+    # LOCKED (approval_lock, design §4.1 slice 2): nothing defers. Every reason this reader would
+    # stand down — no projection, unreadable, stale (a hand-edited store, measured run 3) — is a
+    # refusal instead, and only rows whose signature verifies count as approved.
+    lock = _lock_state()
+    if lock is not None:
+        record, note, refuse, others = _lookup_unlocked(server, store_path, proj, history_stat,
+                                                        rewritten=rewritten, public_key=lock)
+        if record is None and note == NAME_ONLY_NOTE.format(server=server):
+            return None, note, False, []             # allowed by name only, by the person
+        return record, note, True if record is None else refuse, others
+    return _lookup_unlocked(server, store_path, proj, history_stat, rewritten=rewritten)
+
+
+def _lookup_unlocked(server: str, store_path: Path, proj: Path, history_stat, *,
+                     rewritten: bool = True, public_key: bytes | None = None
+                     ) -> tuple[dict | None, str | None, bool, list[tuple[str, dict]]]:
+    """`_lookup`'s body. `public_key` set = locked: unsigned rows are dropped before resolution."""
 
     try:
         raw = json.loads(proj.read_text(encoding="utf-8"))
@@ -458,6 +554,12 @@ def _lookup(server: str, store_path: Path, *,
     servers = raw.get("servers")
     if not isinstance(servers, dict):
         return None, None, True, []
+    if public_key is not None:
+        # An unsigned or forged row is "never approved" here: resolution then finds no baseline,
+        # and `_lookup` turns that into a refusal. Identities are kept, so names still resolve
+        # exactly as `history.resolve` would — to a record that is no longer trusted.
+        servers = {k: r for k, r in servers.items()
+                   if isinstance(r, dict) and _signed(k, r, public_key)}
     identities = raw.get("identities")
     placeholders = raw.get("placeholder_names")
     if isinstance(identities, dict) and isinstance(placeholders, list):
@@ -465,6 +567,15 @@ def _lookup(server: str, store_path: Path, *,
                                                         rewritten=rewritten)
     else:
         record, note, refuse = _resolve_over_approved_only(server, servers)
+    tracked = isinstance(identities, dict) and any(
+        server in _record_names(k, a) for k, a in identities.items() if isinstance(k, str))
+    if (public_key is not None and record is None and not tracked
+            and _name_only_signed(server, raw, public_key)):
+        # Reached only on a FRESH projection where NO record — signed or not — answers to this
+        # name: a server mcpgawk has seen is approved the normal way, never by name (a name-only
+        # approval made before its first scan stops counting at that scan). A stale or unreadable
+        # store returned above.
+        return None, NAME_ONLY_NOTE.format(server=server), False, []
     others = [(key, row) for key, row in sorted(servers.items())
               if isinstance(row, dict) and row is not record and not row.get("unreadable")
               and isinstance(row.get("tools"), dict)
@@ -601,10 +712,49 @@ def _row_evidence(record: dict | None, tool: str):
     return approved, approved_props, seen_hash, seen_at, grown, reverted
 
 
+def _row_origin(record: dict | None) -> str | None:
+    """How this row's baseline was set, as the projection carries it; None when it does not say
+    (an older writer), so the core claims nothing either way."""
+    o = record.get("origin") if isinstance(record, dict) else None
+    return o if isinstance(o, str) and o else None
+
+
+def projected_origin(server: str, store_path: Path) -> str | None:
+    """`_row_origin` of the row the hook would judge `server` by — for the paid gateway, so its
+    denials word who set the baseline exactly as the hook's do. None when unknown; never raises."""
+    try:
+        record, _note = _record_from_projection(server, store_path)
+    except Exception:                               # noqa: BLE001 — wording is optional, never a crash
+        return None
+    return _row_origin(record)
+
+
+def _human(core, server: str, tool: str, reason: str | None, origin: str | None) -> str | None:
+    """The person's one line, worded from the same origin as the agent text. An older core
+    lacks the helper or the keyword; the deny stands without the line rather than failing."""
+    line_fn = getattr(core, "human_line", None)
+    code_fn = getattr(core, "reason_code", None)
+    if not (callable(line_fn) and callable(code_fn)):
+        return None
+    try:
+        return line_fn(server, tool, code_fn(reason), origin=origin)
+    except TypeError:
+        return line_fn(server, tool, code_fn(reason))
+
+
 def _judge(core, server: str, tool: str, record: dict | None, observations, sources, args):
     """`core.verdict` against ONE projection row, tolerant of an older decision core."""
     approved, approved_props, seen_hash, seen_at, grown, reverted = _row_evidence(record, tool)
     args = args if isinstance(args, dict) else None
+    # WHO SET THE BASELINE (projection `origin`, history.baseline_origin) words the denial — never
+    # the decision. An older core without the keyword falls through to the chain below unchanged.
+    origin = _row_origin(record)
+    try:
+        return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
+                            args=args, approved_props=approved_props, seen_at=seen_at,
+                            permission_changes=grown, reverted=reverted, origin=origin)
+    except TypeError:
+        pass
     if reverted:
         try:
             return core.verdict(server, tool, approved, observations, sources,
@@ -653,8 +803,9 @@ def _collision_reason(core_reason: str, server: str, label: str, tool: str) -> s
 def _attribute(reason: str, server: str, key: str) -> str:
     """A deny that came from an approved record OTHER than the one `history.resolve` picks for the
     name says whose baseline refused it — the operator otherwise reads a block on `server` and
-    looks at the wrong record. Adds a fact only: no remedy, no override."""
-    return (f"{reason}\n(Refused by the approved baseline of '{key}', a server that answers to "
+    looks at the wrong record. Adds a fact only: no remedy, no override. "the baseline", not "the
+    approved baseline": the core's line above already says who set it (2026-11-06)."""
+    return (f"{reason}\n(Refused by the baseline of '{key}', a server that answers to "
             f"the name '{server}' in your agent config.)")
 
 
@@ -689,6 +840,14 @@ def _decide(event: dict, store_path: Path | None,
         server, store, rewritten=fmt not in RAW_SERVER_NAME_FORMATS)
     approved, _props, _seen, seen_at, _grown, _reverted = _row_evidence(record, tool)
 
+    # LOCKED: no verifiable signed approval for this name is a refusal — the strict mode the person
+    # chose by locking (FOUNDER 2026-11-06 "1 yes"), independent of `guard install --strict`.
+    # BEFORE the core load: on a locked machine an unloadable core must not turn into a defer.
+    if strict_refuse and _lock_state() is not None:
+        reason = LOCKED_REFUSAL.format(server=server)
+        return (_deny(fmt, reason, LOCKED_HUMAN.format(server=server, tool=tool)), None,
+                "declared", True, reason, None)
+
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
     # verdict, and "we found nothing" is defer, not deny.
@@ -704,11 +863,7 @@ def _decide(event: dict, store_path: Path | None,
     strict_fn = getattr(core, "strict_no_baseline_reason", None)
     if strict_refuse and callable(strict_fn) and _strict(store):
         reason = strict_fn(server, tool)
-        human = None
-        line_fn = getattr(core, "human_line", None)
-        code_fn = getattr(core, "reason_code", None)
-        if callable(line_fn) and callable(code_fn):
-            human = line_fn(server, tool, code_fn(reason))
+        human = _human(core, server, tool, reason, None)      # no baseline: nobody set one
         return _deny(fmt, reason, human), None, "declared", True, reason, None
 
     # The behavioural tier (free since Task 0): observations verify recorded for THIS server,
@@ -725,6 +880,7 @@ def _decide(event: dict, store_path: Path | None,
         sources = _session_sources(_session_id(event), behaviour)
 
     verdict, basis, reason = _judge(core, server, tool, record, observations, sources, _args)
+    deny_origin = _row_origin(record)        # the row whose baseline the denial speaks of
     collision: str | None = None
     if verdict != core.DENY:
         # MOST RESTRICTIVE ACROSS EVERY CANDIDATE. `record` is what `history.resolve` picks; every
@@ -740,6 +896,7 @@ def _decide(event: dict, store_path: Path | None,
                     collision = label
                     r = _collision_reason(r, server, label, tool)
                 verdict, basis, reason = v, b, _attribute(r, server, key)
+                deny_origin = _row_origin(row)
                 break
     # Checked means there was something to check AGAINST: an approved surface for this server, or
     # recorded observations of it. With neither, `verdict` had no evidence and whatever it returned
@@ -748,11 +905,7 @@ def _decide(event: dict, store_path: Path | None,
     if verdict == core.DENY:
         # One line for the PERSON, beside the prose for the agent. Older cores lack the helper;
         # the deny stands without the line rather than the hook failing.
-        human = None
-        line_fn = getattr(core, "human_line", None)
-        code_fn = getattr(core, "reason_code", None)
-        if callable(line_fn) and callable(code_fn):
-            human = line_fn(server, tool, code_fn(reason))
+        human = _human(core, server, tool, reason, deny_origin)
         if collision:
             human = (f"mcpgawk blocked {server}.{tool} — your agent calls two servers '{server}', and "
                      f"'{collision}' does not allow this call. Rename one of them in the agent config.")

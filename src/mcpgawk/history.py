@@ -150,6 +150,15 @@ def approval_blocked_reason() -> str | None:
                 f"baseline is a decision for the person at the keyboard, not for the assistant — "
                 f"a blocked tool call is exactly when an agent would be asked to approve its way "
                 f"past one. Run this yourself in your own terminal.")
+    # AN AGENT ABOVE US, markers stripped. MEASURED 2026-11-05 (docs/design-approve-presence-
+    # 2026-11-05.md run 2): `env -u <markers> script -q /dev/null mcpgawk approve` from an agent's
+    # tool call moved the baseline — this walk saw `claude` and only RECORDED it. Refused here,
+    # before the hatch, which cannot waive it. Evidence, not proof (see AGENT_PROCESS_NAMES); the
+    # message names the agent and never how it was found.
+    proc = agent_process()
+    if proc:
+        return (f"{proc} is running this. Moving the trusted baseline is a decision for the person "
+                f"at the keyboard, not for the assistant. Run this yourself in your own terminal.")
     if os.environ.get(APPROVE_OVERRIDE_ENV) == "1":
         return None
     if not _stdin_is_tty():
@@ -158,16 +167,102 @@ def approval_blocked_reason() -> str | None:
     return None
 
 
-def require_human_approval() -> None:
-    """Raise `ApprovalBlocked` unless a human is demonstrably present.
+#: What a locked machine says to a writer that holds no unlocked key. Names the person and the
+#: terminal, never a flag or a file: an agent reading this learns nothing it can set.
+LOCKED_NEEDS_PASSPHRASE = ("this machine requires the approval passphrase to approve. Run this "
+                           "yourself in your own terminal and type it when asked.")
 
-    The single call every function that moves a trusted baseline must make.
-    `tests/test_baseline_writer_gate_invariant.py` enumerates those functions and fails the build
-    if one of them stops making it.
+
+def require_human_approval(signer: Any = None) -> None:
+    """Raise `ApprovalBlocked` unless a human is demonstrably present — and, on a LOCKED machine,
+    unless `signer` is an unlocked approval key the anchor trusts (approval_lock, FOUNDER 2026-11-06).
+
+    The single call every function that moves a trusted baseline must make, passing the signer it
+    holds (None when it holds none). `tests/test_baseline_writer_gate_invariant.py` enumerates those
+    functions and fails the build if one stops making it, or stops passing `signer=`.
     """
     reason = approval_blocked_reason()
     if reason is not None:
         raise ApprovalBlocked(reason)
+    from . import approval_lock
+    anchor = approval_lock.read_anchor()
+    if anchor.status == "trusted":
+        if signer is None:
+            raise ApprovalBlocked(LOCKED_NEEDS_PASSPHRASE)
+        if getattr(signer, "public_key", None) != anchor.public_key:
+            raise ApprovalBlocked("the approval key in use is not the one this machine's anchor "
+                                  "trusts, so nothing was approved.")
+
+
+def approval_payload(key: str, rec: dict[str, Any], approved_at: Any) -> dict[str, Any]:
+    """EXACTLY what enforcement reads from an approval, so a signature over it covers every input
+    the guard decides on (design §4.1): the server key, the tool hashes, the approved parameter
+    names in the projection's own shape, and when. Recomputed identically from a projection row."""
+    from . import approval_lock
+    return approval_lock.payload(key, rec.get("tools"), projected_props(rec), approved_at)
+
+
+def projected_props(rec: dict[str, Any]) -> dict[str, list] | None:
+    """`{tool: [param, …]}` from an approved record's `props`, the shape the projection carries."""
+    props = rec.get("props")
+    if not isinstance(props, dict):
+        return None
+    return {ident[len("tool."):]: list(v) for ident, v in props.items()
+            if isinstance(ident, str) and ident.startswith("tool.") and isinstance(v, list)}
+
+
+def signature_state(store: dict[str, Any], key: str) -> str | None:
+    """None on an unlocked machine. Locked: "valid" when this server's approval carries a signature
+    the anchor's key verifies over `approval_payload`, "missing" when it carries none, "invalid"
+    otherwise (tampered, or signed by another key)."""
+    from . import approval_lock
+    anchor = approval_lock.read_anchor()
+    if anchor.status != "trusted":
+        return None
+    e = (store.get("servers") or {}).get(key) or {}
+    rec = e.get("approved")
+    sig = e.get("approved_sig")
+    if not isinstance(rec, dict) or not sig:
+        return "missing"
+    ok = approval_lock.verify(anchor.public_key, approval_payload(key, rec, e.get("approved_at")), sig)
+    return "valid" if ok else "invalid"
+
+
+def needs_signature(store: dict[str, Any]) -> list[str]:
+    """On a locked machine: every server holding a baseline that carries no valid signature — a
+    first sighting, an approval from before the lock, or a record nobody signed (an edit to the
+    store). Each waits for the person. Empty on an unlocked machine."""
+    from . import approval_lock
+    if not approval_lock.locked():
+        return []
+    return sorted(k for k, e in (store.get("servers") or {}).items()
+                  if isinstance(e, dict) and isinstance(e.get("approved"), dict)
+                  and signature_state(store, k) != "valid")
+
+
+def sign_approvals(keys: "list[str]", signer: Any, path: str | None = None) -> list[str]:
+    """Sign the CURRENT approved baseline of each key, moving nothing. Used once, by
+    `approvals lock`, for approvals made before the lock: the person lists them and says yes.
+    Gated like every approval, because a signature is what a locked machine trusts."""
+    require_human_approval(signer=signer)
+    path = path or default_path()
+    signed: list[str] = []
+    with locked(path):
+        store = load(path)
+        for key in keys:
+            entry = (store.get("servers") or {}).get(key)
+            if not (isinstance(entry, dict) and isinstance(entry.get("approved"), dict)):
+                continue
+            # A PERSON'S APPROVAL only. A first sighting has no approval to vouch for, and giving
+            # it an `approved_at` here would turn it into "you approved it" with no decision made;
+            # it is approved the normal way (`mcpgawk approve`), which records what was accepted.
+            if not entry.get("approved_at"):
+                continue
+            entry["approved_sig"] = signer.sign(
+                approval_payload(key, entry["approved"], entry["approved_at"]))
+            signed.append(key)
+        save(store, path)
+    return signed
 
 
 #: Agents whose children are the agent's own tool calls. MEASURED: `claude` (Claude Code 2.1.289,
@@ -608,6 +703,16 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             approved_at = entry.get("approved_at")
             if isinstance(approved_at, str):
                 row["approved_at"] = approved_at      # for the confidence line; absent = not recorded
+            # WHO SET THIS BASELINE, so a denial words it as the scan does (`baseline_origin`, the
+            # one rule). "unknown" = this rule could not tell; an absent field = an older writer,
+            # and the core then claims nothing either way (decision._anchor). Found 2026-11-06:
+            # every denial said "since you approved it" of first-sighting baselines.
+            row["origin"] = baseline_origin(store, key) or "unknown"
+            # THE SIGNATURE, carried verbatim: on a LOCKED machine the guard hook rebuilds
+            # approval_lock.payload from this row and refuses the server unless it verifies against
+            # the anchor (design §4.1 slice 2). Unsigned rows carry nothing; the hook decides.
+            if entry.get("approved_sig"):
+                row["sig"] = entry["approved_sig"]
             sightings = entry.get("history")
             last = sightings[-1] if isinstance(sightings, list) and sightings else None
             # ONLY when the two maps were minted by the SAME RULE. `baseline.publish` (monitor
@@ -687,7 +792,12 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
                       "placeholder_names": sorted(SYNTHETIC_NAMES),
                       # STRICT rides in the same file the hook already trusts, so the hook needs no
                       # second reader of history.json to know whether "no baseline" means deny.
-                      "guard": {"strict": guard_strict(store)}}
+                      "guard": {"strict": guard_strict(store)},
+                      # NAME-ONLY approvals (approve_name_only): the name and the signature, nothing
+                      # else. The hook consults these only on a LOCKED machine and only when no
+                      # signed server row answers to the name.
+                      "name_only": {n: {"approved_at": r.get("approved_at"), "sig": r.get("sig")}
+                                    for n, r in name_only_approvals(store).items()}}
         proj = projection_path(path)
         tmp = f"{proj}.{os.getpid()}.tmp"
         try:
@@ -1036,9 +1146,38 @@ def change_words(change: Any) -> str | None:
     return ", ".join(parts) or "no change to its tools since the previous approval"
 
 
+def name_only_approvals(store: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Servers allowed BY NAME ONLY on a locked machine: `{name: {approved_at, sig, ...}}`."""
+    raw = store.get("name_only")
+    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, dict)} \
+        if isinstance(raw, dict) else {}
+
+
+def approve_name_only(name: str, signer: Any, path: str | None = None) -> dict[str, Any]:
+    """Allow calls to a server mcpgawk has NEVER SEEN — one built into the agent (claude-in-chrome),
+    in no config a scan reads — by its name alone, on a LOCKED machine. Before the lock such a
+    server deferred (allowed, unchecked); locked, it was refused with no way to approve it
+    (FOUNDER 2026-11-06: build name-only approve). This restores "allowed, unchecked" — but only by
+    the person, with the passphrase. No tool list is recorded, so nothing about it is drift-checked,
+    and every surface that shows it says so. The caller refuses a name `resolve` finds: a tracked
+    server is approved the normal way, never by name."""
+    require_human_approval(signer=signer)
+    from . import approval_lock
+    path = path or default_path()
+    approved_at = _now_iso()
+    with locked(path):
+        store = load(path)
+        row = {"approved_at": approved_at, "approved_via": "approve",
+               "evidence": approval_evidence("cli"),
+               "sig": signer.sign(approval_lock.name_only_payload(name, approved_at))}
+        store.setdefault("name_only", {})[name] = row
+        save(store, path)
+    return row
+
+
 def approve(key: str, path: str | None = None, *,
             expect_pin: str | None = None, source: str = "cli",
-            reason: str | None = None) -> dict[str, Any] | None:
+            reason: str | None = None, signer: Any = None) -> dict[str, Any] | None:
     """Adopt the most recent sighting of `key` as the approved baseline. Returns it.
 
     The explicit acknowledgement ADR-0012 requires. Until this runs, drift keeps reporting — and
@@ -1047,8 +1186,11 @@ def approve(key: str, path: str | None = None, *,
 
     Gated at the WRITE, not only at the command. Every caller already checks — but "every caller
     checks" is a property that decays the moment someone adds a caller, and it did.
+
+    `signer` is the unlocked approval key (approval_lock); a locked machine refuses without it, and
+    the approval it writes carries the signature every reader checks.
     """
-    require_human_approval()
+    require_human_approval(signer=signer)
     evidence = approval_evidence(source)
     path = path or default_path()
     with locked(path):
@@ -1094,6 +1236,12 @@ def approve(key: str, path: str | None = None, *,
         entry["approved_by"] = _operator()
         entry["approved_via"] = "approve"
         entry["approved_evidence"] = evidence
+        # SIGNED on a locked machine (the gate above refused without a trusted signer); on an
+        # unlocked one any old signature goes, since it vouched for a record that is now replaced.
+        if signer is not None:
+            entry["approved_sig"] = signer.sign(approval_payload(key, latest, entry["approved_at"]))
+        else:
+            entry.pop("approved_sig", None)
         admit_to_fleet(store, key)
         save(store, path)
     return latest
@@ -1125,6 +1273,17 @@ def approval_provenance(store: dict[str, Any], key: str) -> tuple[str | None, st
 
 
 def baseline_origin(store: dict[str, Any], key: str) -> str | None:
+    """How a server's baseline was set (`_baseline_origin_unsigned_blind`), and on a LOCKED machine
+    "unsigned" for any approval that carries no valid signature (approval_lock, FOUNDER 2026-11-06):
+    an approval this machine cannot verify is never said as the person's. A first sighting keeps
+    its own words — it was never an approval, signed or not."""
+    origin = _baseline_origin_unsigned_blind(store, key)
+    if origin != "first-sighting" and signature_state(store, key) in ("missing", "invalid"):
+        return "unsigned"
+    return origin
+
+
+def _baseline_origin_unsigned_blind(store: dict[str, Any], key: str) -> str | None:
     """How a server's baseline was set — THE one rule every surface words its change from:
 
     * "approve": a person ran `mcpgawk approve` (or `approve --fleet` adopted it while held);
@@ -1238,6 +1397,10 @@ def changed_head(origin: "str | None", when: "str | None") -> str:
     if origin == "unattended":
         # Approved with no person present: "you approved it" claims a decision nobody made.
         return f"changed since its baseline, approved{w} without a person present"
+    if origin == "unsigned":
+        # A locked machine, and an approval no valid signature vouches for (approval_lock).
+        return (f"changed since its baseline, recorded{w}; this machine cannot verify who approved it"
+                if when else "changed since its baseline; this machine cannot verify who approved it")
     if origin == "fleet":
         # First seen, then accepted by `approve --fleet`: the date is the sighting's, said so.
         return f"changed since first seen{w}, the baseline your fleet approval accepted"
@@ -2184,10 +2347,11 @@ def admit_to_fleet(store: dict[str, Any], key: str,
 
 
 def approve_fleet(discovered: dict[str, Any],
-                  path: str | None = None) -> tuple[int, list[str]]:
+                  path: str | None = None, *, signer: Any = None) -> tuple[int, list[str]]:
     """Record `discovered` as the approved fleet, and adopt every held sighting. Returns (number of
-    fleet entries, keys adopted). Gated exactly like `approve`: this moves trust."""
-    require_human_approval()
+    fleet entries, keys adopted). Gated exactly like `approve`: this moves trust — and on a locked
+    machine each adopted server's approval is signed, as `approve` signs."""
+    require_human_approval(signer=signer)
     evidence = approval_evidence()
     path = path or default_path()
     entries = fleet_targets(discovered)
@@ -2210,6 +2374,10 @@ def approve_fleet(discovered: dict[str, Any],
             entry["approved_by"] = _operator()
             entry["approved_via"] = "approve"
             entry["approved_evidence"] = evidence
+            if signer is not None:
+                entry["approved_sig"] = signer.sign(approval_payload(key, latest, now))
+            else:
+                entry.pop("approved_sig", None)
             adopted.append(key)
         save(store, path)
     return len(entries), adopted

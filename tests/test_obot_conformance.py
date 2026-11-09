@@ -120,7 +120,9 @@ async def test_a_tool_outside_the_baseline_is_actually_stopped(tmp_path):
     store = _store(tmp_path, {"figma": _approved({"get_file": "h1"})})
     outcome, reason = await _gateway(store, "figma", _tools_call("delete_everything"))
     assert outcome == BLOCKED
-    assert "not in the approved baseline" in reason
+    # The added-tool denial, by its code: its words follow who set the baseline (2026-11-06).
+    from mcpgawk import decision
+    assert decision.reason_code(reason) == decision.REASON_TOOL_ADDED, reason
 
 
 @pytest.mark.asyncio

@@ -59,7 +59,10 @@ def test_demo_guard_blocks_both_the_rewritten_tool_and_the_new_tool(tmp_path, ca
     assert '"permissionDecision": "deny"' in pulled.stdout, \
         "the guard did not block the approved tool whose content changed"
     pulled_reason = json.loads(pulled.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "CHANGED since you approved it" in pulled_reason
+    # The sandbox approves with no terminal (the CI hatch), so the record says no person was
+    # present — and since 2026-11-06 the guard says what the record says, never "you approved it".
+    assert "has CHANGED since its baseline, approved without a person present" in pulled_reason
+    assert "you approved" not in pulled_reason and "they approved" not in pulled_reason
     assert "last seen" in pulled_reason and "not this call" in pulled_reason
     assert "mcpgawk approve" not in pulled_reason
     assert '"permissionDecision": "deny"' in blocked.stdout, \
@@ -69,12 +72,56 @@ def test_demo_guard_blocks_both_the_rewritten_tool_and_the_new_tool(tmp_path, ca
 
 
 def test_demo_discloses_the_non_interactive_approval_hatch(tmp_path, capsys):
-    """The sandbox waives the human-at-the-keyboard rule; the demo must say so, or it teaches a
-    false sense of how `approve` behaves on a real fleet."""
+    """The sandbox waives the terminal check; the demo must say so, or it teaches a false sense of
+    how `approve` behaves on a real fleet. It must not claim to waive the agent check (2026-11-06:
+    nothing in the sandbox does)."""
     rc = _run(tmp_path)
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "person at the keyboard" in out
+    assert "refuses inside an agent session" in out and "skips the terminal check" in out
+    assert "waives that" not in out
+
+
+def _as_agent(monkeypatch):
+    """The demo run BY an agent: every sandbox child sees `claude` above it (test-only emulation,
+    tests/fixtures/ci_ancestry), with the env markers already gone as they are in any suite run."""
+    monkeypatch.setenv("MCPGAWK_TEST_ANCESTRY", "zsh,claude,-zsh,login")
+
+
+def test_demo_run_by_an_agent_shows_the_refusal_and_still_completes(tmp_path, capsys, monkeypatch):
+    """MEASURED 2026-11-06: once approve refused an agent ancestor, the demo stopped at step 2
+    ("approve did not succeed") for every agent that ran it. Run by an agent it now shows mcpgawk's
+    own refusal, walks on from the first scan's baseline and never narrates "you approve"."""
+    _as_agent(monkeypatch)
+    rc = _run(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Your agent tries to approve it" in out and "claude is running this" in out
+    assert "You approve it" not in out and "refuse your agent's approval" in out
+    box = _Sandbox(tmp_path / "box")
+    rec = json.loads(box.history.read_text())["servers"][f"mcp:{SERVER}"]
+    assert sorted(rec["approved"]["tools"]) == ["read_notes"]
+    assert rec.get("approved_via") != "approve" and "approved_evidence" not in rec, \
+        "a refused approval must leave the first scan's baseline exactly as it was"
+    pulled, blocked = box.guard("read_notes"), box.guard("exfiltrate_notes")
+    assert '"permissionDecision": "deny"' in pulled.stdout
+    assert '"permissionDecision": "deny"' in blocked.stdout
+
+
+def test_the_guard_never_says_you_approved_a_baseline_nobody_approved(tmp_path, capsys,
+                                                                       monkeypatch):
+    """FOUND 2026-11-06 by the agent-run demo: both denials said "since you approved it" /
+    "since they approved it" of a first-sighting baseline, while the scan printed just above them
+    said "you have not approved this server yet". Pinned strict-xfail until decision.py worded
+    from the projection's `origin`; now a plain test."""
+    _as_agent(monkeypatch)
+    assert _run(tmp_path) == 0, capsys.readouterr().out
+    box = _Sandbox(tmp_path / "box")
+    for tool in ("read_notes", "exfiltrate_notes"):
+        reason = json.loads(box.guard(tool).stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "you approved" not in reason and "they approved" not in reason, reason
+        assert "you have not approved this server yet" in reason or \
+            "they have not approved this server yet" in reason, reason
 
 
 def test_demo_clean_flag_removes_the_sandbox(tmp_path, capsys):
@@ -91,7 +138,7 @@ def test_demo_runs_from_the_shipped_entry_point(tmp_path):
         [sys.executable, "-m", "mcpgawk.cli", "demo", "--sandbox", str(box), "--clean"],
         capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
-    assert "BLOCKED" in r.stdout and "CHANGED since you approved" in r.stdout
+    assert "BLOCKED" in r.stdout and "has CHANGED since" in r.stdout
 
 
 def test_the_demo_sandbox_can_actually_be_verified(tmp_path):

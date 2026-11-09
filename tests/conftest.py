@@ -90,23 +90,74 @@ def _a_keychain_call_fails_the_test(_never_the_real_keychain):
                      "suite refused it; force GAWK_OAUTH_KEY_BACKEND=file or fake subprocess.run")
 
 
+#: Test-only sitecustomize giving Python children the process tree a test chose (2026-11-06: the
+#: gate refuses an agent ANCESTOR, and a developer's run has one). Never on a user's PYTHONPATH.
+CI_ANCESTRY_DIR = str(Path(__file__).resolve().parent / "fixtures" / "ci_ancestry")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _the_suite_is_the_documented_ci_override():
     # The hatch never waives an agent-session marker, so clear the launching agent's: CI has none.
+    # Nor an agent ANCESTOR (2026-11-06), so emulate CI's process tree too: in-process by replacing
+    # the walk, in Python children through fixtures/ci_ancestry. Agent tests set their own chain.
+    from mcpgawk import history
     from mcpgawk.history import AGENT_ENV_MARKERS
-    names = ("MCPGAWK_APPROVE_NONINTERACTIVE",) + AGENT_ENV_MARKERS
+    names = ("MCPGAWK_APPROVE_NONINTERACTIVE", "MCPGAWK_TEST_ANCESTRY", "PYTHONPATH",
+             "MCPGAWK_TEST_ANCHOR_DIR") + AGENT_ENV_MARKERS
     prior = {k: os.environ.get(k) for k in names}
     for k in AGENT_ENV_MARKERS:
         os.environ.pop(k, None)
     os.environ["MCPGAWK_APPROVE_NONINTERACTIVE"] = "1"
+    prior_walk = history._process_ancestry
+    history._process_ancestry = lambda: []
+    os.environ["MCPGAWK_TEST_ANCESTRY"] = ""
+    import tempfile
+    os.environ["MCPGAWK_TEST_ANCHOR_DIR"] = os.path.join(tempfile.mkdtemp(prefix="no-anchor-"),
+                                                         "mcpgawk")
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        p for p in (CI_ANCESTRY_DIR, prior["PYTHONPATH"]) if p)
     try:
         yield
     finally:
+        history._process_ancestry = prior_walk
         for k, v in prior.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def _real_anchor_paths():
+    from mcpgawk import approval_lock as al
+    from mcpgawk import guard_hook
+    return dict(al.ANCHOR_DIRS), dict(guard_hook._ANCHOR_FALLBACK)
+
+
+_REAL_ANCHOR_PATHS = _real_anchor_paths()
+
+
+@pytest.fixture
+def real_anchor_paths():
+    """The shipped anchor locations, as imported — before `_no_real_approval_anchor` moved them."""
+    return _REAL_ANCHOR_PATHS
+
+
+@pytest.fixture(autouse=True)
+def _no_real_approval_anchor(monkeypatch, tmp_path_factory):
+    """No test may read the REAL approval anchor (/Library/Application Support/mcpgawk, /etc/mcpgawk).
+
+    MEASURED 2026-11-06: the founder locked this machine and ~250 tests that never set up a lock
+    went red — every approval needed a passphrase and every unsigned baseline was refused. CI has
+    no anchor, so CI could never have seen it. The anchor deliberately follows no environment
+    variable (an override would let the hook decide "unlocked" while `approvals status` says
+    LOCKED), so tests move it here, in-process. Lock tests request `anchor_dir`, which runs after
+    this and points it at their own stand-in."""
+    from mcpgawk import approval_lock as al
+    from mcpgawk import guard_hook
+    d = tmp_path_factory.mktemp("no-anchor") / "mcpgawk"
+    monkeypatch.setattr(al, "ANCHOR_DIRS", {plat: d for plat in al.ANCHOR_DIRS})
+    monkeypatch.setattr(guard_hook, "_ANCHOR_FALLBACK",
+                        {plat: str(d / al.ANCHOR_FILE) for plat in guard_hook._ANCHOR_FALLBACK})
 
 
 @pytest.fixture(autouse=True)

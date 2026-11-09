@@ -17,6 +17,9 @@ Honesty rules this file lives by:
   * The approval here is non-interactive because a sandbox has no human at the keyboard. On a
     real fleet, `approve` refuses an agent session and requires the person at the keyboard — the
     demo says so, out loud, at the moment it uses the hatch.
+  * Run BY an agent, step 2 is refused like any other approval (2026-11-06: the gate refuses when
+    an agent is running it, and no sandbox setting waives that). The demo shows the refusal in
+    mcpgawk's own words and walks on from the first scan's baseline, never saying "you approved".
 
 `verify` (the behavioural sandbox check) is deliberately not part of this walk: it needs a richer
 server than a teaching fixture and a Node runtime, and an INCOMPLETE result would teach the wrong
@@ -163,8 +166,9 @@ class _Sandbox:
         self.mode.write_text(mode)
 
     def env(self) -> dict[str, str]:
-        # The sandbox's own children are not the caller's agent: the CI hatch below no longer
-        # waives an agent-session marker, and the demo must still run from inside Claude Code.
+        # The markers are dropped so a PERSON whose terminal carries one (an IDE terminal can) still
+        # gets the full walk. An agent actually running the demo is still refused at step 2: the
+        # gate also refuses when an agent is running the command, and that is not an env var.
         env = {k: v for k, v in os.environ.items() if k not in history.AGENT_ENV_MARKERS}
         env.update({
             "HOME": str(self.home),
@@ -284,13 +288,28 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
               f"(tool: {', '.join(box.approved_tools())}). Clean — nothing alarming yet.")
         _real(r.stdout, keep=(SERVER,), limit=8)
 
-        _act(2, "You approve it — this becomes the trusted baseline")
+        # RUN BY AN AGENT, the approval is refused even here (2026-11-06): the gate refuses when an
+        # agent is running the command, and the sandbox cannot waive that — it is the point. The
+        # walk goes on from the baseline the first scan recorded, and every later line says
+        # "baseline", never "you approved". Branch on what `approve` DID, not on a second guess.
         r = box.cli("approve", SERVER)
-        if r.returncode != 0:
+        by_you = r.returncode == 0
+        if by_you:
+            _act(2, "You approve it — this becomes the trusted baseline")
+            _note(f"trusted baseline set: {_c('1', ', '.join(box.approved_tools()))}.")
+            _note(_c("33", "On your real fleet, approve refuses inside an agent session and needs "
+                           "you at a terminal. This sandbox has no terminal, so it skips the "
+                           "terminal check — and records the approval as made without a person "
+                           "present, which the guard's own words below say."))
+        elif r.returncode == 4:
+            _act(2, "Your agent tries to approve it — mcpgawk refuses")
+            _real(r.stderr, limit=4)
+            _note("moving the trusted baseline is your decision, so the approval did not happen.")
+            _note(f"the baseline stays what the first scan recorded: "
+                  f"{_c('1', ', '.join(box.approved_tools()))}. Run `mcpgawk demo` in your own "
+                  f"terminal to approve it yourself.")
+        else:
             return _fail("approve did not succeed", r)
-        _note(f"trusted baseline set: {_c('1', ', '.join(box.approved_tools()))}.")
-        _note(_c("33", "On your real fleet this step refuses to run inside an agent session — "
-                       "approval needs the person at the keyboard. The sandbox waives that."))
 
         _act(3, "The server updates itself — a rug-pull")
         box.set_mode("pulled")
@@ -301,8 +320,10 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         r = box.cli("scan", str(box.config), "--yes")
         if "drift" not in r.stdout.lower():
             return _fail("the drifted scan did not report drift", r)
-        _note(_c("31", "DRIFT raised: read_notes changed after approval, and its new description "
-                       "trips an injection signature. Baseline stays put until a human approves."))
+        _note(_c("31", f"DRIFT raised: read_notes changed "
+                       f"{'after approval' if by_you else 'since its baseline'}, and its new "
+                       f"description trips an injection signature. Baseline stays put until a "
+                       f"human approves."))
         _real(r.stdout, keep=("DRIFT",), limit=16)
         if box.approved_tools() != ["read_notes"]:
             return _fail("the baseline moved without an approve", r)
@@ -313,9 +334,10 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         if '"permissionDecision": "deny"' not in pulled.stdout:
             return _fail("the guard did NOT block the tool that CHANGED after approval", pulled)
         pulled_reason = json.loads(pulled.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
-        _note(f"call to approved-but-rewritten {_c('1', 'read_notes')}: {_c('31', 'BLOCKED')} — "
-              f"its content changed since you approved it. The evidence is the last scan, not "
-              f"this call; the denial says so.")
+        _note(f"call to {'approved-but-' if by_you else 'baselined-but-'}rewritten "
+              f"{_c('1', 'read_notes')}: {_c('31', 'BLOCKED')} — its content changed since "
+              f"{'the approval in step 2' if by_you else 'its baseline'}. The evidence is the last "
+              f"scan, not this call; the denial says so.")
         _real(pulled_reason, limit=6)
         if '"permissionDecision": "deny"' not in blocked.stdout:
             return _fail("the guard did NOT block the tool that appeared after approval", blocked)
@@ -323,9 +345,16 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         _note(f"call to new {_c('1', 'exfiltrate_notes')}: {_c('31', 'BLOCKED')}.")
         _real(reason, limit=8)
 
-        print(_c("1", "\n✓ That is the whole product in one run:") +
-              " discover, measure, approve, detect drift, block both the tool that changed and\n"
-              "  the tool that arrived after you approved it — all locally, nothing uploaded.")
+        if by_you:
+            print(_c("1", "\n✓ That is the whole product in one run:") +
+                  " discover, measure, approve, detect drift, block both the tool that changed "
+                  "and\n  the tool that arrived after the approval — all locally, nothing "
+                  "uploaded.")
+        else:
+            print(_c("1", "\n✓ That is the whole product in one run:") +
+                  " discover, measure, refuse your agent's approval, detect drift, block both\n"
+                  "  the tool that changed and the tool that arrived after the baseline — all "
+                  "locally, nothing uploaded.")
         _note(_c("2", "The added tool is denied by name. The rewritten tool is denied on the LAST "
                       "SCAN's evidence, not this call's: a change nobody has scanned yet passes "
                       "until the next scan or monitor tick — and every such denial says so."))
