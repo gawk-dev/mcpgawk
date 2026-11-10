@@ -278,3 +278,53 @@ def test_collect_reads_the_profile_the_rest_of_the_product_writes(tmp_path, monk
     monkeypatch.setenv("MCPGAWK_HISTORY", str(tmp_path / "history.json"))
 
     assert status_mod.collect()["behaviour_tools"] == 2
+
+
+# ── blocked vs queued, said apart (audit 2026-11-10, item E) ──────────────────────────────────────
+# Every pending server was printed "blocked until you decide", including a shape-only change the
+# guard lets through while it waits (decide._blocks_calls; the panel and decide already split it).
+def test_a_queued_change_is_not_called_blocked():
+    out = _render(pending=["notes", "resend"], pending_keys=["mcp:notes", "mcp:resend"],
+                  pending_queued=["notes"])
+    assert "1 server(s) changed since their baseline — blocked until" in out, out
+    assert "calls still pass" in out and "notes" in out.split("calls still pass", 1)[1], out
+
+
+def test_without_a_split_every_pending_server_still_reads_blocked():
+    """Calling a blocked change harmless is the worse error: no split means blocked."""
+    out = _render(pending=["resend"], pending_keys=["mcp:resend"])
+    assert "blocked until" in out and "calls still pass" not in out
+
+
+def test_queued_keys_come_from_decides_own_rule():
+    from test_panel_next import _schema_only_store, _store
+    store = {"servers": {**_schema_only_store("notes"), **_store("gitnexus")}}
+    assert status.queued_keys(store) == {"mcp:notes"}
+
+
+# ── what is true NOW, beside the lifetime count (audit 2026-11-10, item I) ───────────────────────
+def _activity(**kw):
+    a = {"calls": 900, "sessions": 4, "servers": 3, "checked": 700, "deferred": 200, "denied": 1,
+         "last_seen": "2026-11-10T10:00:00Z", "window_days": 7, "window_calls": 40,
+         "window_checked": 25, "window_deferred": 15,
+         "window_deferred_by_server": {"figma": 12, "notes": 3}}
+    a.update(kw)
+    return a
+
+
+def test_status_shows_the_recent_unchecked_calls_and_where_they_went():
+    out = _render(activity=_activity())
+    assert "200 call(s) NOT checked" in out, "the lifetime count stays (never instead of)"
+    assert "15 in the last 7 days" in out, out
+    assert "figma (12)" in out and "notes (3)" in out, out
+
+
+def test_the_unchecked_reason_names_the_common_case():
+    """Most defers are calls to a server never approved here, not a stale projection."""
+    out = _render(activity=_activity())
+    assert "not approved on this machine" in out, out
+
+
+def test_an_old_log_without_the_window_reads_as_before():
+    out = _render(activity=_activity(window_deferred=None, window_deferred_by_server=None))
+    assert "200 call(s) NOT checked" in out and "in the last 7 days" not in out

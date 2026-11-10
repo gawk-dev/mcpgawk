@@ -9196,9 +9196,16 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # prompt change was reported as a tool change (dadan again: the one change was
             # `resource.dadan-video-card` and the line read "1 change to the tools it declares").
             noun = _kinds_phrase(it["report"])
-            sub = (f'{n} change{"s" if n != 1 else ""} to the {noun} it declares. No agent can call '
-                   'it until you decide — a change under a recorded baseline is the '
-                   'rug-pull shape.'
+            # WHAT ENFORCEMENT IS ACTUALLY DOING (audit 2026-11-10, item D). Every card said "No
+            # agent can call it", including a schema-only change the guard lets through while it
+            # waits for sign-off — the same rule `decide` and the dashboard chip already apply.
+            from .decide import _blocks_calls
+            blocking = _blocks_calls(it["report"])
+            stance = ('No agent can call it until you decide — a change under a recorded baseline '
+                      'is the rug-pull shape.' if blocking else
+                      'Calls still pass while it waits for you: only the shape of a tool changed, '
+                      'with no new permission, so the guard queues it rather than blocking it.')
+            sub = (f'{n} change{"s" if n != 1 else ""} to the {noun} it declares. {stance}'
                    + (f' Approved by {_esc(it["approved_by"])}.'
                       if it["approved_by"] and it.get("origin") != "unattended" else '')
                    + (f' Change first seen {_esc(_local_stamp(it["seen_at"]))}.' if it["seen_at"] else ''))
@@ -9206,15 +9213,18 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             acts = (f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
                     f'<input type="hidden" name="key" value="{_esc(it["key"])}">'
                     f'<input type="hidden" name="back" value="next">{skip_field}'
-                    f'<button class="btn" name="act" value="keep">Keep blocked</button></form>'
+                    f'<button class="btn" name="act" value="keep">{"Keep blocked" if blocking else "Not yet"}</button></form>'
                     f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
                     f'<input type="hidden" name="key" value="{_esc(it["key"])}">'
                     f'<input type="hidden" name="back" value="next">{skip_field}'
                     f'<button class="btn primary" name="act" value="approve">Approve the new surface</button></form>')
             note = ('Approve records this surface as the new baseline; the diff stays in the record '
                     'and the guard lets the next call through. Keep blocked leaves every agent '
-                    'refused until a person comes back to this screen.')
-            eyebrow = (f'1 OF {_eyebrow_n} · TRUST DECISION · BLOCKED UNTIL YOU DECIDE'
+                    'refused until a person comes back to this screen.' if blocking else
+                    'Approve records this surface as the new baseline; the diff stays in the record. '
+                    'Not yet leaves it waiting here; calls keep passing meanwhile.')
+            eyebrow = (f'1 OF {_eyebrow_n} · TRUST DECISION · '
+                       f'{"BLOCKED UNTIL YOU DECIDE" if blocking else "WAITING FOR YOUR SIGN-OFF"}'
                        + (f' · {n_dec} DECISIONS IN THE QUEUE' if n_dec > 1 else ''))
         elif it["kind"] == "signin":
             head = f'{_esc(it["name"])} cannot be measured until you sign in.'

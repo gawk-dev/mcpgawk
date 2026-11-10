@@ -22,7 +22,9 @@ def _store(name: str = "gitnexus", seen: str = "2026-09-04T09:00:00Z") -> dict:
         "history": [{"items": {"tool.search_repo": "h2", "tool.sync_all": "h3"},
                      "texts": {"tool.search_repo": NEW, "tool.sync_all": "Sync everything"},
                      "annotations": {"tool.search_repo": {}}, "seen": seen,
-                     "measured_at": "2026-07-28T09:00:00Z", "pin": "p1", "cost_index": 154}]}}
+                     # Real sightings carry `measured_at`; decide reads it first (audit item H),
+                     # so the order the queue serves is driven by it.
+                     "measured_at": seen, "pin": "p1", "cost_index": 154}]}}
 
 
 def _d(store_servers: dict, entries: dict | None = None) -> dict:
@@ -838,3 +840,34 @@ def test_the_queue_chip_does_say_more_when_an_approval_precedes_it():
     html = panel.render(d, token="tk")
     assert "approval(s) waiting" in html, "fixture must put something ahead of the chip"
     assert "more to review — one at a time" in html
+
+
+# ── the card says what enforcement is actually doing (audit 2026-11-10, item D) ──────────────────
+# Every decision card said "No agent can call it until you decide" and "BLOCKED UNTIL YOU DECIDE",
+# including a schema-only change the guard lets through while it waits for sign-off
+# (decide._blocks_calls, the dashboard's own chip says "NOT blocked"). Claiming enforcement that is
+# not happening is the worst lie a security product can render.
+def _schema_only_store(name: str = "notes") -> dict:
+    same = {"tool.write_note": "h1"}
+    return {f"mcp:{name}": {
+        "aliases": [name], "approved_at": "2026-09-03T10:00:00Z", "approved_by": "me@box",
+        "approved": {"items": dict(same), "texts": {"tool.write_note": "Write a note."},
+                     "schemas": {"tool.write_note": "s1"}, "props": {"tool.write_note": ["body"]},
+                     "measured_at": "2026-07-21T09:00:00Z", "pin": "p1", "cost_index": 100},
+        "history": [{"items": dict(same), "texts": {"tool.write_note": "Write a note."},
+                     "schemas": {"tool.write_note": "s2"}, "props": {"tool.write_note": ["body"]},
+                     "seen": "2026-09-04T09:00:00Z", "measured_at": "2026-07-28T09:00:00Z",
+                     "pin": "p2", "cost_index": 101}]}}
+
+
+def test_a_schema_only_change_is_not_called_blocked_on_next(monkeypatch):
+    html = panel.render_next(_d(_schema_only_store()), token="T")
+    assert "notes" in html, "the fixture must produce a decision card, or this test proves nothing"
+    assert "No agent can call it" not in html, "claims a block the guard is not enforcing"
+    assert "BLOCKED UNTIL YOU DECIDE" not in html
+    assert "Calls still pass while it waits for you" in html
+
+
+def test_a_description_change_is_still_called_blocked_on_next(monkeypatch):
+    html = panel.render_next(_d(_store()), token="T")
+    assert "No agent can call it" in html and "BLOCKED UNTIL YOU DECIDE" in html

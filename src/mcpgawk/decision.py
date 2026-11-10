@@ -367,11 +367,26 @@ def reason_code(reason: str | None) -> str | None:
     return None
 
 
-def human_line(server: str, tool: str, code: str | None, origin: str | None = None) -> str:
+def human_line(server: str, tool: str, code: str | None, origin: str | None = None,
+               reason: str | None = None) -> str:
     """ONE line for the person at the keyboard (Claude Code shows `systemMessage` to the user).
     Same properties as the agent text: no override, no `approve` — the agent can read this too.
-    `origin` words who set the baseline (`_anchor`), exactly as the agent text does."""
+    `origin` words who set the baseline (`_anchor`), exactly as the agent text does.
+
+    `reason`, when given, names WHICH kind of change a REASON_TOOL_CHANGED denial is (audit
+    2026-11-10, item F): permission growth and a change-and-revert share that code (the spool, the
+    plugin hook and the differential corpus key on it), but "its content changed" is wrong for both —
+    the description did not change, and a revert is back to its approved form."""
     a = _anchor(origin)
+    if code == REASON_TOOL_CHANGED and reason:
+        if "— it can now do " in reason:
+            grown = reason.split(f"— it can now do {a['more']} (", 1)[-1].split(", as last seen", 1)[0]
+            grown = grown.split(", now)", 1)[0].rstrip(")")
+            return (f"mcpgawk blocked {server}.{tool} — it can now do more {a['since']} ({grown}). "
+                    f"Review it with `mcpgawk decide` in your own terminal.")
+        if "and changed back since" in reason:
+            return (f"mcpgawk blocked {server}.{tool} — it changed {a['since']} and changed back "
+                    f"before anyone reviewed it. Review it with `mcpgawk decide` in your own terminal.")
     what = {
         REASON_TOOL_ADDED: f"a tool that was not there {a['was_there']}",
         REASON_TOOL_CHANGED: f"its content changed {a['since']}",
@@ -379,8 +394,11 @@ def human_line(server: str, tool: str, code: str | None, origin: str | None = No
         REASON_TOXIC_FLOW: "an observed sink ran after an observed source this session",
         REASON_NO_BASELINE_STRICT: "it has no baseline on this machine and the guard is strict",
     }.get(code or "", f"{a['covered']} did not cover this call")
-    # `decide` lists changes to approved servers; a server with no baseline is named by `scan`.
-    where = "mcpgawk scan" if code == REASON_NO_BASELINE_STRICT else "mcpgawk decide"
+    # Send the person where the change is VISIBLE. `decide` lists changes a scan has queued; these
+    # three are made from the projection with no scan, and `decide` could answer "Nothing is
+    # waiting on you" (audit 2026-11-10, item G). The agent text already says `mcpgawk scan`.
+    where = ("mcpgawk scan" if code in (REASON_NO_BASELINE_STRICT, REASON_TOOL_ADDED,
+                                        REASON_CREDENTIAL_SMUGGLED) else "mcpgawk decide")
     return (f"mcpgawk blocked {server}.{tool} — {what}. "
             f"Review it with `{where}` in your own terminal.")
 

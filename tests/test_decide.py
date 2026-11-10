@@ -291,3 +291,12 @@ def test_a_new_destination_parameter_is_still_called_blocked():
 def test_a_description_change_is_still_called_blocked():
     page = decide.render_page(decide.pending_decisions(_store()), token="t")
     assert "blocked · waiting on you" in page and "queued · waiting" not in page
+
+
+# ── when the change was seen reaches the screen (audit 2026-11-10, item H) ───────────────────────
+# `seen_at` read `latest["seen"]`, a key real sightings never carry (they carry `measured_at`), so
+# "Change first seen" never rendered on /next and its newest-first sort compared empty strings.
+def test_a_pending_item_carries_when_the_change_was_seen():
+    from mcpgawk.decide import pending_decisions
+    (item,) = pending_decisions(_store())
+    assert item["seen_at"] == "2026-07-28T09:00:00Z", item["seen_at"]

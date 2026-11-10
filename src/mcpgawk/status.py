@@ -99,10 +99,22 @@ def hook_health_by_client() -> dict[str, str]:
     return out
 
 
+def queued_keys(store: dict) -> set[str]:
+    """Pending servers whose change the guard only QUEUES (calls still pass), by `decide`'s own
+    rule — the panel's chip and /next use the same one. Empty on any failure: the caller then says
+    blocked, the safer error."""
+    try:
+        from .decide import _blocks_calls, pending_decisions
+        return {it["key"] for it in pending_decisions(store) if not _blocks_calls(it["report"])}
+    except Exception:                               # noqa: BLE001
+        return set()
+
+
 def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path | None",
            agents: dict[str, int], baseline_total: int, pending: list[str],
            baseline_words: str | None = None,
            pending_keys: list[str] | None = None,
+           pending_queued: list[str] | None = None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
@@ -194,11 +206,22 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
         out.append(f"      {muted_total} finding(s) muted by you as false positives "
                    f"(mcpgawk wrong — still listed on scans, never hidden)")
     if pending:
+        # BLOCKED vs QUEUED, said apart (audit 2026-11-10, item E): a shape-only change with no new
+        # permission is queued and calls still pass (decide._blocks_calls). With no split known,
+        # every server reads blocked: calling a blocked change harmless is the worse error.
+        queued = [n for n in pending if n in set(pending_queued or ())]
+        blocked = [n for n in pending if n not in set(queued)]
         out.append("")
-        out.append(f"      {len(pending)} server(s) changed since their baseline — blocked until")
-        out.append("      you decide:")
-        for name in pending[:10]:
-            out.append(f"          {name}")
+        if blocked:
+            out.append(f"      {len(blocked)} server(s) changed since their baseline — blocked until")
+            out.append("      you decide:")
+            for name in blocked[:10]:
+                out.append(f"          {name}")
+        if queued:
+            out.append(f"      {len(queued)} server(s) changed only the shape of a tool — calls still "
+                       f"pass until you decide:")
+            for name in queued[:10]:
+                out.append(f"          {name}")
         out.append("      Review: mcpgawk scan")
         # The exact command per server, by key: a display name can be a whole command line with
         # spaces, which `approve <name>` cannot take unquoted (new-developer walk, 2026-09-26).
@@ -256,8 +279,19 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
         else:
             out.append(f"      {checked} actually checked against a baseline")
         if deferred:
-            out.append(f"      ⚠ {deferred} call(s) NOT checked — the guard declined (no or stale "
-                       f"baseline projection) and let them through. Run `mcpgawk scan`.")
+            # The usual cause is a server never approved on this machine; a stale copy of the
+            # baselines is the rarer one (audit 2026-11-10, item I). Lifetime count kept, with
+            # what is true NOW beside it — never instead of it (spool.read summary).
+            out.append(f"      ⚠ {deferred} call(s) NOT checked — the guard had nothing to check "
+                       f"them against (a server not approved on this machine, or a baseline copy "
+                       f"that was out of date) and let them through. Run `mcpgawk scan`.")
+            w = activity.get("window_deferred")
+            if isinstance(w, int):
+                days = activity.get("window_days") or 7
+                by = activity.get("window_deferred_by_server") or {}
+                top = ", ".join(f"{k} ({v})" for k, v in list(by.items())[:5])
+                out.append(f"        {w} in the last {days} days"
+                           + (f": {top}" if w and top else ""))
         denied = activity.get("denied") or 0
         out.append(f"      {denied} denied" if denied else "      none denied")
         no_session = activity.get("no_session") or 0
@@ -337,9 +371,12 @@ def collect() -> dict:
         baseline_words = history.at_baseline_words_for(store, _covered)
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
+        _queued = queued_keys(store)
+        pending_queued = [history.display_name(store, k) for k in pending_keys if k in _queued]
         muted_total = history.muted_total(store)
     except Exception as exc:                       # noqa: BLE001
         pending, pending_keys, baseline_total, muted_total = [], [], 0, 0
+        pending_queued = []
         baseline_words = None
         baseline_error = f"{type(exc).__name__}: {exc}"
         store = None
@@ -456,7 +493,7 @@ def collect() -> dict:
     return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   agents_error=agents_error,
                   baseline_total=baseline_total, baseline_words=baseline_words,
-                  pending=pending, pending_keys=pending_keys,
+                  pending=pending, pending_keys=pending_keys, pending_queued=pending_queued,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
@@ -501,6 +538,8 @@ def to_json(collected: dict, panel_data: dict | None = None) -> dict:
         "servers": None,
         "activity": collected.get("activity"),
         "pending": list(collected.get("pending") or []),
+        # Additive: the pending servers whose change is only queued (calls still pass).
+        "pending_queued": list(collected.get("pending_queued") or []),
         "baseline_total": collected.get("baseline_total"),
         # Servers in an agent config since the fleet approval, by the scan's own rule. A consumer
         # reading `baseline_total` alone could not learn that anything had appeared.

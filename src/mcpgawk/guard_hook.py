@@ -166,9 +166,32 @@ def _confidence_line(server: str, tool: str, record: dict | None, approved: dict
         return (f"mcpgawk: {server} · {tool} — not approved on this machine, so not checked. "
                 f"The person at the keyboard records a baseline with `mcpgawk scan`.")
     approved_at = record.get("approved_at") if isinstance(record, dict) else None
-    when = f"approved {approved_at}" if isinstance(approved_at, str) else "approval date not recorded"
-    seen = f"last seen {seen_at}" if seen_at else "not re-scanned since"
-    return (f"mcpgawk: {server} · {tool} — at your baseline ({when}, {seen}); "
+    # WHO SET THE BASELINE, worded as every denial words it (decision._anchor, audit 2026-11-10 B):
+    # "your baseline … approved <date>" only when a person approved it. A first-sighting, fleet or
+    # unattended row said "at your baseline" here while the denials beside it said otherwise.
+    origin = _row_origin(record)
+    if origin == "approve":
+        when = (f"approved {approved_at}" if isinstance(approved_at, str)
+                else "approval date not recorded")
+        head = f"at your baseline ({when}"
+    else:
+        core = _load_sibling("decision")
+        anchor = getattr(core, "_anchor", None) if core is not None else None
+        try:
+            how = anchor(origin)["note"] if callable(anchor) else ""
+            how = how.strip().removeprefix("(").removesuffix(")").strip()   # the core brackets it
+        except Exception:                           # noqa: BLE001 — wording, never a crash
+            how = ""
+        head = f"matches its baseline ({how}" if how else "matches its recorded baseline ("
+    # A CONTENT CHECK THAT STOOD DOWN is not "not re-scanned": the server was re-scanned and the
+    # hashes could not be compared (audit 2026-11-10 C). The fact only — the projection's own
+    # text carries `mcpgawk approve`, and this line must never hand the agent an approval command.
+    if isinstance(record, dict) and record.get("seen_not_compared"):
+        seen = "content check not run this time; tool names are still enforced"
+    else:
+        seen = f"last seen {seen_at}" if seen_at else "not re-scanned since"
+    sep = ", " if not head.endswith("(") else ""
+    return (f"mcpgawk: {server} · {tool} — {head}{sep}{seen}); "
             f"{_sandbox_fact(profile, server)}.")
 
 
@@ -366,6 +389,27 @@ LOCKED_REFUSAL = ("this machine is locked, and {server} has no approval signed w
 LOCKED_HUMAN = ("mcpgawk blocked {server}.{tool} — this machine is locked and {server} has no "
                 "approval signed with your passphrase. Review it, then approve it in your own "
                 "terminal.")
+#: The refusal on a locked machine when the guard cannot READ the approvals at all (its copy of
+#: them is stale, missing or unreadable). Still a refusal — on a locked machine nothing defers —
+#: but not "no approval signed": the server may well be approved and signed. Saying so sent the
+#: person to re-approve when the fix is rebuilding the copy (audit 2026-11-10, item A). Naming
+#: `mcpgawk scan` gives no override: scanning rebuilds the copy from the signed store and approves
+#: nothing, so an agent that runs it is checked against the same signatures as before.
+LOCKED_UNREADABLE = ("this machine is locked, and mcpgawk cannot read a current approval record "
+                     "for {server}: {cause}. It refuses every call to {server} until that copy is "
+                     "rebuilt from the signed approvals.")
+LOCKED_UNREADABLE_HUMAN = ("mcpgawk blocked {server}.{tool} — this machine is locked and {cause}. "
+                           "Run `mcpgawk scan` in your own terminal to rebuild it; that approves "
+                           "nothing, it restores the copy of what you already signed.")
+
+
+def _unreadable_cause(note: str | None) -> str | None:
+    """The cause, in words, when `_lookup` could not read the projection; None otherwise."""
+    if not note or "projection" not in note:
+        return None
+    if "STALE" in note:
+        return "the guard's copy of your approvals is out of date (the store changed without it)"
+    return "the guard's copy of your approvals is missing or unreadable"
 
 
 def _strict(store_path: Path) -> bool:
@@ -737,9 +781,12 @@ def _human(core, server: str, tool: str, reason: str | None, origin: str | None)
     if not (callable(line_fn) and callable(code_fn)):
         return None
     try:
-        return line_fn(server, tool, code_fn(reason), origin=origin)
+        return line_fn(server, tool, code_fn(reason), origin=origin, reason=reason)
     except TypeError:
-        return line_fn(server, tool, code_fn(reason))
+        try:
+            return line_fn(server, tool, code_fn(reason), origin=origin)   # a core without `reason`
+        except TypeError:
+            return line_fn(server, tool, code_fn(reason))
 
 
 def _judge(core, server: str, tool: str, record: dict | None, observations, sources, args):
@@ -844,9 +891,15 @@ def _decide(event: dict, store_path: Path | None,
     # chose by locking (FOUNDER 2026-11-06 "1 yes"), independent of `guard install --strict`.
     # BEFORE the core load: on a locked machine an unloadable core must not turn into a defer.
     if strict_refuse and _lock_state() is not None:
-        reason = LOCKED_REFUSAL.format(server=server)
-        return (_deny(fmt, reason, LOCKED_HUMAN.format(server=server, tool=tool)), None,
-                "declared", True, reason, None)
+        cause = _unreadable_cause(note)
+        if cause:
+            reason = LOCKED_UNREADABLE.format(server=server, cause=cause)
+            human = LOCKED_UNREADABLE_HUMAN.format(server=server, tool=tool, cause=cause)
+        else:
+            reason = LOCKED_REFUSAL.format(server=server)
+            human = LOCKED_HUMAN.format(server=server, tool=tool)
+        # The stderr note travels too (it was dropped here): it is the operator's diagnostic.
+        return _deny(fmt, reason, human), note, "declared", True, reason, None
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a

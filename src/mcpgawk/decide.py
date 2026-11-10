@@ -69,7 +69,9 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
             "since_last": history.approval_change(approved, latest),
             "since_original": history.since_original(entry, latest),
             "hostile": list(report.hostile),
-            "seen_at": latest.get("seen") or "",
+            # Sightings carry `measured_at`; `seen` is only in older test fixtures (audit
+            # 2026-11-10, item H: this read `seen` alone, so it was always empty in real stores).
+            "seen_at": latest.get("measured_at") or latest.get("seen") or "",
             # THE one sentence (history.changed_head) — "Changed after you approved it" was a
             # literal here for every origin (2026-10-09).
             "head": history.changed_head(

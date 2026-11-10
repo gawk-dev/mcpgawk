@@ -230,8 +230,18 @@ def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_pat
     2.1.231 bug class). store_preregistered_client pins the port; build_login_provider binds
     that exact port and matches the stored auth method."""
 
+    import socket
+
     from mcpgawk import oauth_login
     monkeypatch.setenv("GAWK_OAUTH_STORE", str(tmp_path))   # read at use since 2026-09-03
+    # A FREE port, not the real 33418: that is VS Code's documented loopback port, and on a shared
+    # GitHub runner it was already bound ("Errno 98", 0.1.86 release, py3.12) — the test failed on
+    # the machine, not on the code. The behaviour under test (bind the registered port exactly, and
+    # fail loudly when it is taken) does not depend on which port it is.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    monkeypatch.setattr(oauth_login, "PINNED_CALLBACK_PORT", free_port)
     if True:
         uri = oauth_login.store_preregistered_client(
             "https://mcp.example.com/mcp", "client-abc", "sekret-xyz")
@@ -244,13 +254,14 @@ def test_a_preregistered_client_pins_its_redirect_and_skips_registration(tmp_pat
             meta = provider.context.client_metadata
             assert str(meta.redirect_uris[0]) == uri
             assert meta.token_endpoint_auth_method == "client_secret_basic"   # RFC 6749 default; the server may still steer it (oauth_login._fit_auth_method_to_server)
+            # A second binder on the pinned port fails LOUDLY, never silently re-registers
+            # elsewhere. Asked while the first still holds the port, so "taken" is certain.
+            import pytest as _pytest
+            with _pytest.raises(RuntimeError, match="cannot move"):
+                oauth_login.build_login_provider("https://mcp.example.com/mcp")
         finally:
             server.shutdown()
-
-        # A second binder on the pinned port fails LOUDLY, never silently re-registers elsewhere.
-        import pytest as _pytest
-        with _pytest.raises(RuntimeError, match="cannot move"):
-            oauth_login.build_login_provider("https://mcp.example.com/mcp")
+            server.server_close()   # shutdown() stops serving but keeps the socket bound
 
 
 def test_sdk_child_cleanup_warnings_lose_their_traceback_but_keep_their_line(capsys):

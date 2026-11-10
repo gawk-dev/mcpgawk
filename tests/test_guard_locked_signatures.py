@@ -338,3 +338,43 @@ def test_an_unknown_name_on_a_locked_machine_points_at_name_only(store, anchor_d
     _lock(store)
     assert _cli(store, monkeypatch, "chrome") == 2
     assert "--name-only" in capsys.readouterr().err
+
+
+# ── locked: the refusal names its real cause (audit 2026-11-10, item A) ───────────────────────────
+# A stale or missing projection on a locked machine is still a refusal, but it is not "no approval
+# signed": the server WAS approved and signed. Saying so sent the person to re-approve when the fix
+# is rebuilding the guard's copy (`mcpgawk scan`), which approves nothing.
+
+def _both_texts(out):
+    hso = out["hookSpecificOutput"]
+    return hso["permissionDecisionReason"], out.get("systemMessage", "")
+
+
+def test_locked_a_stale_projection_says_stale_not_unsigned(store, anchor_dir, person):
+    _signed_approval(store)
+    p = Path(store)
+    p.write_text(p.read_text() + "\n")
+    out = _decide(store)
+    assert _denied(out)
+    reason, human = _both_texts(out)
+    for text in (reason, human):
+        assert "out of date" in text, text
+        assert "no approval signed" not in text, text
+    assert "mcpgawk scan" in human, human
+
+
+def test_locked_a_missing_projection_says_missing_not_unsigned(store, anchor_dir, person):
+    _signed_approval(store)
+    os.unlink(history.projection_path(store))
+    out = _decide(store)
+    assert _denied(out)
+    reason, human = _both_texts(out)
+    assert "missing or unreadable" in reason and "no approval signed" not in reason, reason
+    assert "mcpgawk scan" in human, human
+
+
+def test_locked_a_never_approved_server_still_says_unsigned(store, anchor_dir, person):
+    """The original wording stays right where it is true: nothing signed this server."""
+    _lock(store)
+    reason, _human = _both_texts(_decide(store))
+    assert "no approval signed" in reason
