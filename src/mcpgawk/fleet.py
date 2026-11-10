@@ -71,6 +71,9 @@ class FleetRow:
     # identity). Additive in the fleet-json payload — no new STATE, which would break installed IDE
     # extensions (see FLEET_SCHEMA) — so a front-end can mark the row without re-deriving drift.
     changed: bool = False
+    # --supply-chain outcome for this row, so the summary can count what was flagged and what could not
+    # be checked. None = the check was not asked for. Additive in fleet-json (summary.supply_chain).
+    supply_chain: str | None = None   # "flagged" | "not-checkable" | "checked"
 
     @property
     def needs_auth(self) -> bool:
@@ -100,26 +103,44 @@ def _supply_chain_bits(sc: dict[str, Any] | None) -> tuple[list[str], bool]:
     must not sit on a CLEAN row. Could-not-check is detail only — not checked is not clean, but it is
     not a finding either. MISSING never reaches here as a finding: that server was not launched and
     has its own state (see the not-launched branch of `_measured_state`)."""
-    if not sc or sc.get("checked") is False or sc.get("missing"):
+    if not sc or sc.get("missing"):
         return [], False
+    if sc.get("checked") is False:
+        # Partial pictures label themselves: a wrapper (`node path`, `python3 script`, a shell script)
+        # has no registry package to ask about, and a silent row read the same as "checked, fine".
+        return ["supply-chain: not checkable (no registry package in the launch command)"], False
     registry = _REGISTRY_NAME.get(sc.get("ecosystem"), sc.get("ecosystem") or "its registry")
     if sc.get("error"):
         return [f"supply-chain not checked ({registry} did not answer)"], False
     bits: list[str] = []
     if sc.get("deprecated"):
+        # Say exactly what the registry said: npm deprecates a package, PyPI yanks a version or marks
+        # a whole project archived / deprecated / quarantined (PEP 792, `status`).
+        what = sc.get("status") or ("yanked" if sc.get("ecosystem") == "pypi" else "deprecated")
         why = (sc.get("detail") or "").strip()
         # npm's message often trails into a URL; the first sentence is the part a row can carry.
         first = why.split(". ", 1)[0].rstrip(".")
         why = first + "." if first and first != why.rstrip(".") else why
         if len(why) > 90:
             why = why[:89].rstrip() + "…"
-        bits.append(f"⚠ deprecated on {registry}" + (f": {why}" if why else ""))
+        bits.append(f"⚠ {what} on {registry}" + (f": {why}" if why else ""))
     if sc.get("young"):
         age, n = sc.get("age_days"), sc.get("release_count")
         bits.append("⚠ young package name" + (f", first published {age} day{'' if age == 1 else 's'} ago"
                                                if isinstance(age, int) else "")
                     + (f", {n} release{'' if n == 1 else 's'}" if isinstance(n, int) else ""))
     return bits, bool(bits)
+
+
+def _supply_chain_outcome(sc: dict[str, Any] | None) -> str | None:
+    """The row's --supply-chain outcome for the summary count; None when the check was not asked for."""
+    if not sc:
+        return None
+    if sc.get("checked") is False:
+        return "not-checkable"
+    if sc.get("error"):
+        return "not-checkable"
+    return "flagged" if _supply_chain_bits(sc)[1] else "checked"
 
 
 def _change_bits(x: dict[str, Any]) -> tuple[list[str], list[str], bool]:
@@ -388,9 +409,11 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
                              clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
                              spec=_spec_of(entry) if with_spec else None,
                              refused=lab["x-mcpgawk"].get("error_kind") == "not-launched",
-                             changed=_change_bits(lab["x-mcpgawk"])[2]))
+                             changed=_change_bits(lab["x-mcpgawk"])[2],
+                             supply_chain=_supply_chain_outcome(lab["x-mcpgawk"].get("supply_chain"))))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
+        row.supply_chain = _supply_chain_outcome(e.get("_supply_chain"))
         if with_spec:
             # A SKIPPED local server is the prime click-to-verify target — it was found but not
             # launched. Carry its spec so the front-end can run it on the user's explicit click.
@@ -480,6 +503,17 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
     if counts["NOT-SCANNABLE"]:
         head += f" + {counts['NOT-SCANNABLE']} beyond this machine"
     out += ["", f"{head} — {summary}"]
+    flagged = sum(1 for r in rows if r.supply_chain == "flagged")
+    unchecked = sum(1 for r in rows if r.supply_chain == "not-checkable")
+    if flagged or unchecked:
+        # The rows carry each answer; this line is the count, so six deprecated packages are not
+        # left for the reader to spot one row at a time ("10 servers — 10 skipped" said nothing).
+        parts = []
+        if flagged:
+            parts.append(f"{flagged} server{'s' if flagged != 1 else ''} flagged by --supply-chain")
+        if unchecked:
+            parts.append(f"{unchecked} not checkable")
+        out.append(f"  {'⚠ ' if flagged else ''}{' · '.join(parts)}")
     if counts["NOT-SCANNABLE"]:
         # Say plainly that this part of the list is evidence-based and incomplete. These connectors
         # live in the user's Anthropic account, so one they added and never re-authorised leaves no
@@ -568,6 +602,11 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
             "unscannable": counts["NOT-SCANNABLE"],
             # Carried explicitly so a front-end cannot quietly present this list as complete.
             "unscannable_may_be_incomplete": bool(counts["NOT-SCANNABLE"]),
+            # Additive: present only when --supply-chain ran.
+            **({"supply_chain": {
+                "flagged": sorted(r.name for r in rows if r.supply_chain == "flagged"),
+                "not_checkable": sorted(r.name for r in rows if r.supply_chain == "not-checkable")}}
+               if any(r.supply_chain for r in rows) else {}),
             # Additive: the servers that changed since their baseline, so a front-end can lead with
             # them the way the terminal does, without re-deriving drift from labels.
             **({"changed": sorted(r.name for r in rows if r.changed)}

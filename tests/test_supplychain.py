@@ -4,6 +4,8 @@ from __future__ import annotations
 import urllib.error
 from datetime import datetime, timezone
 
+import pytest
+
 from mcpgawk.supplychain import check, check_npm, check_pypi, extract_package, registry_target
 
 
@@ -221,3 +223,37 @@ def test_check_passes_now_through():
             "time": {"created": "2026-09-27T12:00:00Z"}}
     f = check("npx", ["-y", "fresh"], fetch=lambda url: fake, now=NOW)
     assert f.age_days == 1 and f.young is True
+
+
+# --- PyPI project status (PEP 792), 2026-11-10 -----------------------------------------------
+# PyPI marks a whole project archived / deprecated / quarantined in its Simple API (project-status).
+# Until 0.1.86 only a yanked VERSION was read, so an archived PyPI project read as fine.
+_CLEAN_PYPI = {"info": {"version": "1.0.0"}, "releases": {"1.0.0": [{"yanked": False}]}}
+
+
+@pytest.mark.parametrize("status", ["archived", "deprecated", "quarantined"])
+def test_pypi_project_status_is_flagged(status):
+    f = check_pypi("some-pkg", fetch=lambda url: _CLEAN_PYPI,
+                   status_fetch=lambda name: {"status": status, "reason": "moved to new-pkg"})
+    assert f.deprecated is True
+    assert f.status == status
+    assert "moved to new-pkg" in (f.detail or "")
+
+
+def test_pypi_active_project_is_not_flagged():
+    f = check_pypi("some-pkg", fetch=lambda url: _CLEAN_PYPI, status_fetch=lambda name: {"status": "active"})
+    assert f.deprecated is False and f.status is None
+
+
+def test_a_failed_status_lookup_never_breaks_the_check():
+    """Status unknown is not a finding and not an error: the version check still stands."""
+    def boom(name):
+        raise TimeoutError("simple api down")
+    f = check_pypi("some-pkg", fetch=lambda url: _CLEAN_PYPI, status_fetch=boom)
+    assert f.error is None and f.deprecated is False and f.status is None
+
+
+def test_an_injected_fetch_never_reaches_the_network_for_status():
+    """Tests pass `fetch`; the status lookup must not silently go to pypi.org behind them."""
+    f = check_pypi("some-pkg", fetch=lambda url: _CLEAN_PYPI)
+    assert f.status is None

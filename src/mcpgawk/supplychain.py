@@ -56,6 +56,10 @@ class SupplyChainFinding:
     age_days: int | None = None
     release_count: int | None = None
     young: bool = False                  # age_days < YOUNG_DAYS or release_count <= THIN_RELEASES
+    # PyPI's project status (PEP 792) when it is not "active": archived, deprecated or quarantined.
+    # Whole-project, unlike a yanked VERSION. Read since 0.1.86; before that an archived PyPI project
+    # read as fine. `deprecated` is also set, so every existing reader keeps treating it as a finding.
+    status: str | None = None
 
 
 def _split_npm_spec(spec: str) -> tuple[str, str | None]:
@@ -192,6 +196,20 @@ def _get_json(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+_FLAGGED_STATUSES = ("archived", "deprecated", "quarantined")
+
+
+def _get_pypi_status(name: str) -> dict | None:
+    """The project-status block from PyPI's JSON Simple API (PEP 691/792). Only the package NAME is
+    sent, as for the version lookup. PyPI serves this form only on the Accept header, not a URL flag."""
+    req = urllib.request.Request(
+        f"https://pypi.org/simple/{name}/",
+        headers={"User-Agent": "mcpgawk (local supply-chain check)",
+                 "Accept": "application/vnd.pypi.simple.v1+json"})
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 — explicit opt-in egress
+        return json.loads(resp.read().decode("utf-8")).get("project-status")
+
+
 def _parse_time(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -239,8 +257,13 @@ def check_npm(spec: str, fetch=_get_json, now: datetime | None = None) -> Supply
         return _failure("npm", name, pin, e)
 
 
-def check_pypi(spec: str, fetch=_get_json, now: datetime | None = None) -> SupplyChainFinding:
+def check_pypi(spec: str, fetch=_get_json, now: datetime | None = None,
+               status_fetch=None) -> SupplyChainFinding:
     name, pin = _split_pypi_spec(spec)
+    if status_fetch is None:
+        # With an injected `fetch` (tests, replays) the status lookup is skipped rather than sent to
+        # pypi.org behind the caller's back; the real fetch gets the real status lookup.
+        status_fetch = _get_pypi_status if fetch is _get_json else (lambda _name: None)
     try:
         data = fetch(f"https://pypi.org/pypi/{name}/json")
         version = pin or data["info"]["version"]
@@ -253,6 +276,16 @@ def check_pypi(spec: str, fetch=_get_json, now: datetime | None = None) -> Suppl
                    if (t := _parse_time(r.get("upload_time_iso_8601") or r.get("upload_time")))]
         _age(f, min(uploads) if uploads else None,
              sum(1 for files in all_releases.values() if files) or None, now)
+        try:
+            ps = status_fetch(name) or {}
+        except Exception:  # noqa: BLE001 — status unknown is not a finding, and not a failed check
+            ps = {}
+        state = (ps.get("status") or "").lower() if isinstance(ps, dict) else ""
+        if state in _FLAGGED_STATUSES:
+            f.status = state
+            f.deprecated = True
+            why = ps.get("reason")
+            f.detail = "; ".join(x for x in (why, f.detail) if x) or None
         return f
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
         return _failure("pypi", name, pin, e)

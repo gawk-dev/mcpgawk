@@ -598,7 +598,8 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
             risk = "REVIEW — changed since its baseline"
         elif not k and sc_flag:
             registry = {"npm": "npm", "pypi": "PyPI"}.get(sc.get("ecosystem"), "its registry")
-            risk = (f"REVIEW — its package is deprecated on {registry}" if sc.get("deprecated")
+            what = sc.get("status") or ("yanked" if sc.get("ecosystem") == "pypi" else "deprecated")
+            risk = (f"REVIEW — its package is {what} on {registry}" if sc.get("deprecated")
                     else "REVIEW — its package name is very young")
         verdict = f"INCOMPLETE · {risk}" if has_dispatch else risk
 
@@ -755,7 +756,9 @@ def _supply_chain_lines(sc: dict[str, Any] | None) -> list[str]:
                 f"yet registered; nothing to trust yet. Do not launch it."]
     flags = []
     if sc.get("deprecated"):
-        flags.append("⚠ DEPRECATED/YANKED" + (f" — {sc['detail']}" if sc.get("detail") else ""))
+        what = (f"{sc['status'].upper()} ON {registry.upper()}" if sc.get("status")
+                else "DEPRECATED/YANKED")
+        flags.append(f"⚠ {what}" + (f" — {sc['detail']}" if sc.get("detail") else ""))
     if sc.get("young"):
         age, n = sc.get("age_days"), sc.get("release_count")
         releases = f"{n} release{'' if n == 1 else 's'}" if n is not None else None
