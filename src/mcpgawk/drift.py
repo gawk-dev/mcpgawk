@@ -217,8 +217,8 @@ def _legacy_item_view(rec: dict[str, Any]) -> dict[str, Any]:
     """`rec` with every item map in the ITEMS_BASIS 1 shape: for a repeated name, only the last
     occurrence, under the plain key. Pure; returns a copy only when something had to change."""
     out = None
-    for field in _ITEM_MAPS:
-        m = rec.get(field)
+    for item_map in _ITEM_MAPS:
+        m = rec.get(item_map)
         if not isinstance(m, dict) or not any("#" in str(k) for k in m):
             continue
         legacy: dict[str, Any] = {}
@@ -230,7 +230,7 @@ def _legacy_item_view(rec: dict[str, Any]) -> dict[str, Any]:
             if int(n) >= best.get(base, 0):
                 best[base], legacy[base] = int(n), v
         out = out if out is not None else dict(rec)
-        out[field] = legacy
+        out[item_map] = legacy
     return out if out is not None else rec
 
 
@@ -1358,7 +1358,7 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         # No diff, because there is no diff we could stand behind. Say that plainly rather than
         # printing a comparison the reader has just declared untrustworthy.
         return (_one_line(f"    ⚠ BASELINE NOT READABLE on {name} — {r.unreadable}") + "\n"
-                f"        Until then this server is NOT being compared against anything.")
+                "        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     approval = head is None      # the default caller compares "your approval" with "now"
     if head is None:
