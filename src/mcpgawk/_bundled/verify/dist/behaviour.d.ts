@@ -25,6 +25,9 @@ export interface ServerObservation {
     readonly skipped: readonly string[];
     /** Checks that never reached a verdict. >0 alongside 0 findings is NOT "verified clean". */
     readonly checkErrors: number;
+    /** Tools that answered the test input with their own error and were not judged on it. Their
+     * absence from `servers` is not a claim of safety either. Absent = none. */
+    readonly rejectedInput?: readonly string[];
     /** Vuln-class codes that ran (remote servers can only run output-based checks). */
     readonly checksRun: readonly string[];
     /** Which sandbox actually ran it. "none" is the honest value for an unisolated run. */
@@ -55,5 +58,5 @@ export declare function behaviourProfile(report: VerificationReport): BehaviourP
  * is replaced even to empty (its old convictions may describe a server that has since been
  * fixed); an unverified server's entry is retained untouched.
  */
-export declare function mergeBehaviourProfiles(existing: unknown, fresh: BehaviourProfileDoc, verified: ReadonlySet<string>): BehaviourProfileDoc;
+export declare function mergeBehaviourProfiles(existing: unknown, fresh: BehaviourProfileDoc, verified: ReadonlySet<string>, settled: ReadonlyMap<string, ReadonlySet<string>>): BehaviourProfileDoc;
 //# sourceMappingURL=behaviour.d.ts.map

@@ -28,7 +28,13 @@ STORE_FILENAME = "history.json"
 
 
 def default_path() -> str:
-    return os.environ.get(STORE_ENV) or os.path.expanduser(f"~/.mcpgawk/{STORE_FILENAME}")
+    override = os.environ.get(STORE_ENV)
+    if override:
+        # Absolute, always. A bare file name has no directory part, and everything that writes
+        # beside the store (`os.makedirs(dirname)`, the lock file) crashed on the empty string:
+        # `MCPGAWK_HISTORY=history.json mcpgawk scan` ended in a traceback (found 2026-11-14).
+        return os.path.abspath(override)
+    return os.path.expanduser(f"~/.mcpgawk/{STORE_FILENAME}")
 
 
 class InvalidServerKey(ValueError):
@@ -195,9 +201,10 @@ def require_human_approval(signer: Any = None) -> None:
 
 
 def approval_payload(key: str, rec: dict[str, Any], approved_at: Any) -> dict[str, Any]:
-    """EXACTLY what enforcement reads from an approval, so a signature over it covers every input
-    the guard decides on (design §4.1): the server key, the tool hashes, the approved parameter
-    names in the projection's own shape, and when. Recomputed identically from a projection row."""
+    """What enforcement reads FROM AN APPROVAL (design §4.1): the server key, the tool hashes, the
+    approved parameter names in the projection's own shape, and when. Recomputed identically from
+    a projection row. The signature covers the approval and nothing beside it; see
+    approval_lock.payload for what the guard reads that is not signed (review G6)."""
     from . import approval_lock
     return approval_lock.payload(key, rec.get("tools"), projected_props(rec), approved_at)
 
@@ -1175,6 +1182,25 @@ def approve_name_only(name: str, signer: Any, path: str | None = None) -> dict[s
     return row
 
 
+def review_pin(rec: Any) -> str:
+    """What an approve form binds to: the sighting's tool-surface `pin`, plus a digest of the MCP
+    extensions it advertises when it advertises any.
+
+    The pin alone left an advertised-extension change outside the binding (advisor follow-up,
+    2026-11-13): extensions are reviewable (`_reviewable`, files-extension item 1) but not in the
+    pin, so a sighting that only ADDED an extension between the look and the click passed the
+    form's check and the click adopted an extension nobody was shown. A record that advertises
+    none, or never asked, keeps its plain pin: every form and caller binds exactly as before."""
+    if not isinstance(rec, dict):
+        return ""
+    pin = str(rec.get("pin") or "")
+    ext = rec.get("extensions")
+    if not pin or not isinstance(ext, list) or not ext:
+        return pin
+    digest = hashlib.sha256(json.dumps(sorted(str(e) for e in ext)).encode()).hexdigest()[:16]
+    return f"{pin}+ext.{digest}"
+
+
 def approve(key: str, path: str | None = None, *,
             expect_pin: str | None = None, source: str = "cli",
             reason: str | None = None, signer: Any = None) -> dict[str, Any] | None:
@@ -1201,8 +1227,9 @@ def approve(key: str, path: str | None = None, *,
         # ADOPT WHAT WAS REVIEWED, NOT WHAT IS NEWEST. `mcpgawk monitor approve` accepts the
         # snapshot the operator looked at; between that look and this write the daemon may have
         # recorded a newer sighting. Refusing inside the lock is the only place the check is
-        # airtight (2026-09-04, ledger 109).
-        if expect_pin is not None and str(latest.get("pin") or "") != str(expect_pin):
+        # airtight (2026-09-04, ledger 109). The REVIEW pin: an advertised extension is reviewed
+        # too, and sits outside the tool-surface pin (advisor follow-up, 2026-11-13).
+        if expect_pin is not None and review_pin(latest) != str(expect_pin):
             return None
         entry = server_entry(store, key)
         # WHAT was accepted, against the previous approval, and WHY if the person said (Yashigani
@@ -1512,25 +1539,76 @@ def mute_finding(name: str, finding_id: str, path: str | None = None,
         if undo:
             muted_ids.pop(finding_id, None)
         else:
-            muted_ids[finding_id] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            record = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            # WHAT WAS JUDGED (review N14, 2026-11-13): the fingerprint of the tool as it is now.
+            # The mute used to hold a name and a kind only, so it went on muting after the text
+            # was rewritten, and a real finding of the same kind arrived already muted.
+            content = _muted_content(entry, finding_id)
+            if content:
+                record["content"] = content
+            muted_ids[finding_id] = record
         save(store, path)
     return key
 
 
+def _muted_content(entry: Any, finding_id: str) -> str | None:
+    """The stored fingerprint of the item a finding is about, at the latest sighting. None when
+    the baseline holds nothing under that name (a finding from another producer)."""
+    if not isinstance(entry, dict):
+        return None
+    sightings = [r for r in (entry.get("history") or []) if isinstance(r, dict)]
+    latest = sightings[-1] if sightings else entry.get("approved")
+    if not isinstance(latest, dict):
+        return None
+    item = finding_id.rpartition("/")[0]
+    items = latest.get("items") if isinstance(latest.get("items"), dict) else {}
+    tools = latest.get("tools") if isinstance(latest.get("tools"), dict) else {}
+    schemas = latest.get("schemas") if isinstance(latest.get("schemas"), dict) else {}
+    if item.startswith("prompt:"):
+        typed = "prompt." + item[len("prompt:"):]
+        found = items.get(typed)
+    else:
+        typed = "tool." + item
+        found = tools.get(item) or items.get(typed)
+    if not (isinstance(found, str) and found):
+        return None
+    # The description AND the input schema: a finding of the same kind can arrive in what a
+    # PARAMETER says while the tool's own description stays word for word the same.
+    schema = schemas.get(typed)
+    return f"{found}:{schema}" if isinstance(schema, str) and schema else found
+
+
 def muted(store: dict[str, Any], key: str | None) -> dict[str, Any]:
-    """`{finding_id: {"at": ...}}` the human has marked wrong for this server. Empty when none."""
+    """`{finding_id: {"at": ...}}` the human has marked wrong for this server AND that still
+    applies. Empty when none.
+
+    A mute covers the item as it was when the person judged it. One recorded with the item's
+    fingerprint stops applying while the item's current fingerprint differs, and applies again
+    if the item goes back. One recorded before fingerprints were kept, or for something the
+    baseline holds no text for, is by name, as it always was."""
     if key is None:
         return {}
     entry = (store.get("servers") or {}).get(key)
     raw = entry.get("muted") if isinstance(entry, dict) else None
-    return dict(raw) if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for finding_id, record in raw.items():
+        judged = record.get("content") if isinstance(record, dict) else None
+        current = _muted_content(entry, str(finding_id)) if judged else None
+        if judged and current and ":" not in judged:
+            current = current.partition(":")[0]     # judged on the description alone
+        if judged and current not in (None, judged):
+            continue                                # the text changed since the person muted it
+        out[finding_id] = record
+    return out
 
 
 def muted_total(store: dict[str, Any]) -> int:
     """How many findings the human has muted, fleet-wide — surfaced by `status` so suppression
     stays a visible, countable decision rather than quiet forgetting."""
-    return sum(len(entry.get("muted") or {})
-               for entry in (store.get("servers") or {}).values() if isinstance(entry, dict))
+    return sum(len(muted(store, key)) for key, entry in (store.get("servers") or {}).items()
+               if isinstance(entry, dict))
 
 
 def resolve(store: dict[str, Any], wanted: str) -> str | None:
@@ -1750,9 +1828,25 @@ def pending(store: dict[str, Any]) -> list[str]:
     BOTH records carry it, so stores approved before that axis existed do not flood the queue
     on upgrade — their drift stays invisible until the next approve, exactly as before."""
     out = []
+    from . import drift as _drift
     for key, entry in store.get("servers", {}).items():
-        base, latest = approved(store, key), sighting_to_review(store, key)
-        if not (base and latest):
+        # ONE BAD ENTRY IS ONE BAD ENTRY (review H10, 2026-11-12). A malformed entry (a hand edit,
+        # a half-written merge) raised here, and the panel's collect() then fell back to an empty
+        # store: every server's approval vanished from every tab. It is listed as needing review —
+        # nothing can show it matches what was approved — and the loop goes on.
+        try:
+            if not isinstance(entry, dict):
+                raise TypeError(f"entry is {type(entry).__name__}, not an object")
+            if "approved" in entry and not isinstance(entry["approved"], dict):
+                raise TypeError("the approval record is not an object")
+            base, latest = approved(store, key), sighting_to_review(store, key)
+            if not (base and latest):
+                continue
+            if not isinstance(base, dict) or not isinstance(latest, dict):
+                raise TypeError("a recorded sighting is not an object")
+            r = _drift.compare(base, latest)
+        except (AttributeError, TypeError, KeyError, ValueError, IndexError):
+            out.append(key)
             continue
         # ONE rule, imported — not a second opinion. This function compared the whole `items`
         # maps, so a kind the baseline never enumerated queued a decision that `drift.compare`
@@ -1766,10 +1860,7 @@ def pending(store: dict[str, Any]) -> list[str]:
         # it differed from every modern sighting, so an UNCHANGED server was queued on upgrade —
         # the flood this docstring promises never happens. So the decision IS compare's verdict,
         # on exactly the surface fields a person is asked to review.
-        from . import drift as _drift
-        r = _drift.compare(base, latest)
-        if r is not None and (r.added or r.removed or r.changed or r.schema_changed
-                              or r.annotation_changed):
+        if _reviewable(r):
             out.append(key)
     return sorted(out)
 
@@ -1983,6 +2074,11 @@ def last(store: dict[str, Any], key: str) -> dict[str, Any] | None:
 
 #: The entry key holding the first sighting since approval that differed from it (see `append`).
 REVIEW_KEY = "changed_since_approval"
+#: THE PER-TOOL LATCH (review I6, 2026-11-12): `{tool: {"at", "hash", "permission_changes"}}`, the
+#: first sighting since approval at which THAT tool differed. REVIEW_KEY keeps one record whole (what
+#: `decide` shows), so a second tool that changed and changed back after it was never held: history
+#: [approved A, B (t1), A, D (t2), A] held t1 only (measured). Same lifetime: approval clears it.
+REVIEW_TOOLS_KEY = "tools_changed_since_approval"
 
 
 def _surface_differs(base: Any, rec: Any, *, by_pin_across_rules: bool = False) -> bool:
@@ -2010,8 +2106,17 @@ def _surface_differs(base: Any, rec: Any, *, by_pin_across_rules: bool = False) 
         r = _drift.compare(base, rec)
     except Exception:                                   # noqa: BLE001 — never block a write on this
         return False
+    return _reviewable(r)
+
+
+def _reviewable(r: Any) -> bool:
+    """THE axes a person is asked to review, ONE rule for `pending` and `_surface_differs` (they
+    were two copies of it). An ADVERTISED-EXTENSION change counts (files-extension item 1, FOUNDER
+    "yes 1", 2026-11-12): the server gained or lost an ability no tool definition shows. It is
+    compared only between two records that asked (drift.build_record), so writers cannot flap it."""
     return bool(r is not None and (r.added or r.removed or r.changed or r.schema_changed
-                                   or r.annotation_changed))
+                                   or r.annotation_changed
+                                   or getattr(r, "extensions_changed", None) is not None))
 
 
 def _approval_anchor(entry: dict[str, Any], base: dict[str, Any]):
@@ -2071,9 +2176,10 @@ def reverted_tools(store: dict[str, Any], key: str) -> dict[str, dict[str, Any]]
     """`{tool: {"at", "hash", "permission_changes"}}` for THE LATCH: tools whose description changed
     or whose permissions grew at the held sighting (`held_sighting`) and are back to the approved
     form at the last sighting. Per tool, so a tool that never changed stays allowed. Empty unless the
-    approved, held and last records were all minted by the content rule (the stand-down `seen`
-    obeys: across rules a per-tool hash comparison is meaningless). ONE rule: the guard projection
-    and the panel both read it."""
+    approved and last records were minted by the content rule (the stand-down `seen` obeys: across
+    rules a per-tool hash comparison is meaningless); the held record counts only under that rule,
+    and the per-tool latch (REVIEW_TOOLS_KEY) adds every LATER tool's first change (review I6). ONE
+    rule: the guard projection and the panel both read it."""
     from . import drift
     entry = (store.get("servers") or {}).get(key) or {}
     rec, held = entry.get("approved"), held_sighting(store, key)
@@ -2081,17 +2187,91 @@ def reverted_tools(store: dict[str, Any], key: str) -> dict[str, dict[str, Any]]
     latest = hist[-1] if hist else None
     if not all(isinstance(x, dict) and isinstance(x.get("tools"), dict) for x in (rec, held, latest)):
         return {}
-    if held is latest or not all(drift.tools_comparable(x) for x in (rec, held, latest)):
+    if held is latest or not all(drift.tools_comparable(x) for x in (rec, latest)):
         return {}
-    held_growth, grown_now = _permission_growth(rec, held), _permission_growth(rec, latest)
+    # The held record speaks only when the approval's rule minted it. The per-tool latch is written
+    # under that rule only (`_latch_tools`), so it still speaks when the held record cannot: a first
+    # sighting from another rule must not hide a later poisoned window (review I6).
+    held_ok = drift.tools_comparable(held)
+    held_growth = _permission_growth(rec, held) if held_ok else {}
+    grown_now = _permission_growth(rec, latest)
     at = held.get("measured_at") if isinstance(held.get("measured_at"), str) else None
+    # Every tool's FIRST change since approval: the held record's, then the per-tool latch's for a
+    # tool the held record did not change (review I6). Each keeps the date it changed.
+    first: dict[str, dict[str, Any]] = {}
+    latched = entry.get(REVIEW_TOOLS_KEY)
+    for tool, seen in (latched.items() if isinstance(latched, dict) else ()):
+        if isinstance(seen, dict):
+            first[tool] = {"at": seen.get("at") if isinstance(seen.get("at"), str) else None,
+                           "hash": seen.get("hash"),
+                           "permission_changes": list(seen.get("permission_changes") or [])}
     out: dict[str, dict[str, Any]] = {}
     for tool, approved_hash in rec["tools"].items():
-        then, now = held["tools"].get(tool), latest["tools"].get(tool)
-        content_back = isinstance(then, str) and then != approved_hash and now == approved_hash
-        growth_back = bool(held_growth.get(tool)) and not grown_now.get(tool)
+        then_held = held["tools"].get(tool) if held_ok else None
+        if (isinstance(then_held, str) and then_held != approved_hash) or held_growth.get(tool):
+            then = {"at": at, "hash": then_held, "permission_changes": held_growth.get(tool) or []}
+        else:
+            then = first.get(tool)
+        if then is None:
+            continue
+        now = latest["tools"].get(tool)
+        content_back = (isinstance(then["hash"], str) and then["hash"] != approved_hash
+                        and now == approved_hash)
+        growth_back = bool(then["permission_changes"]) and not grown_now.get(tool)
         if content_back or growth_back:
-            out[tool] = {"at": at, "hash": then, "permission_changes": held_growth.get(tool) or []}
+            out[tool] = then
+    return out
+
+
+def unshown_changes(store: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The changes since approval that the review diff does NOT show: `[{"at", "tools", "record"}]`,
+    one per sighting, oldest first (review I6 follow-up, 2026-11-12).
+
+    The review screens diff the approval against ONE sighting (`sighting_to_review`), but the latch
+    holds every tool's first change (the held record, and REVIEW_TOOLS_KEY). Trusting the change
+    adopts the shown sighting and answers all of them, so each one the diff leaves out is named where
+    the person decides: [A, B (t1), A, D (t2), A] shows B and must name D; [A, B, A, D] shows D and
+    must name B. `record` is that sighting while the history (or the latch) still holds it, so its
+    own diff can be shown; None once trimmed, when only the tool and the day survive."""
+    from . import drift
+    entry = (store.get("servers") or {}).get(key) or {}
+    base, shown = approved(store, key), sighting_to_review(store, key)
+    if not all(isinstance(x, dict) and isinstance(x.get("tools"), dict) and drift.tools_comparable(x)
+               for x in (base, shown)):
+        return []
+    held = held_sighting(store, key)
+    # Every tool's FIRST change since approval: the per-tool latch, then (stores written before it)
+    # the held record's own changed tools.
+    firsts: dict[str, dict[str, Any]] = {}
+    latched = entry.get(REVIEW_TOOLS_KEY)
+    for tool, seen in (latched.items() if isinstance(latched, dict) else ()):
+        if isinstance(seen, dict) and tool in base["tools"]:
+            firsts[tool] = {"at": seen.get("at"), "hash": seen.get("hash"),
+                            "grew": bool(seen.get("permission_changes"))}
+    if (isinstance(held, dict) and isinstance(held.get("tools"), dict)
+            and drift.tools_comparable(held)):
+        held_growth = _permission_growth(base, held)
+        for tool, approved_hash in base["tools"].items():
+            then = held["tools"].get(tool)
+            if tool not in firsts and ((isinstance(then, str) and then != approved_hash)
+                                       or held_growth.get(tool)):
+                firsts[tool] = {"at": held.get("measured_at"), "hash": then,
+                                "grew": bool(held_growth.get(tool))}
+    shown_growth = _permission_growth(base, shown)
+    by_day: dict[Any, list[str]] = {}
+    for tool, first in firsts.items():
+        approved_hash = base["tools"].get(tool)
+        content = isinstance(first["hash"], str) and first["hash"] != approved_hash
+        if content and shown["tools"].get(tool) == first["hash"]:
+            continue                       # the same text is the one on screen
+        if not content and (not first["grew"] or shown_growth.get(tool)):
+            continue                       # nothing to name, or the growth is on screen
+        by_day.setdefault(first["at"], []).append(tool)
+    kept = [r for r in [held, *(entry.get("history") or [])] if isinstance(r, dict)]
+    out = []
+    for at, tools in sorted(by_day.items(), key=lambda kv: str(kv[0] or "")):
+        record = next((r for r in kept if at is not None and r.get("measured_at") == at), None)
+        out.append({"at": at, "tools": sorted(tools), "record": record})
     return out
 
 
@@ -2153,6 +2333,7 @@ def original_words(change: Any) -> str | None:
 def clear_review(entry: dict[str, Any]) -> None:
     """A person approved: the held sighting is answered. Every approval path calls this."""
     entry.pop(REVIEW_KEY, None)
+    entry.pop(REVIEW_TOOLS_KEY, None)
 
 
 def append(store: dict[str, Any], key: str, record: dict[str, Any], keep: int = 50) -> None:
@@ -2171,6 +2352,29 @@ def append(store: dict[str, Any], key: str, record: dict[str, Any], keep: int = 
             and not entry.get(AWAITING_APPROVAL)
             and _surface_differs(base, record, by_pin_across_rules=True)):
         entry[REVIEW_KEY] = record
+    if isinstance(base, dict) and not entry.get(AWAITING_APPROVAL):
+        _latch_tools(entry, base, record)
+
+
+def _latch_tools(entry: dict[str, Any], base: dict[str, Any], record: dict[str, Any]) -> None:
+    """THE PER-TOOL LATCH (REVIEW_TOOLS_KEY): note each approved tool's first sighting that differs
+    from the approval, in content or in permissions. Only within one content rule, as
+    `reverted_tools` compares: across rules a per-tool hash comparison is meaningless."""
+    from . import drift
+    if not (isinstance(base.get("tools"), dict) and isinstance(record.get("tools"), dict)
+            and drift.tools_comparable(base) and drift.tools_comparable(record)):
+        return
+    latched = entry.get(REVIEW_TOOLS_KEY)
+    latched = dict(latched) if isinstance(latched, dict) else {}
+    grown = _permission_growth(base, record)
+    at = record.get("measured_at") if isinstance(record.get("measured_at"), str) else None
+    for tool, approved_hash in base["tools"].items():
+        now = record["tools"].get(tool)
+        changed = isinstance(now, str) and now != approved_hash
+        if tool not in latched and (changed or grown.get(tool)):
+            latched[tool] = {"at": at, "hash": now, "permission_changes": grown.get(tool) or []}
+    if latched:
+        entry[REVIEW_TOOLS_KEY] = latched
 
 
 # ------------------------------------------------------------------------------------------- #

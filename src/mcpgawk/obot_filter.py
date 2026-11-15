@@ -159,8 +159,11 @@ def _evaluate(hook_input: dict[str, Any], server: str | None,
 
     event = {"tool_name": tool_name,
              "tool_input": arguments if isinstance(arguments, dict) else {}}
+    # RAW NAMES (review I10, 2026-11-12): MCPGAWK_SERVER is the gateway's own name for the server,
+    # never an agent's rewrite, so the rewritten-name candidates must not join the lookup. They made
+    # `a_b`'s own approved tool a deny because a different server, `a.b`, lacks it.
     output, note, basis, checked, _reason, _context = guard_hook._decide(
-        event, Path(store_path) if store_path is not None else None, "claude")
+        event, Path(store_path) if store_path is not None else None, "claude", raw_names=True)
 
     if output is not None:
         reason = _for_gateway(_deny_reason(output) or f"mcpgawk denied {server}/{tool}")

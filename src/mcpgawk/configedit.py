@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +62,38 @@ def _walk_entries(node: Any, server: str, trail: tuple[str, ...] = ()) -> list[t
         for i, v in enumerate(node):
             found.extend(_walk_entries(v, server, trail + (str(i),)))
     return found
+
+
+def _write_config(path: Path, new_text: str) -> Path:
+    """Write `new_text` over the config at `path`, changing nothing else about the FILE.
+    Returns the backup written for this edit. Raises OSError.
+
+    Review N18, 2026-11-12, measured: (1) os.replace on a SYMLINK replaced the link with a regular
+    file, so a dotfiles-managed config and its repo copy parted ways silently: the real file is
+    now resolved and written, the link kept. (2) The text was read with universal newlines and
+    written with LF, rewriting a CRLF file: its line endings are kept. (3) One fixed backup name was
+    overwritten on every edit, so after a second edit the person's original was gone: the FIRST
+    backup ever taken (`.mcpgawk-backup`) is never overwritten, and each edit also keeps a dated
+    copy of what it replaced."""
+    real = path.resolve()
+    raw = real.read_bytes()
+    crlf = b"\r\n" in raw
+    first = real.with_name(real.name + ".mcpgawk-backup")
+    if not first.exists():
+        shutil.copy2(real, first)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    backup = real.with_name(f"{real.name}.mcpgawk-backup-{stamp}")
+    n = 1
+    while backup.exists():
+        n += 1
+        backup = real.with_name(f"{real.name}.mcpgawk-backup-{stamp}-{n}")
+    shutil.copy2(real, backup)
+    fd, tmp = tempfile.mkstemp(dir=str(real.parent), prefix=".mcpgawk-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as fh:
+        fh.write(new_text)
+    shutil.copystat(real, tmp)
+    os.replace(tmp, real)
+    return backup
 
 
 def _at(doc: Any, trail: tuple[str, ...]) -> Any:
@@ -182,19 +215,14 @@ def apply_pin(edit: PinEdit) -> dict[str, Any]:
         return {"ok": True, "changed": 0, "message": f"{edit.path.name} already says "
                                                      f"`{edit.after}`"}
 
-    backup = edit.path.with_suffix(edit.path.suffix + ".mcpgawk-backup")
+    backup: Path | None = None
     try:
         # a live client may have written the file while the person was reading the item
         if edit.path.stat().st_mtime_ns != stat.st_mtime_ns:
             return {"ok": False, "changed": 0,
                     "message": f"{edit.path.name} changed on disk just now — nothing written, "
                                f"open the item again"}
-        shutil.copy2(edit.path, backup)
-        fd, tmp = tempfile.mkstemp(dir=str(edit.path.parent), prefix=".mcpgawk-", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(new_text)
-        shutil.copystat(edit.path, tmp)
-        os.replace(tmp, edit.path)
+        backup = _write_config(edit.path, new_text)
     except OSError as exc:
         return {"ok": False, "changed": 0,
                 "message": f"could not write {edit.path.name}: {exc}"}
@@ -215,11 +243,19 @@ WRAP_ARG = "wrap"
 
 
 def is_wrapped(entry: dict[str, Any]) -> bool:
-    """Is this entry already launched through mcpgawk?"""
+    """Is this entry already launched through mcpgawk?
+
+    Also recognises the BROKEN form an older `wrap install` wrote when mcpgawk was not on PATH:
+    `command: <python>`, `args: [wrap, --name, <server>, --, …]` (review N9, 2026-11-12). That entry
+    never started its server, and refusing to unwrap it left the person no way back."""
     args = entry.get("args")
     cmd = str(entry.get("command") or "")
-    return (Path(cmd).name.startswith("mcpgawk") and isinstance(args, list)
-            and bool(args) and args[0] == WRAP_ARG)
+    if not (isinstance(args, list) and args and args[0] == WRAP_ARG):
+        return False
+    name = Path(cmd).name
+    if name.startswith("mcpgawk"):
+        return True
+    return name.startswith("python") and "--name" in args and "--" in args
 
 
 def wrapped_entry(entry: dict[str, Any], server: str, *, mcpgawk: str) -> dict[str, Any]:
@@ -266,6 +302,22 @@ class EntryEdit:
         return bool(self.at) and not self.reason
 
 
+def _targets(doc: Any, server: str, action: str) -> list[tuple[str, ...]]:
+    """The entries named `server` that this action may touch (review N10, 2026-11-12).
+
+    A file can define one name twice — a local `db` in one project, a remote `db` in another, as
+    ~/.claude.json does. Wrapping walked them all and turned the remote one into
+    `mcpgawk wrap --name db -- ""`, which starts nothing; unwrapping then aborted on it. Wrap
+    touches LOCAL (stdio) entries only; unwrap touches only entries mcpgawk wrapped."""
+    trails = _walk_entries(doc, server)
+    if action == "wrap":
+        return [t for t in trails
+                if isinstance(_at(doc, t).get("command"), str) and _at(doc, t).get("command")]
+    if action == "unwrap":
+        return [t for t in trails if is_wrapped(_at(doc, t))]
+    return trails
+
+
 def _plan_entry(path: Path, server: str, action: str,
                 change) -> EntryEdit:
     edit = EntryEdit(path=path, server=server, action=action)
@@ -274,9 +326,14 @@ def _plan_entry(path: Path, server: str, action: str,
     except (OSError, ValueError) as exc:
         edit.reason = f"cannot read {path.name}: {type(exc).__name__}"
         return edit
-    trails = _walk_entries(doc, server)
-    if not trails:
+    if not _walk_entries(doc, server):
         edit.reason = f"{server} is not in {path.name}"
+        return edit
+    trails = _targets(doc, server, action)
+    if not trails:
+        edit.reason = (f"{server} in {path.name} has no local (stdio) entry to wrap — a remote "
+                       f"entry is not wrapped this way" if action == "wrap"
+                       else f"{server} in {path.name} is not launched through mcpgawk")
         return edit
     for trail in trails:
         entry = _at(doc, trail)
@@ -323,7 +380,7 @@ def apply_entry(edit: EntryEdit) -> dict[str, Any]:
     want = deepcopy(doc)
     change = ((lambda e: wrapped_entry(e, edit.server, mcpgawk=str(edit.after.get("command"))))
               if edit.action == "wrap" else unwrapped_entry)
-    trails = _walk_entries(want, edit.server)
+    trails = _targets(want, edit.server, edit.action)
     if not trails:
         return {"ok": False, "changed": 0,
                 "message": f"{edit.server} is no longer in {edit.path.name} — nothing written"}
@@ -351,17 +408,12 @@ def apply_entry(edit: EntryEdit) -> dict[str, Any]:
                 "message": f"the edit would have changed more than {edit.server}'s entry in "
                            f"{edit.path.name} — nothing written"}
 
-    backup = edit.path.with_suffix(edit.path.suffix + ".mcpgawk-backup")
+    backup: Path | None = None
     try:
         if edit.path.stat().st_mtime_ns != stat.st_mtime_ns:
             return {"ok": False, "changed": 0,
                     "message": f"{edit.path.name} changed on disk just now — nothing written"}
-        shutil.copy2(edit.path, backup)
-        fd, tmp = tempfile.mkstemp(dir=str(edit.path.parent), prefix=".mcpgawk-", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(new_text)
-        shutil.copystat(edit.path, tmp)
-        os.replace(tmp, edit.path)
+        backup = _write_config(edit.path, new_text)
     except OSError as exc:
         return {"ok": False, "changed": 0,
                 "message": f"could not write {edit.path.name}: {exc}"}

@@ -21,6 +21,16 @@ export declare function saveCache(state: LicenseState): void;
 export declare function readKey(): string;
 type PostFn = (url: string, body: Record<string, string>) => Promise<Record<string, unknown>>;
 /**
+ * WHOSE licence is this? (review P12, 2026-11-12). Lemon Squeezy's validate endpoint answers for
+ * every store, so valid + active only proves the key is real SOMEWHERE: anyone can open a store and
+ * mint one. The same pin as the Python engine (src/gawk_platform/licensing.py _provenance_ok) and
+ * the site (site/api/_lib/products.js); tests/test_license_pins_agree.py keeps all three equal.
+ * store_id/product_id are read from `meta`, falling back to `license_key`, as licensing.py does.
+ * A response that cannot name its store is refused, never passed.
+ */
+export declare const EXPECTED_STORE_ID = 431133;
+export declare const EXPECTED_PRODUCT_ID = 1377799;
+/**
  * Mirrors licensing.py::check_license_detailed, including its offline policy: fail OPEN inside a
  * fresh same-key cache window (a paying customer on flaky wifi is not blocked), fail CLOSED once
  * the cache is stale, missing, or unsigned.

@@ -48,12 +48,8 @@ def _item_hashes(snap: ServerSnapshot) -> dict[str, str]:
 
     Typed keys are load-bearing, not cosmetic: a prompt and a tool may share a name, and with bare
     names one would silently mask the other's drift."""
-    out: dict[str, str] = {}
-    for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
-        for it in items:
-            ident = it.get("name") or it.get("uri") or "?"
-            out[f"{kind}.{ident}"] = _hash(it.get("description"))
-    return out
+    # Keys from _iter_items, the ONE rule (a repeated name keeps its own key, review I9).
+    return {k: _hash(it.get("description")) for k, it in _iter_items(snap)}
 
 
 #: Descriptions are stored truncated. A drift diff needs the CHANGE to be legible, not the whole
@@ -75,12 +71,7 @@ def _item_texts(snap: ServerSnapshot) -> dict[str, str]:
     key and POST it somewhere". Redacted at this boundary (doctrine principle 6) because this is the
     point where server-controlled prose becomes a file on the user's disk.
     """
-    out: dict[str, str] = {}
-    for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
-        for it in items:
-            ident = it.get("name") or it.get("uri") or "?"
-            out[f"{kind}.{ident}"] = (redact(it.get("description")) or "")[:MAX_TEXT]
-    return out
+    return {k: (redact(it.get("description")) or "")[:MAX_TEXT] for k, it in _iter_items(snap)}
 
 
 #: Version of the RECORD format. Bumped ONLY for a change this reader could misinterpret — a
@@ -186,7 +177,8 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
     Same contract as `_item_signals`: only non-empty entries, so a missing KEY means clean while a
     missing MAP means nobody looked.
     """
-    from .signals import _scan_params, _scan_text   # local import: keeps drift's module graph acyclic
+    # local import: keeps drift's module graph acyclic
+    from .signals import _scan_param_text, _scan_params, _scan_text
 
     out: dict[str, list[str]] = {}
     for it in items or ():
@@ -196,7 +188,11 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
         key = f"{kind}.{ident}"
         # Parameters too: an exfil-by-argument rug pull changes the SCHEMA, and judging only the
         # prose let it through as "nothing matched a known injection pattern".
-        if found := _scan_text(it.get("description") or "", key) + _scan_params(it, key):
+        # ...and what the parameters SAY (review N8): the model reads a parameter's description
+        # as it reads the tool's. Without it, an instruction added to one after approval was
+        # recorded as a schema change with no verdict beside it.
+        if found := (_scan_text(it.get("description") or "", key) + _scan_params(it, key)
+                     + _scan_param_text(it, key)):
             out[key] = sorted({f.kind for f in found})
     return out
 
@@ -208,10 +204,49 @@ def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
+#: How item maps key a REPEATED name. 2 (2026-11-12, review I9): `{kind}.{name}`, then
+#: `{kind}.{name}#2`, … Before, one key per name held the LAST same-named item. A record without
+#: this field was written the old way; `compare` reads the newer record in the old shape against
+#: it, so upgrading never reports a server with repeated names as changed. Records with no
+#: repeated name are byte-identical under both rules.
+ITEMS_BASIS = 2
+_ITEM_MAPS = ("items", "texts", "schemas", "props", "params", "annotations")
+
+
+def _legacy_item_view(rec: dict[str, Any]) -> dict[str, Any]:
+    """`rec` with every item map in the ITEMS_BASIS 1 shape: for a repeated name, only the last
+    occurrence, under the plain key. Pure; returns a copy only when something had to change."""
+    out = None
+    for field in _ITEM_MAPS:
+        m = rec.get(field)
+        if not isinstance(m, dict) or not any("#" in str(k) for k in m):
+            continue
+        legacy: dict[str, Any] = {}
+        best: dict[str, int] = {}
+        for k, v in m.items():
+            base, sep, n = str(k).rpartition("#")
+            if not sep or not n.isdigit():
+                base, n = str(k), "1"
+            if int(n) >= best.get(base, 0):
+                best[base], legacy[base] = int(n), v
+        out = out if out is not None else dict(rec)
+        out[field] = legacy
+    return out if out is not None else rec
+
+
 def _iter_items(snap: ServerSnapshot):
+    """`({kind}.{name}, item)` for every item. A REPEATED name keeps its own key (review I9,
+    2026-11-12): `{kind}.{name}`, then `{kind}.{name}#2`, `#3`, in listing order. Keyed by name
+    alone, every map kept only the last of two same-named tools, so a change to the first moved the
+    pin but named nothing, and pending() queued nothing. A server with no repeated name gets
+    exactly the keys it always had, so no existing baseline moves."""
     for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
+        seen: dict[str, int] = {}
         for it in items:
-            yield f"{kind}.{it.get('name') or it.get('uri') or '?'}", it
+            base = f"{kind}.{it.get('name') or it.get('uri') or '?'}"
+            n = seen.get(base, 0) + 1
+            seen[base] = n
+            yield (base if n == 1 else f"{base}#{n}"), it
 
 
 def _item_schemas(snap: ServerSnapshot) -> dict[str, str]:
@@ -230,8 +265,27 @@ def _item_props(snap: ServerSnapshot) -> dict[str, list[str]]:
     for k, it in _iter_items(snap):
         props = ((it.get("inputSchema") or {}).get("properties") or {})
         if isinstance(props, dict):
-            out[k] = sorted(props)[:40]
+            out[k] = _kept_param_names(props)
     return out
+
+
+def _kept_param_names(props: dict) -> list[str]:
+    """At most `_PARAM_CAP` names, and the ones that carry PERMISSION are kept first (review
+    N13, 2026-11-13). The first 40 in alphabetical order used to be kept, so on a tool with 40
+    or more parameters a new `webhook_url` sorted past the cut: the guard's permission-growth
+    refusal reads these names and never saw it. A server could pad a tool to hide the one
+    parameter that matters. A tool at or under the cap is recorded exactly as before; the list
+    is sorted either way."""
+    names = sorted(n for n in props if isinstance(n, str))
+    if len(names) <= _PARAM_CAP:
+        return names
+    # Credential-shaped names too: the guard's smuggled-credential check asks whether a filled
+    # parameter was in the approved list, so an approved `password` must never be the one cut.
+    from .decision import _CREDENTIAL_SHAPED     # the guard's own rule; local import, no cycle
+    first = [n for n in names
+             if destination_param(n) or execution_param(n) or _CREDENTIAL_SHAPED.search(n)]
+    rest = [n for n in names if n not in set(first)]
+    return sorted((first + rest)[:_PARAM_CAP])
 
 
 _PARAM_CAP = 40        # parameters kept per item (matches _item_props)
@@ -242,6 +296,37 @@ _VALUE_CAP = 60        # characters kept of any single value
 def _short(v: Any) -> str:
     text = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
     return text if len(text) <= _VALUE_CAP else text[: _VALUE_CAP - 1] + "…"
+
+
+#: Which words `_param_summary` knows. A summary written under an older vocabulary has no entry
+#: for a keyword it never looked for, and that absence is not "the parameter did not have it".
+#: `compare` therefore drops the newer words unless BOTH records were written under the same
+#: vocabulary. 2 (2026-11-12): `file` (x-mcp-file) and `header` (x-mcp-header).
+PARAMS_BASIS = 2
+_BASIS_2_WORDS = ("file", "header")
+_KEYWORD_DEPTH = 6     # how far below a parameter a keyword is looked for (items, anyOf, oneOf…)
+
+
+def _has_keyword(node: Any, keyword: str, depth: int = _KEYWORD_DEPTH) -> bool:
+    """Is `keyword` on this schema node or below it? Bounded, because a schema is server-supplied.
+    `x-mcp-file` may sit on the parameter, in its array `items`, or in an anyOf/oneOf branch."""
+    if depth < 0:
+        return False
+    if isinstance(node, dict):
+        return keyword in node or any(_has_keyword(v, keyword, depth - 1) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_keyword(v, keyword, depth - 1) for v in node[:_PARAM_CAP])
+    return False
+
+
+def _without_words(summary: Any, words: tuple[str, ...]) -> Any:
+    """An `_item_params` entry with `words` removed from every parameter: the form two records of
+    different vocabularies can be compared in without one inventing a difference."""
+    if not isinstance(summary, dict) or not isinstance(summary.get("params"), dict):
+        return summary
+    return {**summary, "params": {n: ({k: v for k, v in p.items() if k not in words}
+                                      if isinstance(p, dict) else p)
+                                  for n, p in summary["params"].items()}}
 
 
 def _param_summary(prop: Any, required: bool) -> dict[str, Any]:
@@ -271,6 +356,16 @@ def _param_summary(prop: Any, required: bool) -> dict[str, Any]:
             out[k] = _short(prop[k])
     if "properties" in prop or "items" in prop:
         out["nested"] = True
+    # HOW the value travels, not what it may be. `x-mcp-file` (draft files extension, protocol
+    # 2026-07-28) means the client sends a FILE through this parameter, inline or to a target the
+    # server names; `x-mcp-header` means the value is also sent as an HTTP header. Both arrive as
+    # a bare schema keyword, which the summary used to pass over, so the report blamed "a nested
+    # schema or a parameter's wording". Named, never judged: these do not feed `loosenings`.
+    if _has_keyword(prop, "x-mcp-file"):
+        out["file"] = True
+    if "x-mcp-header" in prop:
+        h = prop["x-mcp-header"]
+        out["header"] = _short(h) if isinstance(h, str) and h else True
     return out
 
 
@@ -320,6 +415,11 @@ def _param_words(summary: Any) -> str:
             bits.append(f"{k} {summary[k]}")
     if summary.get("nested"):
         bits.append("nested")
+    if summary.get("file"):
+        bits.append("takes a file")
+    if summary.get("header"):
+        h = summary["header"]
+        bits.append(f"sent as a header ({h})" if isinstance(h, str) else "sent as a header")
     return ", ".join(bits) or "unconstrained"
 
 
@@ -353,6 +453,12 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
         # sighting an addition. Absent on records written before this field: handled there.
         "enumerated": list(getattr(snap, "enumerated", None) or ()),
         "capabilities": dict(getattr(snap, "capabilities", None) or {}),
+        # ADVERTISED EXTENSIONS (files-extension item 1, FOUNDER "yes 1", 2026-11-12): ONLY when the
+        # capabilities came from `server/discover`, the one response that states them. Absent =
+        # NOT ASKED (an older record, a legacy-handshake scan, wrap, publish): never "none".
+        **({"extensions": sorted(str(k) for k in (
+            (getattr(snap, "capabilities", None) or {}).get("extensions") or {}))}
+           if getattr(snap, "extensions_asked", False) else {}),
         "schema_version": RECORD_SCHEMA,  # what wrote this, so a future reader can refuse it
         "pin_basis": PIN_BASIS,           # which RULE minted `pin` — see PIN_BASIS
         "tools_basis": TOOLS_BASIS,       # which RULE minted `tools` — see TOOLS_BASIS_CONTENT
@@ -367,6 +473,8 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
         "schemas": _item_schemas(snap),
         "props": _item_props(snap),
         "params": _item_params(snap),      # per-parameter constraints, so the diff can be SHOWN
+        "params_basis": PARAMS_BASIS,      # which words `params` knows — see PARAMS_BASIS
+        "items_basis": ITEMS_BASIS,        # how a REPEATED item name is keyed — see ITEMS_BASIS
         "annotations": _item_annotations(snap),
     }
 
@@ -445,6 +553,9 @@ class DriftReport:
     transport_changed: tuple[str, str] | None = None
     #: B3 — (before, after) MCP protocol version, when it changed. None if either side didn't store it.
     protocol_changed: tuple[str, str] | None = None
+    #: (before, after) sorted extension identifiers a server ADVERTISES, when they differ. None when
+    #: either record did not ask (`extensions` absent): unknown must never render as changed.
+    extensions_changed: tuple[list[str], list[str]] | None = None
 
     def insertion(self, key: str) -> str | None:
         """What the new description GAINED, if the change was purely additive.
@@ -514,7 +625,21 @@ class DriftReport:
         return (self.pin_changed or bool(self.added or self.removed or self.changed
                                          or self.schema_changed or self.annotation_changed)
                 or self.transport_changed is not None
+                or self.extensions_changed is not None
                 or (self.protocol_changed is not None and not self.protocol_migration))
+
+    def extensions_gained(self) -> list[str]:
+        before, after = self.extensions_changed or ([], [])
+        return sorted(set(after) - set(before))
+
+    def extensions_lost(self) -> list[str]:
+        before, after = self.extensions_changed or ([], [])
+        return sorted(set(before) - set(after))
+
+    def extension_words(self) -> list[str]:
+        """["now advertises X", "no longer advertises Y"], the one phrasing every output uses."""
+        return ([f"now advertises {x}" for x in self.extensions_gained()]
+                + [f"no longer advertises {x}" for x in self.extensions_lost()])
 
     def surface_changed(self) -> bool:
         """`any()` minus the login, transport and protocol arms — did the SERVER's TOOL SURFACE
@@ -541,8 +666,18 @@ class DriftReport:
         return sorted(set(after) - set(before))
 
     def lost_params(self, key: str) -> list[str]:
+        """Names on the earlier record and not on the later one. Empty when the later record
+        holds the full `_PARAM_CAP`: a name missing from a list that was cut may simply have
+        fallen outside it, and "removed" would state something that did not happen."""
         before, after = self.props.get(key, ([], []))
+        if len(after) >= _PARAM_CAP:
+            return []
         return sorted(set(before) - set(after))
+
+    def props_cut(self, key: str) -> bool:
+        """The EARLIER record holds the full `_PARAM_CAP` names, so it may not hold them all: a
+        name missing from it is "new, or past what was recorded"."""
+        return len(self.props.get(key, ([], []))[0]) >= _PARAM_CAP
 
     def escalations(self, key: str) -> list[str]:
         """Annotation changes that WIDEN what the model will permit.
@@ -671,11 +806,19 @@ class DriftReport:
         The guard REFUSES on these (FOUNDER 2026-10-06, "Block permission growth"); every other
         schema change waits for sign-off without blocking (FOUNDER 2026-08-15). One rule, read by
         scan and by the guard projection."""
+        # A baseline holding the full `_PARAM_CAP` names may have been cut (and, written before
+        # 2026-11-13, cut alphabetically). A name missing from it is then "new, or past what was
+        # recorded": said as that, and still counted, because the approval on record never
+        # showed it to the person.
+        cut = self.props_cut(key)
+        def said(kind: str, name: str) -> str:
+            if not cut:
+                return f"new {kind} parameter {name}"
+            return (f"{kind} parameter {name} is not among the {_PARAM_CAP} parameters recorded "
+                    f"at approval (new, or past what was recorded)")
         return (self.escalations(key)
-                + [f"new destination parameter {p}" for p in self.gained_params(key)
-                   if destination_param(p)]
-                + [f"new execution parameter {p}" for p in self.gained_params(key)
-                   if execution_param(p)])
+                + [said("destination", p) for p in self.gained_params(key) if destination_param(p)]
+                + [said("execution", p) for p in self.gained_params(key) if execution_param(p)])
 
     def of_kind(self, kind: str) -> dict[str, list[str]]:
         """Split the typed `{kind}.{name}` keys back out for rendering."""
@@ -891,6 +1034,11 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     """None if there's no prior record (first sighting — nothing to drift from)."""
     if not prev:
         return None
+    # ONE KEYING RULE PER COMPARISON (review I9): a baseline written before repeated names got their
+    # own keys is compared with the newer record read the old way, or every such server would read
+    # as changed on upgrade.
+    if prev.get("items_basis") != curr.get("items_basis"):
+        prev, curr = _legacy_item_view(prev), _legacy_item_view(curr)
 
     # A baseline this build cannot interpret must not be DIFFED. Any difference would be this
     # reader misreading the record, not the server changing — and it would arrive as "everything
@@ -973,6 +1121,10 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     ppar, cpar = prev.get("params"), curr.get("params")
     params = ({k: (ppar[k], cpar[k]) for k in schema_changed if k in ppar and k in cpar}
               if isinstance(ppar, dict) and isinstance(cpar, dict) else {})
+    if prev.get("params_basis") != curr.get("params_basis"):
+        # One side was summarised before `file`/`header` existed: it cannot say "no file".
+        params = {k: (_without_words(b, _BASIS_2_WORDS), _without_words(a, _BASIS_2_WORDS))
+                  for k, (b, a) in params.items()}
 
     # B3. Guarded like the C1 maps: a record predating transport/protocol storage compares as None,
     # so the first run after this ships never false-alarms a switch that didn't happen.
@@ -1000,6 +1152,12 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     pl, cl = prev.get("login_id"), curr.get("login_id")
     login_changed = (pl, cl) if pl and cl and pl != cl else None
 
+    # ADVERTISED EXTENSIONS: compared only when BOTH records asked (see build_record).
+    pe, ce = prev.get("extensions"), curr.get("extensions")
+    extensions_changed = ((sorted(pe), sorted(ce))
+                          if isinstance(pe, list) and isinstance(ce, list) and sorted(pe) != sorted(ce)
+                          else None)
+
     return _with_severity(DriftReport(
         login_changed=login_changed,
         pin_changed=pin_comparable and prev.get("pin") != curr.get("pin"),
@@ -1018,6 +1176,7 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
         annos=annos, params=params,
         transport_changed=transport_changed,
         protocol_changed=protocol_changed,
+        extensions_changed=extensions_changed,
     ))
 
 
@@ -1066,7 +1225,9 @@ def _with_severity(r: DriftReport) -> DriftReport:
         # scan implements, expressed on verdicts: a tool that always mentioned ~/.ssh trips the
         # detector in both records and is not drift, while one that just gained an instruction has
         # a finding the previous record did not.
-        injected |= {k for k in r.changed
+        # `schema_changed` too: a verdict can arrive with the description untouched, in a
+        # parameter's text or name (review N8).
+        injected |= {k for k in {*r.changed, *r.schema_changed}
                      if set(r.curr_signals.get(k, ())) - set(r.prev_signals.get(k, ()))}
     # No `else`: an older record simply has no verdicts to add, and the insertion scan above — what
     # those baselines have always been judged on — already ran.
@@ -1098,6 +1259,14 @@ def _excerpt(text: str) -> str:
     return repr(flat)
 
 
+def _one_line(text: object) -> str:
+    """One line of the report, safe to print (review C5, 2026-11-13). Names of servers, tools,
+    prompts and parameters are chosen by the server and reach here as they arrived. Anything
+    that is not a printable character becomes a visible `?`: an escape sequence could erase the
+    DRIFT lines above it from the reader's screen, and a newline could add a line of its own."""
+    return "".join(c if c.isprintable() else "?" for c in str(text))
+
+
 def render_headline(names: list[str], hostile: list[str] | None = None,
                     injected: list[str] | None = None,
                     escalated: list[str] | None = None,
@@ -1114,6 +1283,12 @@ def render_headline(names: list[str], hostile: list[str] | None = None,
     recorded before origins were — the wording such a baseline has always had.
     """
     from .history import since_words
+    # Cleaned once, here, so the membership tests below still compare like with like.
+    names = [_one_line(x) for x in names]
+    hostile = [_one_line(x) for x in hostile] if hostile is not None else None
+    injected = [_one_line(x) for x in injected] if injected is not None else None
+    escalated = [_one_line(x) for x in escalated] if escalated is not None else None
+    origins = {_one_line(k): v for k, v in origins.items()} if origins is not None else None
     n = len(names)
     what = "server has" if n == 1 else "servers have"
     since = since_words([(origins or {}).get(x) for x in names])
@@ -1182,7 +1357,7 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
     if r.unreadable:
         # No diff, because there is no diff we could stand behind. Say that plainly rather than
         # printing a comparison the reader has just declared untrustworthy.
-        return (f"    ⚠ BASELINE NOT READABLE on {name} — {r.unreadable}\n"
+        return (_one_line(f"    ⚠ BASELINE NOT READABLE on {name} — {r.unreadable}") + "\n"
                 f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     approval = head is None      # the default caller compares "your approval" with "now"
@@ -1240,13 +1415,20 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
             short = key[len(kind) + 1:]
             added_params, dropped_params = r.gained_params(key), r.lost_params(key)
             params = ""
-            if added_params:
+            if added_params and r.props_cut(key):
+                # Said as what is known: the record before may not have held every name.
+                params += (f" — not among the {_PARAM_CAP} parameters recorded before: "
+                           f"{', '.join(added_params)}")
+            elif added_params:
                 params += f" — gained parameter(s): {', '.join(added_params)}"
             if dropped_params:
                 params += f" — removed: {', '.join(dropped_params)}"
             loose = r.loosenings(key)
             mark = (f" ({', '.join(loose)})  ← ACCEPTS MORE" if loose
                     else (" — nothing loosened" if key in r.params else ""))
+            if key in r.injected and key not in r.changed:
+                # The description did not change, so the evidence is in the parameters.
+                mark += "  ← INJECTION SIGNATURE in what the parameters say or ask for"
             lines.append(f"        ! {kind} input schema CHANGED: {short}{params}{mark}")
             for name, was, now in r.param_moves(key):
                 lines.append(f"            {name}: {was} → {now}")
@@ -1284,6 +1466,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
     elif r.protocol_changed:
         before, after = r.protocol_changed
         lines.append(f"        · negotiated MCP {after}; the previous snapshot {before}")
+    for words in r.extension_words():
+        # A server-level ability no tool definition shows (the files extension: send a file to a
+        # URL named at call time). Shown the same way for an approval and a changelog: only the
+        # discover path records it, so two writers cannot disagree about it.
+        lines.append(f"        ! {words} (an MCP extension: an ability no tool definition shows)")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
     if r.login_changed and approval:
@@ -1311,4 +1498,5 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         lines.append("        Nothing in what changed matched a known injection pattern — that is "
                      + ("not proof it is safe. Read the diff above before approving."
                         if approval else "not proof it was safe."))
-    return "\n".join(lines)
+    # Each entry is ONE line of the report and is printed as one (see _one_line).
+    return "\n".join(_one_line(line) for line in lines)

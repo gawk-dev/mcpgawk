@@ -17,14 +17,36 @@ export function loadSuppressions(path) {
         suppressed: parsed.suppressed ?? {},
     };
 }
-export function isSuppressed(findingId, file) {
-    return file.suppressed[findingId];
+/** The hosts a finding reached that its suppression never accepted. Empty when it is covered. */
+export function unreviewedHosts(entry, evidence) {
+    const reached = evidence?.egress;
+    if (entry.hosts === undefined || !Array.isArray(reached))
+        return [];
+    const accepted = new Set(entry.hosts.map((h) => String(h).toLowerCase()));
+    return reached.map((h) => String(h)).filter((h) => !accepted.has(h.toLowerCase()));
+}
+/**
+ * The suppression that covers this finding, or undefined.
+ *
+ * A finding's id is the server, the tool and the kind of finding, so by id alone a suppression
+ * for "fetch reaches api.github.com" also covered the same tool reaching anywhere else, for good
+ * (review P5, 2026-11-13). When the entry names the hosts that were accepted and `evidence`
+ * carries the hosts this run reached, any host outside the list means the entry does not cover it.
+ */
+export function isSuppressed(findingId, file, evidence) {
+    const entry = file.suppressed[findingId];
+    if (entry === undefined)
+        return undefined;
+    return unreviewedHosts(entry, evidence).length > 0 ? undefined : entry;
 }
 /** Add (or overwrite) one suppression entry and persist it — pure, the caller writes the file. */
-export function withSuppression(file, findingId, reason, approvedBy, approvedAt = new Date().toISOString()) {
+export function withSuppression(file, findingId, reason, approvedBy, approvedAt = new Date().toISOString(), hosts) {
+    const entry = hosts === undefined
+        ? { reason, approvedBy, approvedAt }
+        : { reason, approvedBy, approvedAt, hosts: [...hosts] };
     return {
         schemaVersion: file.schemaVersion,
-        suppressed: { ...file.suppressed, [findingId]: { reason, approvedBy, approvedAt } },
+        suppressed: { ...file.suppressed, [findingId]: entry },
     };
 }
 export function saveSuppressions(path, file) {

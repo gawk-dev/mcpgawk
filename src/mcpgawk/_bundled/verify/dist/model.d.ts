@@ -47,6 +47,18 @@ export interface CheckError {
     readonly code: string;
     readonly detail: string;
 }
+/**
+ * A tool that answered the made-up input a check sends with its own error ("no such file", "id is
+ * required"). Review J1, narrowed by the founder 2026-11-15: such a tool is LISTED, the server is
+ * judged on the tools that did answer, and only a server where every call errors is incomplete.
+ * `checks` are the check codes it rejected (a tool can accept one input and refuse another);
+ * `detail` is the first thing it said, redacted and cut to one line.
+ */
+export interface RejectedInput {
+    readonly tool: string;
+    readonly checks: readonly string[];
+    readonly detail: string;
+}
 /** The result of verifying one server: what was checked, skipped, and convicted. */
 export interface ServerReport {
     readonly server: string;
@@ -93,6 +105,21 @@ export interface ServerReport {
      * nothing behavioural. Forces the server INCOMPLETE (found live 2026-08-15: the persisted
      * report called such a run `clean, complete` while the panel said "proved nothing"). */
     readonly authIncomplete?: string;
+    /** Tools that answered a check's made-up input with their own error, so those checks concluded
+     * nothing about them. Counted in NEITHER `checksPlanned` nor `checksCompleted`, never in
+     * `toolsSettled`, and a tool that rejected every check is not in `toolsChecked` either. The
+     * server is judged on the rest. Absent = no tool did. See {@link RejectedInput}. */
+    readonly rejectedInput?: readonly RejectedInput[];
+    /** Set when calls were made and EVERY one that got an answer got an error (an expired
+     * credential, a missing key): nothing was proven about the server. Forces it INCOMPLETE, like
+     * `authIncomplete`, and carries the first error the server gave. */
+    readonly allCallsErrored?: string;
+    /** The tools THIS run settled: every check it planned for the tool reached a conclusion (J3
+     * follow-up, 2026-11-13). COLLECTED where the checks ran, never derived by subtraction (the J9
+     * lesson), and EMPTY when `authIncomplete` is set: checks that "completed" against a login wall
+     * settle nothing. The behaviour profile clears a prior conviction only for these. In memory
+     * only; the report JSON is built field by field and does not carry it. Absent = none settled. */
+    readonly toolsSettled?: readonly string[];
     /** Meta-tool name(s) that make this a dynamic-DISPATCH server (see dispatch.ts). Non-empty means
      * a larger real tool catalog is hidden behind them and was NOT enumerated by the static tools/list
      * — the verification is INCOMPLETE, and a "clean" result on the visible tools is not proof of a

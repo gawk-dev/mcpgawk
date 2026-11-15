@@ -731,3 +731,85 @@ def test_a_deeply_nested_plugin_settings_file_does_not_take_down_the_sweep(tmp_p
     servers, sources = discover_report(home=tmp_path, platform="darwin")
     assert next(s for s in sources if s["client"] == "windsurf")["status"] == OK
     assert set(servers) == {"ok"}
+
+
+# ---- review N4 / N17, 2026-11-12 -------------------------------------------------------------- #
+def test_one_odd_entry_never_aborts_discovery_for_every_client(tmp_path):
+    """N4, executed by a verifier: a dict-valued `command` (Zed's older settings) or a nested-list
+    argument raised TypeError (unhashable) out of discovery, so NO client's servers were found.
+    Here Cursor's ordinary server must still be found beside Zed's odd ones."""
+    _write(tmp_path, ".cursor/mcp.json", {"mcpServers": {"plain": {"command": "plain-mcp"}}})
+    _write(tmp_path, ".config/zed/settings.json", {"context_servers": {
+        "legacy": {"command": {"path": "zed-legacy-mcp", "args": ["--port", "1"],
+                               "env": {"TOKEN": "t"}}},
+        "nested": {"command": "nested-mcp", "args": [["--a", "b"], {"k": "v"}]},
+        "weird": {"command": {"no_path": True}},
+    }})
+    got = _discover(tmp_path)
+    assert "plain" in got, "an odd entry in another client's config hid this one"
+    assert got["legacy"]["command"] == "zed-legacy-mcp"
+    assert got["legacy"]["args"] == ["--port", "1"] and got["legacy"]["env"] == {"TOKEN": "t"}
+    assert "nested" in got
+    assert "weird" not in got, "a command that names no executable cannot be scanned"
+
+
+def test_an_unreadable_command_is_reported_not_dropped(tmp_path):
+    from mcpgawk import discover
+    _write(tmp_path, ".config/zed/settings.json", {"context_servers": {"weird": {"command": {"no_path": True}}}})
+    _servers, sources = discover.discover_report(home=tmp_path, platform="darwin", cwd=tmp_path)
+    zed = [s for s in sources if "weird" in (s.get("unrecognised") or [])]
+    assert zed, f"the entry vanished without a trace: {sources}"
+
+
+def test_enabled_false_means_disabled(tmp_path):
+    """N17: Zed, opencode and Goose say `enabled: false`; those servers were launched as live."""
+    from mcpgawk import discover
+    _write(tmp_path, ".config/zed/settings.json", {"context_servers": {
+        "off": {"command": "off-mcp", "enabled": False},
+        "on": {"command": "on-mcp", "enabled": True}}})
+    got = _discover(tmp_path)
+    assert "off" not in got and "on" in got
+    _servers, sources = discover.discover_report(home=tmp_path, platform="darwin", cwd=tmp_path)
+    assert any("off" in (s.get("disabled") or []) for s in sources), "a switched-off server must be counted as disabled"
+
+
+def test_two_projects_with_the_same_server_name_are_both_found(tmp_path):
+    """Review N2, executed by a verifier: ~/.claude.json per-project maps were merged with
+    dict.update, so two projects that each define `db` differently left only the last one: the
+    other was never scanned, baselined or guarded while the fleet looked complete."""
+    _write(tmp_path, ".claude.json", {"projects": {
+        "/Users/me/app": {"mcpServers": {"db": {"command": "sqlite-mcp", "args": ["app.db"]}}},
+        "/Users/me/web": {"mcpServers": {"db": {"command": "postgres-mcp", "args": ["--url", "pg://web"]}}},
+    }})
+    got = _discover(tmp_path)
+    commands = sorted(e["command"] for n, e in got.items() if n == "db" or n.startswith("db "))
+    assert commands == ["postgres-mcp", "sqlite-mcp"], f"one project's db was dropped: {sorted(got)}"
+
+
+def test_the_same_server_in_two_projects_is_still_one_server(tmp_path):
+    entry = {"command": "sqlite-mcp", "args": ["shared.db"]}
+    _write(tmp_path, ".claude.json", {"projects": {
+        "/Users/me/app": {"mcpServers": {"db": entry}},
+        "/Users/me/web": {"mcpServers": {"db": dict(entry)}},
+    }})
+    got = _discover(tmp_path)
+    assert [n for n in got if n == "db" or n.startswith("db ")] == ["db"]
+
+
+def test_the_project_cap_is_reported_and_keeps_the_newest(tmp_path):
+    """Review N3, executed by a verifier: the project sweep read the first 40 `projects` keys of
+    ~/.claude.json (the OLDEST, in insertion order) and said nothing about the rest. Repo-level
+    .mcp.json servers in later projects were never found while the report looked complete."""
+    from mcpgawk import discover
+    projects = {}
+    for i in range(45):
+        d = tmp_path / f"proj{i:02d}"
+        d.mkdir()
+        projects[str(d)] = {}
+    newest = tmp_path / "proj44"
+    _write(newest, ".mcp.json", {"mcpServers": {"newest-srv": {"command": "newest-mcp"}}})
+    _write(tmp_path, ".claude.json", {"projects": projects})
+    servers, sources = discover.discover_report(home=tmp_path, platform="darwin", cwd=tmp_path)
+    assert "newest-srv" in servers, "the most recently added project was not swept"
+    lines = discover.problem_lines(sources)
+    assert any("45" in ln and "40" in ln for ln in lines), f"the cap is not reported: {lines}"

@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildDispatchEnvelope } from "./dispatch.js";
 import { isRemote } from "./model.js";
 import { ModernClient } from "./modern-client.js";
+import { redactText } from "./redact.js";
 /** Untrusted tools must not be able to stall the verifier — bound every tool call. */
 function probeTimeoutMs() {
     const parsed = Number(process.env.GAWK_PROBE_TIMEOUT_MS);
@@ -250,6 +251,30 @@ function resultText(res) {
         .map((c) => c.text)
         .join("\n");
 }
+function answerOf(res) {
+    return { text: resultText(res), isError: res?.isError === true };
+}
+/** What a tool said when it answered with an error: redacted, one line, 160 characters. Never
+ *  empty, because {@link Observation.errorAnswer} being set IS the marker. */
+function errorAnswerExcerpt(a) {
+    const excerpt = redactText(a.text).replace(/\s+/g, " ").trim().slice(0, 160);
+    return excerpt || "the tool gave no error text";
+}
+/**
+ * The allowed destinations the proxy could not reach during a call, in words, or "". The proxy
+ * has recorded these since it learned to fail fast, and nothing read them (review J12): a tool
+ * that errors because its own declared upstream is down was reported as just "an error".
+ */
+export function unreachableNote(records) {
+    const seen = new Map();
+    for (const r of records)
+        if (r.unreachable !== undefined)
+            seen.set(r.hostname, r.unreachable);
+    if (seen.size === 0)
+        return "";
+    const hosts = [...seen].map(([host, why]) => `${host} (${why})`).join(", ");
+    return `; an allowed destination could not be reached during the call: ${hosts}`;
+}
 const MCP_REMOTE_LAUNCHERS = new Set(["npx", "npm", "pnpm", "yarn", "bunx"]);
 /**
  * A local stdio command that's actually a proxy to a remote server (`npx mcp-remote <url>`), not
@@ -275,14 +300,24 @@ export function sandboxedProbe(server, sandbox) {
  * matters when the thing running is untrusted code. */
 function sandboxedProbeFresh(server, sandbox) {
     return async (toolName, args) => {
-        const session = await sandbox.enter(server.allowedHosts ?? [], {
-            command: server.command ?? "",
-            args: server.args ?? [],
-        });
+        // J4 (2026-11-12): entering the sandbox sat OUTSIDE the try, so one sandbox that failed to
+        // start (a slow Docker start) threw out of verifyServer and every finding already reproduced
+        // on this server was lost, exit 2. A failed entry is a probe that could not START: the
+        // tool's remaining checks are skipped, and two in a row with nothing completed still abandon.
+        let session;
+        try {
+            session = await sandbox.enter(server.allowedHosts ?? [], {
+                command: server.command ?? "",
+                args: server.args ?? [],
+            });
+        }
+        catch (e) {
+            const why = e?.message ?? String(e);
+            return { ok: false, detail: `the sandbox did not start: ${why}`, startup: true };
+        }
         try {
             const client = new Client({ name: "gawk-verify", version: "1.0.0" });
             let active = client;
-            let text = "";
             // server.env goes through wrapSpawn too: a containerized target does NOT inherit the host
             // spawn env, so merging env only into stdioTransport would silently strip it in-container.
             const spawnOverride = session.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
@@ -313,8 +348,9 @@ function sandboxedProbeFresh(server, sandbox) {
                     throw new StartupFailure(e?.message ?? String(e));
                 throw e;
             }
+            let answer;
             try {
-                text = resultText(await active.callTool({ name: toolName, arguments: args }, undefined, {
+                answer = answerOf(await active.callTool({ name: toolName, arguments: args }, undefined, {
                     timeout: probeTimeoutMs(),
                 }));
             }
@@ -322,12 +358,32 @@ function sandboxedProbeFresh(server, sandbox) {
                 await active.close();
             }
             await session.settle?.(); // backends with an async record pipe: let in-flight egress land
-            const obs = { egress: session.nonAllowlistedEgress(), resultText: text };
+            const egress = session.nonAllowlistedEgress();
+            const down = unreachableNote(session.egress());
             await session.dispose();
-            return { ok: true, obs };
+            // J1 (narrowed 2026-11-15): an error answer with no egress is an answer, marked as an error.
+            if (answer.isError && egress.length === 0) {
+                return { ok: true, obs: { egress, resultText: answer.text, errorAnswer: errorAnswerExcerpt(answer) + down } };
+            }
+            return { ok: true, obs: { egress, resultText: answer.text } };
         }
         catch (e) {
+            // J7 (2026-11-12): read what the sandbox recorded BEFORE disposing it. A call that failed
+            // after the tool tried to send data out (the sandbox blocked it, the process died) is
+            // evidence, not a check error.
+            let egress = [];
+            if (!(e instanceof StartupFailure)) {
+                try {
+                    await session.settle?.();
+                    egress = session.nonAllowlistedEgress();
+                }
+                catch {
+                    // the sandbox is already gone: nothing recorded to read
+                }
+            }
             await session.dispose();
+            if (egress.length > 0)
+                return { ok: true, obs: { egress, resultText: "" } };
             const detail = e?.message ?? String(e);
             return e instanceof StartupFailure
                 ? { ok: false, detail, startup: true }
@@ -379,16 +435,18 @@ export function sandboxedProbeReused(server, sandbox) {
     };
     const sep = "__";
     const wire = (toolName) => server.backendPrefix ? `${server.backendPrefix}${sep}${toolName}` : toolName;
-    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
+    const callOnce = async (c, toolName, args) => answerOf(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
     }));
     const probe = async (toolName, args) => {
+        // J7 (2026-11-12): egress the FAILED attempt recorded, read before its session is disposed.
+        let carried = [];
         try {
             if (!client)
                 client = await connect();
-            let text;
+            let answer;
             try {
-                text = await callOnce(client, toolName, args);
+                answer = await callOnce(client, toolName, args);
             }
             catch (callErr) {
                 // Stale session (provider-side idle close, token expiry) -- tear down and reconnect once,
@@ -400,6 +458,13 @@ export function sandboxedProbeReused(server, sandbox) {
                     // already dead
                 }
                 try {
+                    await session?.settle?.();
+                    carried = (session?.egress() ?? []).slice(egressSeen).filter((r) => !r.allowed);
+                }
+                catch {
+                    // the sandbox is already gone: nothing recorded to read
+                }
+                try {
                     await session?.dispose();
                 }
                 catch {
@@ -408,19 +473,25 @@ export function sandboxedProbeReused(server, sandbox) {
                 session = undefined;
                 await delay(reconnectBackoffMs());
                 client = await connect();
-                text = await callOnce(client, toolName, args);
+                answer = await callOnce(client, toolName, args);
             }
             await session?.settle?.(); // backends with an async record pipe: let in-flight egress land
             const allEgress = session?.egress() ?? [];
             const newEgress = allEgress.slice(egressSeen);
             egressSeen = allEgress.length;
-            const obs = {
-                egress: newEgress.filter((r) => !r.allowed),
-                resultText: text,
-            };
-            return { ok: true, obs };
+            const egress = [...carried, ...newEgress.filter((r) => !r.allowed)];
+            // J1 (narrowed 2026-11-15): an error answer with no egress is an answer, marked as an error.
+            if (answer.isError && egress.length === 0) {
+                return {
+                    ok: true,
+                    obs: { egress, resultText: answer.text, errorAnswer: errorAnswerExcerpt(answer) + unreachableNote(newEgress) },
+                };
+            }
+            return { ok: true, obs: { egress, resultText: answer.text } };
         }
         catch (e) {
+            if (carried.length > 0)
+                return { ok: true, obs: { egress: carried, resultText: "" } };
             return { ok: false, detail: e?.message ?? String(e) };
         }
     };
@@ -473,16 +544,16 @@ export function remoteProbe(server) {
     }, () => modernFor(server));
     const sep = "__";
     const wire = (toolName) => server.backendPrefix ? `${server.backendPrefix}${sep}${toolName}` : toolName;
-    const callOnce = async (c, toolName, args) => resultText(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
+    const callOnce = async (c, toolName, args) => answerOf(await c.callTool({ name: wire(toolName), arguments: args }, undefined, {
         timeout: probeTimeoutMs(),
     }));
     const probe = async (toolName, args) => {
         try {
             if (!client)
                 client = await connect();
-            let text;
+            let answer;
             try {
-                text = await callOnce(client, toolName, args);
+                answer = await callOnce(client, toolName, args);
             }
             catch (callErr) {
                 // The cached connection may have gone stale (token expiry, idle timeout, provider-side
@@ -496,9 +567,14 @@ export function remoteProbe(server) {
                 }
                 await delay(reconnectBackoffMs());
                 client = await connect();
-                text = await callOnce(client, toolName, args);
+                answer = await callOnce(client, toolName, args);
             }
-            return { ok: true, obs: { egress: [], resultText: text } };
+            // J1 (narrowed 2026-11-15): a remote call shows no egress, so an error answer is always
+            // an answer that proved nothing about the tool. Marked, never counted as a check that ran.
+            if (answer.isError) {
+                return { ok: true, obs: { egress: [], resultText: answer.text, errorAnswer: errorAnswerExcerpt(answer) } };
+            }
+            return { ok: true, obs: { egress: [], resultText: answer.text } };
         }
         catch (e) {
             return { ok: false, detail: e?.message ?? String(e) };

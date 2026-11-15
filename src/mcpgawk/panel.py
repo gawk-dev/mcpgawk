@@ -568,6 +568,11 @@ def _classify(name: str, key: str | None, d: dict) -> str:
     # tier. Not Observed: that tier says the sandbox checks were NOT run, and here they were.
     if not _has_approval(d, key):
         return "unverified"
+    # A RUN THAT DID NOT COMPLETE IS NOT A VERIFICATION (review H6, 2026-11-12): checks that never
+    # completed prove nothing, and verify_verdict already calls such a run "incomplete — not
+    # clean". It stays Unverified, the pair of this tier, until a run completes.
+    if isinstance(ran, dict) and (ran.get("checkErrors") or 0) > 0:
+        return "unverified"
     return "baseline"
 
 
@@ -725,7 +730,8 @@ def _merge_verify_report(report_path: Path | str, prev_report: dict) -> None:
 def verify_verdict(*, checked: int, skipped: list, errors: int, hits: int,
                    folded: int = 0, backend: str | None = None,
                    degraded: str | None = None,
-                   label_noise: str | None = None) -> tuple[str, str, str]:
+                   label_noise: str | None = None,
+                   rejected: list | None = None) -> tuple[str, str, str]:
     """(outcome, level, detail) for one server a verify run touched.
 
     "observed" is NOT a verdict — it says we managed to run, which is a fact about US. The founder
@@ -741,6 +747,10 @@ def verify_verdict(*, checked: int, skipped: list, errors: int, hits: int,
         bits.append(f"{len(skipped)} not invoked — absence there proves nothing")
     if errors:
         bits.append(f"{errors} check(s) never completed")
+    if rejected:           # J1 narrowed (FOUNDER 2026-11-15): judged on the rest, these LISTED
+        bits.append(f"{len(rejected)} answered the test input with an error, not judged: "
+                    + ", ".join(str(t) for t in rejected[:8])
+                    + (f", +{len(rejected) - 8} more" if len(rejected) > 8 else ""))
     if backend:            # the truth about isolation, per server, instead of a claim
         bits.append(f"isolation: {backend}")
     if degraded:           # container isolation was requested and did NOT run — say why
@@ -854,6 +864,42 @@ def activity_rows(limit: int = 2000) -> list[dict]:
     return out
 
 
+def local_request_refusal(host_header: str | None, sec_fetch_site: str | None) -> bool:
+    """True when a request to a LOCAL surface must be refused: its Host is not a loopback name (a
+    DNS-rebinding page whose own hostname re-resolved to 127.0.0.1) or a browser marked it
+    cross-site. ONE check for every local surface: the panel and `mcpgawk decide` both call it
+    (review G14, 2026-11-12: decide had none)."""
+    host = (host_header or "").strip().lower()
+    name = host.rsplit("]", 1)[0].lstrip("[") if host.startswith("[") else host.split(":", 1)[0]
+    site = (sec_fetch_site or "").lower()
+    return not (name in ("127.0.0.1", "localhost", "::1") and site != "cross-site")
+
+
+#: A spreadsheet runs a cell that starts with one of these as a formula (review G14).
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """A cell a spreadsheet will show, not run: server names, tool names and reasons come from
+    servers and agents, not from the person, so a leading = + - @ (or a tab or CR) is neutralised
+    with a quote. Numbers and booleans pass unchanged."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
+def _csv_bytes(header: list[str], rows: Any) -> bytes:
+    """THE CSV writer for every export (review G14): one place the formula rule lives."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(header)
+    for row in rows:
+        w.writerow([_csv_cell(v) for v in row])
+    return buf.getvalue().encode("utf-8")
+
+
 def export_log_jsonl(path: str | None = None) -> bytes:
     """The raw append-only log, verbatim — the same bytes `cat ~/.mcpgawk/calls.jsonl` shows."""
     from . import spool
@@ -867,53 +913,36 @@ def export_log_jsonl(path: str | None = None) -> bytes:
 
 def export_log_csv(limit: int = 100000) -> bytes:
     """The log as CSV — every row, every field, for a spreadsheet or an auditor."""
-    import csv
-    import io
-    rows = activity_rows(limit=limit)
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["when", "server", "tool", "decision", "basis", "agent", "session", "why"])
-    for r in rows:
-        w.writerow([r.get(k) or "" for k in
-                    ("when", "server", "tool", "decision", "basis", "agent", "session", "why")])
-    return buf.getvalue().encode("utf-8")
+    cols = ("when", "server", "tool", "decision", "basis", "agent", "session", "why")
+    return _csv_bytes(list(cols), ([r.get(k) or "" for k in cols] for r in activity_rows(limit=limit)))
 
 
 def export_findings_csv() -> bytes:
     """Every finding, spreadsheet-shaped — the same rows the Findings screen shows, including
     folded and muted ones with their status stated, never silently dropped."""
-    import csv
-    import io
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["server", "tool", "finding", "severity", "contacted", "reproduced",
-                "first_party", "muted"])
-    for f in collect().get("findings") or []:
-        w.writerow([f.get("server") or "", f.get("tool") or "",
-                    f.get("class") or f.get("code") or "", f.get("severity") or "",
-                    f.get("evidence") or "", f.get("repro") or "",
-                    bool(f.get("first_party")), muted_by_you(f)])
-    return buf.getvalue().encode("utf-8")
+    return _csv_bytes(
+        ["server", "tool", "finding", "severity", "contacted", "reproduced", "first_party", "muted"],
+        ([f.get("server") or "", f.get("tool") or "", f.get("class") or f.get("code") or "",
+          f.get("severity") or "", f.get("evidence") or "", f.get("repro") or "",
+          bool(f.get("first_party")), muted_by_you(f)]
+         for f in collect().get("findings") or []))
 
 
 def export_servers_csv() -> bytes:
     """The fleet, one row per server, with the SAME tier the page shows — the export must never
     disagree with the screen it exports."""
-    import csv
-    import io
     d = collect()
     store = d.get("store") or {}
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["server", "key", "tier", "transport", "agents", "tools", "calls_seen"])
-    for name, entry, key, tier in classified_servers(d):
-        detail = server_detail(store, key, d.get("recent_calls") or []) if key else None
-        w.writerow([name, key or "", tier,
-                    "local" if entry.get("command") else "remote",
-                    ", ".join(entry.get("_clients") or []),
-                    len(detail["current_tools"]) if detail else "",
-                    detail["calls_seen"] if detail else 0])
-    return buf.getvalue().encode("utf-8")
+
+    def rows():
+        for name, entry, key, tier in classified_servers(d):
+            detail = server_detail(store, key, d.get("recent_calls") or []) if key else None
+            yield [name, key or "", tier, "local" if entry.get("command") else "remote",
+                   ", ".join(entry.get("_clients") or []),
+                   len(detail["current_tools"]) if detail else "",
+                   detail["calls_seen"] if detail else 0]
+    return _csv_bytes(["server", "key", "tier", "transport", "agents", "tools", "calls_seen"],
+                      rows())
 
 
 def declared_vs_observed(detail: dict, observed: dict | None) -> list[dict]:
@@ -1522,7 +1551,16 @@ def _registrable(host: str) -> str:
     """`api-accessibility.browserstack.com` -> `browserstack`. Crude on purpose: no PSL, no network,
     and a wrong answer only ever costs us a finding shown that could have been folded away."""
     parts = [p for p in str(host).lower().split(".") if p]
+    # `browserstack.co.uk`: under a two-letter country code, a generic second level (co, com,
+    # org, …) is part of the ending, and the owner's name is the label before it (review Q2).
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+        return parts[-3]
     return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+
+
+#: Generic second-level labels under a country code (`.co.uk`, `.com.au`, `.org.nz`). Offline and
+#: small on purpose: a missing one only costs a finding shown that could have been folded away.
+_SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu", "or", "ne", "go"})
 
 
 def verify_runs_dir() -> Path:
@@ -1679,8 +1717,12 @@ def first_party(server: str, hosts: list[str], entry: dict | None) -> bool:
     for h in hosts:
         if h in _LAUNCHER_HOSTS:
             continue
+        # THE NAME ITSELF, not a name that contains it or sits inside it (review Q2, 2026-11-14).
+        # "One contains the other" made `t.co` and `evil.co.uk` the back end of a server called
+        # context7 ("t" and "co" are inside it) and `resend-logs.io` the back end of resend:
+        # egress to a look-alike host was folded away as the server doing its job.
         reg = _registrable(h)
-        if reg and any(reg in tok or tok in reg for tok in ident):
+        if reg and reg in ident:
             continue
         return False
     return True
@@ -1701,7 +1743,11 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
 
     entries = d.get("entries") or {}
     store = (d.get("store") or {}).get("servers") or {}
-    ran = d.get("verified_runs") or {}
+    # WATCHED = a run that exercised at least one tool (review Q10, 2026-11-12). Any verify record
+    # counted, so records with toolsChecked 0 marked "Verify" done and were counted as "watched
+    # running" while the next-action panel said those servers were never watched.
+    ran = {n: r for n, r in (d.get("verified_runs") or {}).items()
+           if isinstance(r, dict) and (r.get("toolsChecked") or 0) > 0}
     calls = d.get("recent_calls") or []
     gw = d.get("gateway") or {}
     live = gw.get("live") or {}
@@ -1736,11 +1782,25 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     # would either overstate the work left or, worse, imply they are one click from covered.
     cannot_note = (f" · {cannot_n} capability(ies) cannot be signed into from here"
                    if cannot_n else "")
+    # "Nothing is waiting" needs a scan that LOOKED (review Q11, 2026-11-12): an empty list also
+    # means no scan has run, or its record cannot be read, and both rendered as done.
+    try:
+        from . import remote_login as _rl
+        _signin_record = _rl.auth_needed_state()
+    except Exception:                              # noqa: BLE001
+        _signin_record = "unreadable"
+    if signins:
+        _cstate, _cfact = "now", f"{len(signins)} server(s) need your browser sign-in before they will speak"
+    elif _signin_record == "ok":
+        _cstate, _cfact = "done", "nothing is waiting on a sign-in"
+    elif _signin_record == "absent":
+        _cstate, _cfact = "todo", "no scan has checked which servers need a sign-in yet"
+    else:
+        _cstate, _cfact = "now", "could not read the last scan's sign-in record — run a scan"
     steps.append({
         "key": "connect", "title": "Connect what needs signing in",
-        "state": "now" if signins else "done",
-        "fact": ((f"{len(signins)} server(s) need your browser sign-in before they will speak"
-                  if signins else "nothing is waiting on a sign-in") + cannot_note),
+        "state": _cstate,
+        "fact": _cfact + cannot_note,
         "where": "Servers"})
     steps.append({
         "key": "verify", "title": "Verify what they do",
@@ -2258,6 +2318,7 @@ def _action_banner(action: dict | None, token: str = "", fresh: bool = False) ->
                 f'<input type="hidden" name="act" value="unlock">'
                 f'<input type="hidden" name="then" value="{_esc(_nc.get("then"))}">'
                 f'<input type="hidden" name="key" value="{_esc(_nc.get("key"))}">'
+                f'<input type="hidden" name="pin" value="{_esc(_nc.get("pin") or "")}">'
                 f'<input type="hidden" name="finding_id" value="{_esc(_nc.get("finding_id"))}">'
                 f'<input type="hidden" name="tab" value="{_esc(_nc.get("tab"))}">'
                 f'<input type="hidden" name="back" value="{_esc(_nc.get("back"))}">'
@@ -2445,8 +2506,42 @@ API_WITHHELD = ("session_calls", "fleet_calls", "entries", "store")
 _API_ENTRY_FIELDS = ("url", "command", "args", "type", "_clients", "_names", "_aliases")
 
 
+def _api_masked_args(args: list) -> list:
+    """Launch args as the fleet record stores them (history._fleet_token, per token), plus the
+    value that follows a secret-named flag as its OWN argument (`--token <value>`). The redactor
+    decides, not a second list: masked when it masks `flag=value` but not the same value under a
+    neutral flag, so it is the flag NAME that makes it secret (`-y pkg@1.2` is not)."""
+    from . import history as _hist
+    out: list = []
+    prev: str | None = None
+    for a in args:
+        s = str(a)
+        masked = _hist._fleet_token(s)
+        if (masked == s and prev is not None and prev.startswith("-") and "=" not in prev
+                and _hist._fleet_token(f"{prev}={s}") != f"{prev}={s}"
+                and _hist._fleet_token(f"--x={s}") == f"--x={s}"):
+            masked = "[REDACTED]"
+        out.append(masked)
+        prev = s
+    return out
+
+
 def _api_entry(entry: dict) -> dict:
     out = {k: entry.get(k) for k in _API_ENTRY_FIELDS if entry.get(k) is not None}
+    # VALUES MASKED, IDENTITY KEPT (review Q12, 2026-11-12). This route needs no token, and a
+    # `?apiKey=` URL, a userinfo password or a `--token <value>` argument went out verbatim. The
+    # fleet record's own rule (history.fleet_targets): host, path, package, version and flag names
+    # survive, credential shapes do not.
+    from . import history as _hist
+    from .redact import redact_url_for_display
+    if isinstance(out.get("url"), str):
+        # And a key in the PATH (review N19 follow-up, 2026-11-13): adhoc_target is the STORED
+        # form and keeps the path on purpose; this route only shows it.
+        out["url"] = redact_url_for_display(_hist.adhoc_target(out["url"]))
+    if isinstance(out.get("command"), str):
+        out["command"] = _hist._fleet_token(out["command"])
+    if isinstance(out.get("args"), list):
+        out["args"] = _api_masked_args(out["args"])
     headers = entry.get("headers")
     env = entry.get("env")
     out["header_names"] = sorted(str(k) for k in headers) if isinstance(headers, dict) else []
@@ -2596,10 +2691,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # the point of use, so it cannot quietly become the default answer to "how many servers".
     store = d.get("store") or {}
     servers = store.get("servers") or {}
-    # The gateway pane reads this machine unless collect() already did — render(d) with a
-    # synthetic d in tests must not require the key.
-    global _D_FOR_ROLES
-    _D_FOR_ROLES = {**d, "_token": token}
+    # NO PER-RENDER MODULE STATE (review Q6, 2026-11-12). This render's data and token were kept
+    # in a module global (_D_FOR_ROLES) for the panes below; the server is threaded, so a tokenless
+    # render interleaved with a tokened one read the OTHER render's token into its forms. Both now
+    # travel as arguments.
     # The silent read-only fallback for a WRONG key bit the founder four times in one night —
     # a present-but-stale key now announces itself as loudly as the dead-panel banner does.
     # Identical for every wrong key: it must teach nothing about the right one.
@@ -2612,8 +2707,10 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # A walk of an outdated install must announce itself — same class of confusion as the
     # stale key, so it renders in the same place with the same weight.
     stale_banner += _staleness_note()
-    gwpane = _gateway_pane(d.get("gateway") or gateway_status(), token, action)
-    monpane = _monitor_pane(d.get("monitor") or {"installed": False, "db_present": False})
+    # The gateway pane reads this machine unless collect() already did — render(d) with a
+    # synthetic d in tests must not require the key.
+    gwpane = _gateway_pane(d.get("gateway") or gateway_status(), token, action, d=d)
+    monpane = _monitor_pane(d.get("monitor") or {"installed": False, "db_present": False}, token)
     # Seeded server-side so the log is never empty while it waits for its first live event —
     # a sweep is on a 300s cycle, and five minutes of blank "live" pane reads as broken.
     slog = _session_log_html(session_log_lines())
@@ -2919,6 +3016,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         _forms = (f'<form method="POST" action="/" class="rowact">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
                   f'<input type="hidden" name="key" value="{_esc(name if entry.get("command") else key)}">'
+                  f'{_review_pin_field(store, key or name)}'
                   f'<input type="hidden" name="tab" value="n0">'
                   f'{_acts}</form>' if _acts else "") + _login_form
         # ONE grid item per cell, always. Two sibling <form>s here became two grid items, so the
@@ -3909,6 +4007,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<form method="POST" action="/" class="rowact">'
                 f'<input type="hidden" name="token" value="{_esc(token)}">'
                 f'<input type="hidden" name="key" value="{_esc(k)}">'
+                f'{_review_pin_field(store, k)}'
                 f'<input type="hidden" name="tab" value="n3">'
                 f'<button class="act-sm" name="act" value="keep">Keep blocked</button>'
                 f'<button class="act-sm warn" name="act" value="approve">Approve</button>'
@@ -3954,6 +4053,11 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                         'malicious update arrives.</span>')
         for t in rep.removed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">was removed.</span>')
+        # A server-level change (files-extension item 1); else an extensions-only change read
+        # "the record predates detailed diffs".
+        for words in (rep.extension_words() if hasattr(rep, "extension_words") else []):
+            bits.append(f'<span class="dim">The server {_esc(words)} (an MCP extension: an ability '
+                        'no tool definition shows).</span>')
         for t in plain_changed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its '
                         'description.</span>')
@@ -3967,6 +4071,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         if total > len(bits):
             bits.append(f'<span class="dim">…and {total - len(bits)} more change(s) — the full '
                         'diff is in <code>mcpgawk decide</code>.</span>')
+        # The latch's other changes, which this diff does not show (review I6 follow-up): trusting
+        # adopts the sighting above and answers them too.
+        for u in it.get("unshown") or []:
+            day = str(u.get("at") or "")[:10] or "a day not recorded"
+            bits.append(f'<span class="nm">{_esc(", ".join(u.get("tools") or []))}</span> '
+                        f'<span class="dim">also changed on {_esc(day)}, not in this diff; '
+                        'trusting this change answers it too. <code>mcpgawk decide</code> shows '
+                        'that sighting.</span>')
         return "<br>".join(bits) or ('<span class="dim">The surface moved; the record predates '
                                      'detailed diffs.</span>')
 
@@ -3982,11 +4094,26 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # exactly `reverted_tools` (the projection reads the same helper); say which.
         held = _h.reverted_tools(store, k)
         if held:
-            when = str(next(iter(held.values())).get("at") or "")[:10]
-            return (f'<span class="chip bad"><i></i>Blocked — {_esc(", ".join(sorted(held)))} '
-                    f'changed{(" on " + _esc(when)) if when else ""} and changed back</span>')
+            # EACH TOOL ITS OWN DAY (review I6, 2026-11-12): the latch now holds every tool's first
+            # change, so one date for all of them would misdate the second window.
+            days = {t: str(v.get("at") or "")[:10] for t, v in held.items()}
+            if len(set(days.values())) == 1:
+                when = next(iter(days.values()))
+                what = (f'{", ".join(sorted(held))} changed'
+                        f'{(" on " + when) if when else ""} and changed back')
+            else:
+                what = (", ".join(f'{t} ({days[t] or "date not recorded"})' for t in sorted(held))
+                        + " changed and changed back")
+            return f'<span class="chip bad"><i></i>Blocked — {_esc(what)}</span>'
         if base and latest and base.get("items") != latest.get("items"):
             return '<span class="chip bad"><i></i>Blocked</span>'
+        _rep = (_dec_items.get(k) or {}).get("report")
+        _ext = _rep.extension_words() if _rep is not None and hasattr(_rep, "extension_words") else []
+        if _ext and not (_rep.added or _rep.removed or _rep.changed or _rep.schema_changed
+                         or _rep.annotation_changed):
+            # The guard holds per tool; a server-level extension change blocks no call.
+            return ('<span class="chip warn say"><i></i>NOT blocked — the server '
+                    f'{_esc("; ".join(_ext))}; calls still go through until you decide</span>')
         grown = _h._permission_growth(base, latest) if base and latest else {}
         if grown:
             what = "; ".join(f"{t}: {', '.join(v)}" for t, v in sorted(grown.items()))
@@ -5445,6 +5572,11 @@ def gateway_tools(live: dict[str, Any] | None, key: str = "") -> dict[str, Any]:
         return {"ok": False, "tools": [], "error": f"{type(exc).__name__}: {exc}"}
 
 
+#: How the gateway words a refusal by its own policy (enforce/gateway.py block_response), as an
+#: error and as visible content. The panel reads it to tell a block from every other failure.
+_GATEWAY_BLOCK_MARK = "blocked by mcpgawk enforce"
+
+
 def run_playground_call(tool: str | None, key: str | None,
                         arguments: str | None = None) -> dict[str, Any]:
     """Call ONE tool through the running gateway, as an agent would, and report the decision.
@@ -5484,23 +5616,48 @@ def run_playground_call(tool: str | None, key: str | None,
     req.add_header("Content-Type", "application/json")
     if key:
         req.add_header("Authorization", f"Bearer {key.strip()}")
+    # A block is the gateway WORKING. Levelled 'warn', never 'bad': styling a successful refusal
+    # as a failure would teach the operator to read their own control as breakage.
+    def _blocked(detail: str) -> dict[str, Any]:
+        return {"ok": True, "level": "warn", "verdict": "BLOCKED",
+                "message": f"{tool}: BLOCKED by the gateway — {detail}"}
+
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             doc = json.loads(r.read().decode("utf-8", "replace"))
         text = str(doc.get("content") or "")[:400]
+        if _GATEWAY_BLOCK_MARK in text:
+            # `--on-block content` answers 200 with the refusal as visible text. That is a block.
+            return _blocked(text)
         return {"ok": True, "level": "ok", "verdict": "ALLOWED",
                 "message": f"{tool}: ALLOWED by the gateway — {text}"}
     except urllib.error.HTTPError as exc:
-        detail = ""
+        # BLOCKED only when the gateway's POLICY said so (review Q8, 2026-11-14). Every HTTP error
+        # used to read as a block: a mistyped key, a malformed request and a gateway that fell
+        # over were all shown as the control working, when the call had never been judged.
+        answer: dict[str, Any] = {}
         try:
-            doc = json.loads(exc.read().decode("utf-8", "replace"))
-            detail = str(doc.get("error") or "")[:400]
+            parsed = json.loads(exc.read().decode("utf-8", "replace"))
+            answer = parsed if isinstance(parsed, dict) else {}
         except Exception:                         # noqa: BLE001 — body may not be JSON
-            detail = f"HTTP {exc.code}"
-        # A block is the gateway WORKING. Levelled 'warn', never 'bad': styling a successful
-        # refusal as a failure would teach the operator to read their own control as breakage.
-        return {"ok": True, "level": "warn", "verdict": "BLOCKED",
-                "message": f"{tool}: BLOCKED by the gateway — {detail}"}
+            pass
+        detail = str(answer.get("error") or "")[:400]
+        if _GATEWAY_BLOCK_MARK in detail:
+            return _blocked(detail)
+        if exc.code in (401, 403):
+            return {"ok": False, "level": "bad",
+                    "message": f"{tool}: the gateway did not accept the key (HTTP {exc.code}), so "
+                               f"the call was never judged. Paste a key the gateway knows."}
+        if exc.code == 400 and answer.get("tool"):
+            # The gateway names the tool only once it has run the call: it let the call through
+            # and the TOOL answered with an error. A malformed request carries no tool.
+            return {"ok": True, "level": "warn", "verdict": "TOOL ERROR",
+                    "message": f"{tool}: the gateway allowed the call and the tool answered with "
+                               f"an error — {detail or 'no detail'}"}
+        return {"ok": False, "level": "bad",
+                "message": f"{tool}: the gateway answered HTTP {exc.code}"
+                           + (f" ({detail})" if detail else "")
+                           + ", so the call was never judged. This is not a block."}
     except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "level": "bad",
                 "message": f"could not reach the gateway: {type(exc).__name__}: {exc}"}
@@ -5599,15 +5756,21 @@ def _ensure_role(keys_file: str, role: str, grants: list[str]) -> None:
     if not grants:
         raise ValueError(f"{role} would grant nothing — approve a scanned server first, so the "
                          f"bundle can be built from tools we have actually seen")
-    path = Path(keys_file)
-    doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"principals": {}}
-    roles = doc.setdefault("roles", {})
-    if role in roles:
-        return
-    roles[role] = list(grants)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    if not all(isinstance(g, str) and g for g in grants):
+        raise ValueError(f"{role}: every grant must be a non-empty scope string")
+    # THE registry writer (review Q14): locked, validated, owner-only, atomic. This rewrote the
+    # file that holds every agent's key at the default umask through a fixed .tmp, with no lock.
+    # A role bundle only exists for the gateway's key registry, so it needs the paid engine.
+    try:
+        from gawk_platform.enforce.identity import update_registry
+    except ImportError as exc:
+        raise ValueError("role bundles ship with mcpgawk Platform (the gateway)") from exc
+
+    def _add(doc: dict) -> None:
+        roles = doc.setdefault("roles", {})
+        if role not in roles:                 # never overwrite a bundle an operator tuned
+            roles[role] = list(grants)
+    update_registry(keys_file, _add)
 
 
 def principal_upstreams(keys_file: str | None) -> dict[str, list[str]]:
@@ -6062,10 +6225,10 @@ def _session_log_html(lines: list[dict[str, str]]) -> str:
     return "".join(rows)
 
 
-def _monitor_start_button(mon: dict[str, Any]) -> str:
+def _monitor_start_button(mon: dict[str, Any], token: str = "") -> str:
     """Offered only where it can work: the pillar installed, and not already running. A button
-    that cannot do its job is the pattern the sign-in button already avoids."""
-    token = _D_FOR_ROLES.get("_token", "") if isinstance(_D_FOR_ROLES, dict) else ""
+    that cannot do its job is the pattern the sign-in button already avoids. `token` is THIS
+    page's (review Q6): never read from shared state."""
     if not token:
         return ('<div class="note">Starting monitoring is a control, not state — it appears only '
                 'through the link printed in the terminal that started the panel. Or run: '
@@ -6083,7 +6246,7 @@ def _monitor_start_button(mon: dict[str, Any]) -> str:
             f'</button></form>')
 
 
-def _monitor_pane(mon: dict[str, Any]) -> str:
+def _monitor_pane(mon: dict[str, Any], token: str = "") -> str:
     """The Monitor tab. What is watched, when it was last checked, and what is unresolved."""
     frame = ('<div class="note">Monitoring re-checks the servers it holds a baseline for on a '
              'schedule and raises an alert when a surface moves — the rug-pull case, where a server '
@@ -6101,7 +6264,7 @@ def _monitor_pane(mon: dict[str, Any]) -> str:
     else:
         state = ('<div class="note warn">Monitoring is NOT running. Nothing is re-checking these '
                  'servers, so a server that changes after you approved it will not raise an '
-                 'alert.</div>' + _monitor_start_button(mon))
+                 'alert.</div>' + _monitor_start_button(mon, token))
     if not mon.get("db_present"):
         return (frame + state
                 + '<div class="note">No monitoring history on this machine yet — nothing has '
@@ -6306,7 +6469,10 @@ def run_issue_key(name: str | None, role: str | None = None) -> dict[str, Any]:
     if role and role.startswith("+"):
         role = role[1:]
         try:
-            _ensure_role(keys_file, role, roles_from_baseline(_D_FOR_ROLES or {}).get(role) or [])
+            # The store as it is NOW (review Q6): this ran on whatever page was rendered last,
+            # possibly another request's data.
+            _ensure_role(keys_file, role,
+                         roles_from_baseline({"store": _store_for_buttons()}).get(role) or [])
         except Exception as exc:                  # noqa: BLE001 — the reason goes ON the page
             return {"ok": False, "message": f"could not define role {role}: {exc}"}
     try:
@@ -6363,8 +6529,10 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
             _lstate, _ = license_state()
             if _lstate in (GRACE, ENDED):
                 out["unprotected"] = _lstate
-        except Exception:                          # noqa: BLE001
-            pass
+        except Exception as exc:                   # noqa: BLE001
+            # RECORDED, not swallowed (review Q13, 2026-11-12): a check that raised left the pane
+            # saying "the gateway enforces your approved baseline" over a state nobody knew.
+            out["licence_error"] = f"{type(exc).__name__}: {exc}"
     runs_db = str(Path(home) / ".mcpgawk" / "runs.db") if home else None
     try:
         for r in runlog.list_runs(kind="enforce", limit=25, path=runs_db):
@@ -6445,12 +6613,8 @@ def _snippet_for(live: dict[str, Any]) -> str:
             'reversibly).</div>')
 
 
-#: The collected page data, so the key form can build role bundles from the approved baseline
-#: without threading `d` through three render helpers. Set once per render, read immediately.
-_D_FOR_ROLES: dict[str, Any] | None = None
-
-
-def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | None) -> str:
+def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | None,
+                    d: dict[str, Any] | None = None) -> str:
     """The agent-invite ceremony: name an agent, pick a role, get ONE key + its config.
 
     LiteLLM's virtual-key flow, with agents as the invitees rather than people. Shown only with
@@ -6461,12 +6625,17 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
     """
     action = action or {}
     issued = ""
-    if action.get("secret"):
+    if action.get("secret") and token:
         # Shown ONCE, and never persisted (see _persist_action's whitelist). No copy button:
         # the CSP forbids scripts, so the honest affordance is selectable text.
+        #
+        # ONLY WITH THE TOKEN, AND THEN CLEARED (review Q1, 2026-11-12). It sat in _ACTION until
+        # another action ran and was rendered before the `if not token` check below, so any
+        # tokenless GET of the panel (another tab, a local page, an agent) was served the new key.
         issued = ('<div class="note ok">Copy this now — it is not stored and cannot be shown '
                   f'again:</div><pre class="snip">{_esc(action["secret"])}</pre>'
                   f'<pre class="snip">{_esc(action.get("snippet") or "")}</pre>')
+        _ACTION.update(secret="", snippet="")
     if not token:
         return issued + ('<div class="note">Issuing an agent key is a control, not state — it '
                          'appears only through the link printed in the terminal that started '
@@ -6480,7 +6649,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
                          'Restart it with <code>--principals &lt;file&gt;</code> to give each '
                          'agent its own identity.</div>')
     roles = gateway_roles(live.get("keys_file"))
-    derived = {} if roles else roles_from_baseline(_D_FOR_ROLES or {})
+    derived = {} if roles else roles_from_baseline(d or {})
     if not roles and derived:
         opts = "".join(f'<option value="+{_esc(r)}">{_esc(r)} — {_esc(desc)}</option>'
                        for r, desc in ROLE_TEMPLATES if r in derived)
@@ -6489,7 +6658,7 @@ def _issue_key_form(live: dict[str, Any], token: str, action: dict[str, Any] | N
                 + f'<div class="note">Name an agent, pick what it may touch, get a key — shown '
                   f'once. Paste that key into the agent\'s gateway config above; from then on '
                   f'its calls are attributed to it in the trail and limited to its grant. '
-                  f'{_esc(role_evidence(_D_FOR_ROLES or {}))}</div>'
+                  f'{_esc(role_evidence(d or {}))}</div>'
                 + f'<form method="POST" action="/" class="filters">'
                   f'<input type="hidden" name="token" value="{_esc(token)}">'
                   f'<input type="hidden" name="tab" value="n7">'
@@ -6562,7 +6731,7 @@ def _playground_form(live: dict[str, Any], token: str) -> str:
 
 
 def _gateway_pane(gw: dict[str, Any], token: str = "",
-                  action: dict[str, Any] | None = None) -> str:
+                  action: dict[str, Any] | None = None, d: dict[str, Any] | None = None) -> str:
     """The Gateway tab body. Frame first, then the LIVE gateway if one is running (endpoint +
     point-your-agent-here + the agent-key ceremony), then who did what per principal, then the
     raw trail."""
@@ -6570,6 +6739,11 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
              'the gateway enforces your approved baseline, observed behaviour and policy per '
              'principal — and every allow, block and refusal lands in a hash-chained audit '
              'trail. Scan and verify are how it knows.</div>')
+    if gw.get("licence_error"):
+        frame = ('<div class="note warn"><b>Could not check the licence</b> '
+                 f'({_esc(gw["licence_error"])}), so whether this gateway is enforcing anything is '
+                 'unknown: on a lapsed trial it passes every call through. Run '
+                 '<code>mcpgawk enforce status</code> to see the licence state.</div>')
     if gw.get("unprotected"):
         ended = gw["unprotected"] == "ended"
         frame = ('<div class="note bad"><b>UNPROTECTED</b> — your trial has '
@@ -6589,13 +6763,13 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
         live_html = (f'<div class="note ok">Gateway RUNNING since {since} — in front of '
                      f'{what}{where}{keys}</div>' + _gateway_signin_block(live, token)
                      + _snippet_for(live)
-                     + _issue_key_form(live, token, action)
+                     + _issue_key_form(live, token, action, d)
                      + _playground_form(live, token))
     elif gw.get("runs_error"):
         live_html = (f'<div class="note warn">Cannot tell whether a gateway is running — '
                      f'run registry unreadable: {_esc(gw["runs_error"])}</div>')
     if not live:
-        live_html += _issue_key_form({}, token, action)
+        live_html += _issue_key_form({}, token, action, d)
     if not gw.get("audit_present"):
         where = ("No gateway activity recorded on this machine yet. Start one: "
                  "<code>mcpgawk enforce serve --gateway-config deploy/gateway.example.yaml</code>"
@@ -6608,7 +6782,15 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
     # the gateway allowed and the backend then dropped is not protection, and the operator has to
     # be able to tell the two apart at a glance.
     _failed = gw.get("backend_failures", 0)
-    head = (f'<div class="filters"><span class="count" style="margin-left:0">'
+    if gw.get("error"):
+        # Review Q9, 2026-11-12: an unreadable audit DB still headlined "refused 0 call(s) across 0
+        # agent session(s)", a count of nothing read, with the error in a grey note below. The
+        # headline says it could not count.
+        head = (f'<div class="filters"><span class="count" style="margin-left:0">'
+                f'Could not read the audit trail ({_esc(gw["error"])}), so how many calls this '
+                f'gateway refused is unknown.</span></div>')
+    else:
+        head = (f'<div class="filters"><span class="count" style="margin-left:0">'
             f'Since it started, this gateway has refused {gw.get("blocks", 0)} call(s)'
             + (f', seen {_failed} backend failure(s)' if _failed else '')
             + f' across {gw.get("sessions", 0)} agent session(s) · agents seen: '
@@ -6618,7 +6800,7 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                         for p in (gw.get("principals") or []) if p and "identity" not in p)
               + '</datalist>')
     if not live and not gw.get("runs_error"):
-        _gtok = _D_FOR_ROLES.get("_token", "") if isinstance(_D_FOR_ROLES, dict) else ""
+        _gtok = token                         # this page's own (review Q6)
         _gw_dir = behaviour_profile_path().parent / "gateway"
         if (_gw_dir / "gateway.yaml").exists():
             live_html += (
@@ -6980,6 +7162,26 @@ def _oauth_unsupported_reason(url: str) -> str:
         return ""
 
 
+#: How a server says NO to a pasted key, in its own words. The rule used to be four words, and
+#: "Unauthorized — key rejected" contains none of them: it was recorded as a sign-in (review Q7).
+_CONFIGURE_REFUSED = re.compile(
+    r"(?i)\b(?:not\s+configured|errors?|invalid|fail(?:ed|ure|s)?|unauthori[sz]ed|rejected|denied|"
+    r"forbidden|expired|revoked|wrong|incorrect|could\s+not|cannot|can[’']t|unable|unsuccessful|"
+    r"missing|not\s+authenticated|not\s+signed\s+in|not\s+connected|not\s+valid|40[13])\b")
+#: How it says YES. Required: an answer that says neither is not assumed to be a sign-in.
+_CONFIGURE_ACCEPTED = re.compile(
+    r"(?i)\b(?:configured|connected|authenticated|signed\s+in|logged\s+in|accepted|"
+    r"success(?:ful|fully)?|verified|working|valid|ready|ok)\b")
+
+
+def _configure_verdict(text: str) -> str:
+    """"refused", "accepted" or "unclear", from what the server said after a key was pasted.
+    A refusal wins over an acceptance in the same answer ("configured, but the key is invalid")."""
+    if _CONFIGURE_REFUSED.search(text or ""):
+        return "refused"
+    return "accepted" if _CONFIGURE_ACCEPTED.search(text or "") else "unclear"
+
+
 def run_login_configure(name: str | None, value: str | None) -> dict[str, Any]:
     """Finish a guided in-band setup: hand the user's API key to the server's own configure tool,
     then ask its status tool for the verdict. The key is passed through and never stored."""
@@ -7009,9 +7211,12 @@ def run_login_configure(name: str | None, value: str | None) -> dict[str, Any]:
         return {"ok": False, "message": f"{name}: configure did not finish — {status_text}. "
                                         f"Paste the key again once this is fixed; it was not stored."}
     _ACTION.update(setup_text="", setup_key="")   # the flow is spent: the server has answered
-    bad = any(w in status_text.lower() for w in ("not configured", "error", "invalid", "failed"))
+    verdict = _configure_verdict(status_text)
+    bad = verdict != "accepted"
     rows = [{"server": name, "outcome": "sign-in status",
-             "level": "bad" if bad else "ok", "detail": status_text}]
+             "level": {"accepted": "ok", "refused": "bad"}.get(verdict, "warn"),
+             "detail": status_text if verdict != "unclear" else
+             f"{status_text} (this does not say the key was accepted, so no sign-in was recorded)"}]
     if not bad:
         # The server's own verdict is the evidence a person signed in: record it where the
         # sign-in offer looks, then measure what the server shows a signed-in session — the
@@ -7309,6 +7514,13 @@ def _run_oauth_login(name: str, url: str, flag: str, entry: dict | None = None) 
     child, publishing the authorise link and judging success by a token ON DISK. Split out of
     run_login (unchanged) so the Gateway tab (T2-2) signs a gateway backend in the same way."""
     from . import remote_login
+    # What was stored BEFORE this flow (review Q4, 2026-11-14). "A token exists" was the test for
+    # success, so a sign-in the person abandoned was reported as done whenever an older token,
+    # perhaps the very one the server had refused, was still on disk.
+    try:
+        stored_before = remote_login.token_stamp(url)
+    except Exception:                             # noqa: BLE001
+        stored_before = None
     try:
         proc, log_path = _run_login_cli(url, flag)
     except Exception as exc:                      # noqa: BLE001
@@ -7357,7 +7569,13 @@ def _run_oauth_login(name: str, url: str, flag: str, entry: dict | None = None) 
 
     # The token ON DISK is the outcome that matters, not the subprocess's exit code — the flow
     # can exit non-zero after storing a perfectly good token (the follow-on probe may fail).
-    if remote_login.stored_access_token(url):
+    # ...and it must be a token THIS flow stored: the file is new, or changed since we began.
+    try:
+        stored_now = remote_login.token_stamp(url)
+    except Exception:                             # noqa: BLE001
+        stored_now = None
+    if (remote_login.stored_access_token(url) and stored_now is not None
+            and stored_now != stored_before):
         return {"ok": True, "message": f"signed in to {name} — the token is stored on this "
                                        f"machine; verify can use it now"}
     # The child's ACTUAL reason, never a bare "did not complete" — that phrasing blamed the
@@ -7398,9 +7616,12 @@ def _gateway_signin_block(live: dict[str, Any], token: str) -> str:
         # nothing usable is stored. A public backend (deepwiki) never refused, so it gets none.
         if not url or refused.get(name_) != url:
             continue
-        if remote_login.stored_access_token(url):
+        if (remote_login.stored_access_token(url)
+                and remote_login.refused_after_login(url) is not True):
             # Refused at this gateway's start, signed in since: the running gateway connects
             # backends only at start (browser walk, 2026-09-24), so say what completes it.
+            # NOT when the refusal is known to be later than the stored sign-in (review Q4):
+            # that token is the one the backend refused, and it needs a new sign-in.
             pending.append(_esc(name_))
             continue
         name = str(b.get("name") or url)
@@ -7879,6 +8100,18 @@ def signin_state(entry: dict, name: str, *, store: dict | None = None,
                          {"kind": "login", "label": "Try the sign-in anyway", "primary": False}]
         return _finish("blocked_vendor")
 
+    # A STORED TOKEN IS NOT PROOF OF ACCESS (review Q3, 2026-11-14). The last scan was refused
+    # for credentials AFTER this sign-in was stored: the token is expired, revoked or for another
+    # audience. `_login_button_applicable` has applied this rule since 2026-08-27; this function
+    # answered "signed in" on the token alone, so the row was green while the button offered a
+    # sign-in. Only a KNOWN order counts: neither file records when it was written, and an
+    # unknown order is not evidence of staleness.
+    try:
+        stale = bool(url and name in remote_login.auth_needed()
+                     and remote_login.refused_after_login(url) is True)
+    except Exception:                              # noqa: BLE001
+        stale = False
+
     # 4. SIGNED IN — a completed flow, by any of the three marks a completed flow leaves.
     try:
         done = bool((url and (remote_login.stored_access_token(url)
@@ -7886,7 +8119,7 @@ def signin_state(entry: dict, name: str, *, store: dict | None = None,
                     or remote_login.stored_login_id(remote_login.local_signin_key(name)))
     except Exception:                              # noqa: BLE001
         done = False
-    if done:
+    if done and not stale:
         try:
             _at = (remote_login.stored_inband_at(url) if url else None)
             if _at is None:
@@ -7914,8 +8147,9 @@ def signin_state(entry: dict, name: str, *, store: dict | None = None,
         offered = _login_button_applicable(entry, name)
     except Exception:                              # noqa: BLE001
         offered = False
-    if offered:
-        st["headline"] = f"{name} cannot be measured until you sign in."
+    if offered or stale:
+        st["headline"] = (f"{name} refused the sign-in mcpgawk holds — sign in again to measure it."
+                          if stale else f"{name} cannot be measured until you sign in.")
         st["sub"] = ("Until then its tools stay unmeasured and every call to it from your agents "
                      "passes without a check.")
         st["why_title"] = "Why you"
@@ -7930,7 +8164,7 @@ def signin_state(entry: dict, name: str, *, store: dict | None = None,
     return _finish("none")
 
 
-def signin_observed_line(st: dict) -> str:
+def signin_observed_line(st: dict, approved: bool = False) -> str:
     """The hook's evidence for one server, as a sentence — or "".
 
     The honest half of a server mcpgawk cannot enter: the agent's calls ARE observed, and drift on
@@ -7943,9 +8177,14 @@ def signin_observed_line(st: dict) -> str:
     who = ", ".join(obs.get("clients") or []) or "your agents"
     n_t = len(obs.get("tools") or [])
     when = f" since {str(obs.get('last') or '')[:10]}" if obs.get("last") else ""
-    return (f"Observed through {who}: {obs['calls']} call(s) to {n_t} tool(s){when}, and drift on "
-            f"those tools is enforced at the hook. mcpgawk has never seen its full tool list — "
-            f"the hook sees a call, not the server's catalogue.")
+    # ENFORCED ONLY WHERE SOMETHING IS APPROVED (review Q5, 2026-11-12). With no approved baseline
+    # the hook defers (decision.py) and the calls go through; the sentence claimed enforcement
+    # regardless. `approved` is the caller's lookup; unknown is treated as not approved.
+    stance = ("drift on those tools is enforced at the hook" if approved else
+              "nothing is approved for it yet, so the hook lets those calls through and records them")
+    return (f"Observed through {who}: {obs['calls']} call(s) to {n_t} tool(s){when}, and {stance}. "
+            f"mcpgawk has never seen its full tool list — the hook sees a call, not the server's "
+            f"catalogue.")
 
 
 def signin_asks(entries: dict) -> list[str]:
@@ -8474,6 +8713,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
         noise_map: dict[str, str] = {}            # server -> its labels were ignored as noise
         real_map: dict[str, set] = {}             # server -> tools with non-first-party findings
         folded_map: dict[str, int] = {}           # server -> first-party findings folded
+        why_map: dict[str, str] = {}              # server -> the run's own reasons it is incomplete
         report_readable = False
         try:
             _rep_doc = json.loads(report_path.read_text(encoding="utf-8"))
@@ -8484,6 +8724,9 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                     degraded_map[sname] = str(s["sandboxDegradedReason"])
                 if s.get("labelNoiseNote"):
                     noise_map[sname] = str(s["labelNoiseNote"])
+                _why = [str(x) for x in (s.get("incompleteReasons") or []) if str(x).strip()]
+                if _why:
+                    why_map[sname] = "; ".join(_why)
                 for f in (s.get("findings") or []):
                     if f.get("suppressed"):
                         continue
@@ -8498,6 +8741,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
             # Unreadable report: no degradation info, and fall back to RAW conviction counts from
             # the profile below — overcounting is the safe direction, silence is not.
             degraded_map, noise_map, real_map, folded_map, report_readable = {}, {}, {}, {}, False
+            why_map = {}
         # A server counts as observed when a run EXERCISED it. Counting convictions instead meant a
         # clean fleet reported as an unverified one, and "observed 2 of 8" understated real work.
         seen = {n for n, o in ran_map.items()
@@ -8525,6 +8769,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                 backend=o.get("backend"),
                 degraded=degraded_map.get(n),
                 label_noise=noise_map.get(n),
+                rejected=list(o.get("rejectedInput") or []),
             )
 
         rows = []
@@ -8536,6 +8781,12 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
             note = _engine_note(engine_output, n)
             _spec = all_targets.get(n) or {}
             outcome, detail = _nothing_recorded_outcome(note, _spec)
+            # The run's own reasons outrank a scraped line (browser walk, 2026-11-15): a server
+            # whose every call answered with an error printed "no behaviour recorded" beside the
+            # engine's last line that named it, which was a note about Docker. The recognised
+            # sign-in case keeps its own wording.
+            if not outcome.startswith("needs your sign-in") and why_map.get(n):
+                detail = why_map[n]
             needs_auth += outcome == "needs your sign-in"
             rows.append({"server": n, "outcome": outcome, "level": "bad", "detail": detail,
                          "fix": _remedy(note, _spec)})
@@ -9046,6 +9297,13 @@ a.btn{text-decoration:none;display:inline-block}a.mono{color:var(--mut);text-dec
 """
 
 
+class _Markup(str):
+    """A string THIS PAGE wrote as HTML, and so may emit unescaped. The header used to decide by
+    looking for `<a ` in the text, which a value read from the store can contain just as well:
+    a sighting's date reached the page as a link (review G11, 2026-11-14). What is safe is
+    decided by where the text was made, never by what it looks like."""
+
+
 def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                 fresh_action: bool = False, skip: str = "") -> str:
     """The one-decision screen. Server-rendered from the same `collect()` as the dashboard, so it
@@ -9067,7 +9325,12 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
     # queue's own number included items nobody could advance (2026-09-08).
     _live_n = sum(1 for it in items if not it.get("terminal"))
     _term_n = len(items) - _live_n
-    facts = [f"{_live_n} need you" if _live_n else "nothing needs you",
+    # Review H2, 2026-11-12: collect() records an unreadable store under errors["baseline"], and
+    # this screen never looked — an empty queue read "nothing needs you" over approvals it could
+    # not open. With that error the header and the body say so, and no all-clear is printed.
+    store_error = str(((d.get("errors") or {}).get("baseline")) or "")
+    facts = [("could not read your approvals" if store_error
+              else (f"{_live_n} need you" if _live_n else "nothing needs you")),
              f"{len(fleet)} servers on this machine", mon_word]
     if _term_n:
         facts.append(f"{_term_n} cannot be finished from here")
@@ -9078,7 +9341,8 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
     if last_seen:
         facts.append(f"last change {_ago(last_seen)}")
     if skipped:
-        facts.append(f'{len(skipped)} set aside on this page — <a href="/next?{q_t.rstrip("&")}">show</a>')
+        facts.append(_Markup(f'{len(skipped)} set aside on this page — '
+                             f'<a href="/next?{q_t.rstrip("&")}">show</a>'))
     tok = _esc(token)
 
     def _skip_url(it: dict[str, Any]) -> str:
@@ -9164,10 +9428,17 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                  + _form("login-cancel", _held, "Cancel this sign-in", primary=False)
                  + ' Starting another sign-in stops this one.</div>')
     body = ""
-    if not items:
+    if store_error:
+        body = ('<p class="eyebrow">COULD NOT READ YOUR APPROVALS</p>'
+                '<h1>This screen cannot tell what needs you.</h1>'
+                f'<p class="sub">The baseline store could not be read ({_esc(store_error)}). Nothing '
+                'here is a clean bill: a change since your approval would not show. Run '
+                '<code>mcpgawk status</code> for the error, and restore the file from the '
+                '<code>.corrupt-*</code> or backup copy beside it.</p>')
+    elif not items:
         # No reassurance the record cannot back: "every call is checked" was false here whenever
         # an agent has no hook, and doubly so when the queue was merely set aside.
-        _plain = [f for f in facts[1:] if "<a " not in f]
+        _plain = [f for f in facts[1:] if not isinstance(f, _Markup)]
         _aside = (f' {len(skipped)} set aside on this page — <a href="/next?{q_t.rstrip("&")}">show them</a>.'
                   if skipped else ' A change, a sign-in or a finding will appear here as one decision.')
         body = ('<p class="eyebrow">' + ('ALL QUIET' if not skipped else 'QUEUE SET ASIDE') + '</p>'
@@ -9217,6 +9488,7 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                     f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
                     f'<input type="hidden" name="key" value="{_esc(it["key"])}">'
                     f'<input type="hidden" name="back" value="next">{skip_field}'
+                    f'{_review_pin_field(d.get("store") or {}, it["key"])}'
                     f'<button class="btn primary" name="act" value="approve">Approve the new surface</button></form>')
             note = ('Approve records this surface as the new baseline; the diff stays in the record '
                     'and the guard lets the next call through. Keep blocked leaves every agent '
@@ -9249,7 +9521,8 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # evidence there is — and it is real evidence: 24 calls to 4 tools on the founder's
             # own plugin_figma_figma. Saying "unmeasured" and stopping made a watched server read
             # as a blind spot (2026-09-08). The claim always carries its own limit.
-            _obs_line = signin_observed_line(_sst)
+            _obs_line = signin_observed_line(
+                _sst, approved=_has_approval(d, it.get("key") or it.get("name")))
             _vl = it.get("vendor_limit") or None
             if _vl:
                 # NOT the person's to finish: say who it waits on, what the browser will show, and
@@ -9581,11 +9854,61 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
 <meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<style>{_NEXT_CSS}</style></head><body>
 <div class="sheet">
   <div class="head"><div class="brand"><img src="/brand.svg" alt="Nativerse">mcpgawk <span class="mono">local · this machine only</span></div>
-    <span class="mono">{" · ".join(_esc(f) if "<a " not in f else f for f in facts)}</span></div>
+    <span class="mono">{" · ".join(f if isinstance(f, _Markup) else _esc(f) for f in facts)}</span></div>
   {done}{body}
   <div class="foot"><span>Look up · <a href="/?{q_t}tab=n0">servers</a> · <a href="/?{q_t}tab=n4">calls</a> · <a href="/?{q_t}tab=n2">runs</a> · <a href="/export/calls.csv">exports</a></span>
     <a href="/?{q_t}tab=n9">the full panel</a><span class="mono">mcpgawk decide — the trust decisions, on their own page</span></div>
 </div></body></html>"""
+
+
+def _review_pin_field(store: dict[str, Any] | None, key: str) -> str:
+    """The hidden field every approve form carries: the pin of the sighting an approval would adopt,
+    as it stood when the page was drawn (review G10/H3/H5, 2026-11-12). See _approve_from_panel."""
+    from . import history
+    try:
+        stored = (history.resolve_all(store or {}, key) or [key])[0]
+        # The REVIEW pin: the tool-surface pin plus any advertised extensions (advisor, 2026-11-13).
+        pin = history.review_pin(history.last(store or {}, stored) or {})
+    except Exception:                              # noqa: BLE001 — no pin means the POST refuses
+        pin = ""
+    return f'<input type="hidden" name="pin" value="{_esc(pin)}">'
+
+
+def _approve_from_panel(key: str, expect_pin: str | None = None) -> tuple[str, str]:
+    """(message, level) for the panel's approve action.
+
+    The Servers row posts a local server's CONFIG name (`s0`), because its other buttons need it;
+    `history.approve` knows only store keys (`mcp:s0`), returned None, and the panel said "nothing
+    to approve for s0" in green — every stdio row's approve did nothing (review H4, 2026-11-12).
+    The name is resolved exactly as `mcpgawk approve <name>` resolves it, and anything that does
+    not approve is a failure on screen, never an all-clear."""
+    from . import history
+    try:
+        store, err = history.load_checked(history.default_path())
+        if err:
+            return f"approve refused — the baseline store could not be read ({err})", "bad"
+        candidates = history.resolve_all(store, key)
+        if len(candidates) != 1:
+            why = ("matches no server in the store" if not candidates
+                   else f"matches {len(candidates)} servers ({', '.join(candidates[:4])})")
+            return f"not approved: {key} {why}. Run `mcpgawk approve --list` to see the keys.", "bad"
+        stored = candidates[0]
+        # BOUND TO WHAT WAS SHOWN (review G10/H3/H5): the form carries the pin of the sighting on
+        # screen and approve() refuses inside its lock if a newer one landed since. No pin = a page
+        # drawn before this rule, or no page at all: refused. source="panel" makes the record say
+        # it came from the panel, not from a person at a terminal.
+        if not expect_pin:
+            return (f"not approved: this page is out of date for {key}. Reload it and approve "
+                    f"again.", "bad")
+        result = history.approve(stored, expect_pin=expect_pin, source="panel")
+        if result:
+            return f"approved {key}" + (f" ({stored})" if stored != key else ""), "ok"
+        if history.last(history.load_checked(history.default_path())[0], stored) is not None:
+            return (f"not approved: {key} changed again after this page was drawn. Nothing was "
+                    f"trusted; review the new change.", "bad")
+        return f"nothing was approved for {key} ({stored}): it has no sighting to adopt", "warn"
+    except Exception as exc:                       # noqa: BLE001
+        return f"approve failed: {exc}", "bad"
 
 
 #: The panel actions that move trust or rewrite config. Each needs the approval code printed in
@@ -9688,6 +10011,13 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
     token file still cannot approve: the code is in no file and no page. A correct code unlocks
     that browser for 15 minutes through an HttpOnly cookie whose value lives only in this
     process. Ten wrong codes replace the code and print the new one here.
+
+    LIMIT (review G9, 2026-11-12). A cookie cannot be scoped to a port (RFC 6265) and SameSite treats
+    every 127.0.0.1 port as one site, so the browser also sends the unlock cookie to any OTHER local
+    port it visits inside those 15 minutes. On its own it cannot act: every trust POST still needs
+    the panel token, checked before the unlock, and an unlock lives only in the process that minted
+    it (tests/test_panel_unlock_cookie_alone_cannot_act.py). A local process that can read the token
+    file AND receives the leaked cookie can act as unlocked until it expires.
     """
     import secrets
     import threading
@@ -9738,10 +10068,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             re-resolves to 127.0.0.1 reaches it with that foreign name in Host and can then read
             the token-free pages (state, call log, exports). Only loopback names are served; a
             cross-site browser request (Sec-Fetch-Site) is refused too. Returns True when refused."""
-            host = (self.headers.get("Host") or "").strip().lower()
-            name = host.rsplit("]", 1)[0].lstrip("[") if host.startswith("[") else host.split(":", 1)[0]
-            site = (self.headers.get("Sec-Fetch-Site") or "").lower()
-            if name in ("127.0.0.1", "localhost", "::1") and site != "cross-site":
+            if not local_request_refusal(self.headers.get("Host"), self.headers.get("Sec-Fetch-Site")):
                 return False
             body = b"forbidden: the mcpgawk panel answers only local requests"
             self.send_response(403)
@@ -9970,6 +10297,9 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                     _ACTION.update(
                         level="warn", message=_msg,
                         need_code={"then": then, "key": _k,
+                                   # The pin of the version on screen travels through the code
+                                   # step, so the approval it confirms is still that one (G10).
+                                   "pin": (form.get("pin") or [""])[0][:128],
                                    "finding_id": (form.get("finding_id") or [""])[0][:200],
                                    "tab": (form.get("tab") or [""])[0][:20],
                                    "back": (form.get("back") or [""])[0][:20]})
@@ -10134,14 +10464,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                     self.send_header("Location", _back)
                     self.end_headers()
                     return
-                try:
-                    from . import history
-                    result = history.approve(key)
-                    _ACTION.update(
-                        message=(f"approved {key}" if result else f"nothing to approve for {key}"),
-                        at=_now())
-                except Exception as exc:          # noqa: BLE001
-                    _ACTION.update(message=f"approve failed: {exc}", at=_now())
+                message, level = _approve_from_panel(key, (form.get("pin") or [""])[0] or None)
+                _ACTION.update(message=message, level=level, at=_now())
             # Carry the token back, or the redirect would land the human on a read-only page and
             # the buttons would vanish after the first click.
             self.send_response(303)

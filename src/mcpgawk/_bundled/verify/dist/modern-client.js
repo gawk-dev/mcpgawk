@@ -93,6 +93,27 @@ class StdioRpc {
         this.child.kill();
     }
 }
+/**
+ * The answer to request `id` in an event stream (review J11, 2026-11-14). A stream may carry a
+ * notification, or another request's answer, before ours; the first `data:` line used to be
+ * taken whatever it was. A line that is not JSON is skipped: it is not our answer either.
+ */
+function answerIn(stream, id, method) {
+    for (const line of stream.split("\n")) {
+        if (!line.startsWith("data:"))
+            continue;
+        let event;
+        try {
+            event = JSON.parse(line.slice(5));
+        }
+        catch {
+            continue;
+        }
+        if (event && event.id === id && ("result" in event || "error" in event))
+            return event;
+    }
+    throw new Error(`no answer to ${method} in the server's event stream`);
+}
 /** HTTP: one POST per request — the stateless core is the POINT of the modern revision, so a
  * request/response client IS the faithful implementation, not a shortcut. Answers may arrive as
  * plain JSON or as a single SSE event; both are real server behaviours, both are handled. */
@@ -105,6 +126,7 @@ class HttpRpc {
         this.headers = headers;
     }
     async request(method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
+        const id = this.nextId++;
         const res = await fetch(this.url, {
             method: "POST",
             headers: {
@@ -113,19 +135,15 @@ class HttpRpc {
                 [HEADER]: MODERN_REVISION,
                 ...this.headers,
             },
-            body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method, params: params ?? {} }),
+            body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!res.ok)
             throw new Error(`HTTP ${res.status} from ${method}`);
         const text = await res.text();
-        const payload = (res.headers.get("content-type") ?? "").includes("event-stream")
-            ? (text
-                .split("\n")
-                .find((l) => l.startsWith("data:"))
-                ?.slice(5) ?? "")
-            : text;
-        const msg = JSON.parse(payload);
+        const msg = (res.headers.get("content-type") ?? "").includes("event-stream")
+            ? answerIn(text, id, method)
+            : JSON.parse(text);
         if (msg.error) {
             const err = msg.error;
             throw new Error(`MCP error ${err.code}: ${err.message}`);
@@ -148,13 +166,22 @@ export class ModernClient {
         // io.modelcontextprotocol keys — the server-side era router classifies the request by THAT,
         // not by the method name. A bare {protocolVersion} probe gets "Method not found" from real
         // SDK servers (measured against the SDK's own server before this was fixed).
-        const disc = await rpc.request("server/discover", {
-            _meta: {
-                "io.modelcontextprotocol/protocolVersion": MODERN_REVISION,
-                "io.modelcontextprotocol/clientInfo": { name: "gawk-verify", version: "1.0.0" },
-                "io.modelcontextprotocol/clientCapabilities": {},
-            },
-        }, opts.timeoutMs);
+        let disc;
+        try {
+            disc = await rpc.request("server/discover", {
+                _meta: {
+                    "io.modelcontextprotocol/protocolVersion": MODERN_REVISION,
+                    "io.modelcontextprotocol/clientInfo": { name: "gawk-verify", version: "1.0.0" },
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
+            }, opts.timeoutMs);
+        }
+        catch (e) {
+            // Close before rethrowing: over stdio the transport IS a child process, and a failed
+            // handshake used to leave it running (review J11).
+            await rpc.close().catch(() => { });
+            throw e;
+        }
         const versions = disc.supportedVersions ?? [];
         if (!versions.includes(MODERN_REVISION)) {
             await rpc.close();

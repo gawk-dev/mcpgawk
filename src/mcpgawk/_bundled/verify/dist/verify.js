@@ -26,6 +26,12 @@ import { CheckRunner, isMcpRemoteProxy, callToolText, dispatchedProbe, listTools
 export function findInbandLoginTool(tools) {
     return tools.find((t) => /(^|[._-])log[_-]?in($|[._-])/i.test(t.name) && !/out/i.test(t.name));
 }
+/** Wait between two "has the human signed in yet?" reads, in ms. Configurable for tests, like
+ * the probe and connect timeouts in runner.ts; 30 reads at the default is the five-minute wait. */
+function signInPollMs() {
+    const parsed = Number(process.env.GAWK_SIGNIN_POLL_MS);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
+}
 /** An answer that still reads as "you are not signed in", whatever the ok-flag says — kite
  * reports auth failures as ok:true "Failed to execute <tool>". One regex for the preflight
  * and the post-sign-in retry, so the two ends of the dance cannot drift apart. */
@@ -70,6 +76,10 @@ async function selectIsolatedSandbox(server) {
 async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.name) {
     const findings = [];
     const checkErrors = [];
+    const rejectedChecks = [];
+    let rejectedDetail;
+    let answers = 0;
+    let errorAnswers = 0;
     let startupFailed = false;
     let startupDetail;
     // 1A: count what was PLANNED and what actually reached a verdict, at the only place that knows.
@@ -135,12 +145,20 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
         // Emits a `raw-observation` for EVERY attempt (not just ones that end up in a finding) — the
         // actual evidence, not just the decided verdict. See the AuditEvent variant's docstring.
         let attemptNum = 0;
+        let checkErrorAnswer;
         const auditingProbe = async (toolName, args) => {
             attemptNum += 1;
             const result = await probe(toolName, args);
             if (!result.ok && result.startup) {
                 startupFailed = true;
                 startupDetail = result.detail;
+            }
+            if (result.ok) {
+                answers += 1;
+                if (result.obs.errorAnswer !== undefined) {
+                    errorAnswers += 1;
+                    checkErrorAnswer ??= result.obs.errorAnswer;
+                }
             }
             ctx.emit({
                 type: "raw-observation",
@@ -152,6 +170,7 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
                 resultTextExcerpt: result.ok ? result.obs.resultText.slice(0, 2000) : undefined,
                 egress: result.ok ? result.obs.egress : undefined,
                 infraDetail: result.ok ? undefined : result.detail,
+                errorAnswer: result.ok ? result.obs.errorAnswer : undefined,
             });
             return result;
         };
@@ -159,8 +178,18 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
         if (outcome.kind === "verdict")
             findings.push(outcome.verdict);
         const isInfra = outcome.kind !== "verdict" && /infra/i.test(outcome.reason);
+        // J1 narrowed: ANY attempt of this check answered with the tool's own error and nothing was
+        // convicted. "Did not reproduce" against a refusal is not a clean check, so it is counted as
+        // neither planned nor completed, and the tool is listed. A conviction read out of the error
+        // text itself (a secret in the message) still stands and is counted like any other.
+        const isRejected = outcome.kind !== "verdict" && !isInfra && checkErrorAnswer !== undefined;
         if (outcome.kind !== "verdict" && isInfra) {
             checkErrors.push({ tool: attributionName, code: check.code, detail: outcome.reason });
+        }
+        else if (isRejected) {
+            checksPlanned -= 1;
+            rejectedChecks.push(check.code);
+            rejectedDetail ??= checkErrorAnswer;
         }
         else {
             // A verdict, or a non-infra "did not reproduce" — either way this check reached a conclusion.
@@ -173,16 +202,30 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
             code: check.code,
             label: check.label.trim(),
             severity: check.severity,
-            outcome: outcome.kind === "verdict" ? "reproduced" : isInfra ? "error" : "clean",
+            outcome: outcome.kind === "verdict" ? "reproduced" : isInfra ? "error" : isRejected ? "rejected" : "clean",
             attemptsOk: outcome.attemptsOk,
             attemptsRun: outcome.attemptsRun,
             detail: outcome.kind === "verdict"
                 ? `reproduced ${outcome.verdict.reproOk}/${outcome.verdict.reproTotal}`
-                : outcome.reason,
+                : isRejected
+                    ? `the tool answered the test input with an error, so this check concluded nothing (${checkErrorAnswer})`
+                    : outcome.reason,
             evidence: outcome.kind === "verdict" ? outcome.verdict.evidence : undefined,
         });
     }
-    return { findings, checkErrors, checksPlanned, checksCompleted, startupFailed, startupDetail };
+    return {
+        findings,
+        checkErrors,
+        checksPlanned,
+        checksCompleted,
+        startupFailed,
+        startupDetail,
+        rejected: rejectedChecks.length > 0
+            ? { checks: rejectedChecks, detail: rejectedDetail ?? "" }
+            : undefined,
+        answers,
+        errorAnswers,
+    };
 }
 /**
  * Verify one MCP server behaviourally: enumerate its tools, then for each callable one run every
@@ -330,6 +373,30 @@ export async function verifyServer(server, opts = {}) {
     const executor = remote ? undefined : executorToolOf(tools);
     const envelope = executor ? inferExecutorEnvelope(executor.inputSchema) : null;
     const hiddenProbed = [];
+    // J9 (2026-11-12): tools that actually ran their checks, counted, never derived by subtraction.
+    let visibleExercised = 0;
+    // J3 follow-up (2026-11-13): the tools whose every planned check reached a conclusion, collected
+    // here for the same reason. The behaviour profile clears a conviction only for these.
+    const settledTools = [];
+    // A tool that answered ANY check with its own error is not settled, even when its other checks
+    // concluded: a convicted tool must not clear itself by refusing the one probe that convicted it.
+    const settles = (r) => r.checksPlanned > 0 && r.checksCompleted === r.checksPlanned && r.rejected === undefined;
+    // J1 narrowed (2026-11-15): tools that answered the made-up test input with their own error,
+    // collected where the calls were made, under the name the report uses for the tool.
+    const rejectedInput = [];
+    let answersTotal = 0;
+    let errorAnswersTotal = 0;
+    let firstErrorAnswer;
+    const noteAnswers = (name, r) => {
+        answersTotal += r.answers;
+        errorAnswersTotal += r.errorAnswers;
+        if (r.rejected) {
+            rejectedInput.push({ tool: name, checks: r.rejected.checks, detail: r.rejected.detail });
+            firstErrorAnswer ??= r.rejected.detail;
+        }
+    };
+    /** A probe that got a real answer: the call worked AND the tool did not answer with an error. */
+    const answered = (r) => r.ok && r.obs.errorAnswer === undefined;
     // Per-server, once: do this server's restricting labels DISCRIMINATE? Kite stamps every tool
     // destructiveHint:true (get_ltp included) — blanket labels are noise, and honouring them let
     // kite sit "verified-looking" with 0 of 22 tools exercised for two weeks ([FOUNDER]
@@ -357,17 +424,20 @@ export async function verifyServer(server, opts = {}) {
             // answer CHANGES from this shape.
             const unauthedShape = (r) => (r.ok ? r.obs.resultText : r.detail ?? "").trim().slice(0, 120);
             const firstShape = unauthedShape(first);
-            const failed = !first.ok || authFailureShaped(first.ok ? first.obs.resultText : "");
+            // An error answer is a failed read here, exactly as it was when the probe reported it as a
+            // failed call (J1 narrowed): this is where "the server answers errors until signed in" is
+            // decided, and an error whose text varies must never read as a completed sign-in below.
+            const failed = !answered(first) || authFailureShaped(first.obs.resultText);
             if (failed) {
                 const login = await probe(loginTool.name, {});
-                const url = login.ok ? firstUrlIn(login.obs.resultText) : null;
+                const url = answered(login) ? firstUrlIn(login.obs.resultText) : null;
                 if (url) {
                     emit({ type: "auth-needed", server: server.name, tool: loginTool.name, url });
                     let authed = false;
                     for (let i = 0; i < 30; i++) {
-                        await new Promise((r) => setTimeout(r, 10_000));
+                        await new Promise((r) => setTimeout(r, signInPollMs()));
                         const again = await probe(preflight.name, {});
-                        if (signInComplete(firstShape, unauthedShape(again), again.ok, again.ok ? again.obs.resultText : "")) {
+                        if (signInComplete(firstShape, unauthedShape(again), answered(again), again.ok ? again.obs.resultText : "")) {
                             authed = true;
                             break;
                         }
@@ -417,6 +487,13 @@ export async function verifyServer(server, opts = {}) {
                 emit,
                 budget,
             });
+            noteAnswers(tool.name, res);
+            // A tool whose every check was answered with an error was not exercised: nothing was
+            // learnt about what it does. It is listed in `rejectedInput`, not counted as checked.
+            if (res.checksPlanned > 0 || !res.rejected)
+                visibleExercised += 1;
+            if (settles(res))
+                settledTools.push(tool.name);
             findings.push(...res.findings);
             checkErrors.push(...res.checkErrors);
             checksPlanned += res.checksPlanned;
@@ -472,12 +549,33 @@ export async function verifyServer(server, opts = {}) {
                         }
                     }
                     const attribution = `${hidden.name} via ${executor.name}`;
+                    // J6 (2026-11-12): an executor with no arguments slot cannot deliver this tool's inputs
+                    // (the SSRF canary among them). Dispatching it anyway "probed" a tool that received
+                    // nothing and counted it clean. Not probed; a check error says why; the server stays
+                    // incomplete. A hidden tool that declares no inputs loses nothing and is still probed.
+                    const declared = Object.keys(hidden.inputSchema?.properties ?? {});
+                    if (envelope.argsParam === null && declared.length > 0) {
+                        checkErrors.push({
+                            tool: attribution,
+                            code: "dispatch-no-args-slot",
+                            detail: `the executor ${executor.name} has no arguments parameter, so ${hidden.name}'s ` +
+                                `inputs (${declared.join(", ")}) could not be delivered; not probed`,
+                        });
+                        continue;
+                    }
                     const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit, budget }, attribution);
                     findings.push(...res.findings);
                     checkErrors.push(...res.checkErrors);
                     checksPlanned += res.checksPlanned;
                     checksCompleted += res.checksCompleted;
-                    hiddenProbed.push(hidden.name);
+                    noteAnswers(attribution, res);
+                    // Deliberately stricter than a visible tool: an error through the executor is as likely
+                    // OUR envelope as the tool's input check, so a hidden tool that answered any check with
+                    // an error is not "probed" and the dispatcher stays incomplete, as it did before.
+                    if (!res.rejected)
+                        hiddenProbed.push(hidden.name);
+                    if (settles(res))
+                        settledTools.push(hidden.name);
                 }
             }
             finally {
@@ -491,10 +589,18 @@ export async function verifyServer(server, opts = {}) {
         // is done, success or failure, or it leaks past the end of the run.
         await probe.dispose?.();
     }
+    // "At least one call got an answer, and none of them was anything but an error": the server
+    // ran nothing for us (an expired credential, a missing key), so nothing was proven about it.
+    const allCallsErrored = answersTotal > 0 && errorAnswersTotal === answersTotal
+        ? `every call answered with an error, so nothing was proven about this server (first: ${firstErrorAnswer ?? "no error text"})`
+        : undefined;
     return {
         server: server.name,
         transport,
-        toolsChecked: tools.length - skipped.length,
+        // Visible tools that ran + hidden tools probed through the executor. `tools.length -
+        // skipped.length` subtracted HIDDEN skips from VISIBLE tools: 2 visible and 5 skipped hidden
+        // mutators read -3, and a probed hidden tool never counted (review J9).
+        toolsChecked: visibleExercised + hiddenProbed.length,
         findings,
         skipped,
         checkErrors,
@@ -506,6 +612,12 @@ export async function verifyServer(server, opts = {}) {
         sandboxDegradedReason,
         labelNoiseNote,
         authIncomplete,
+        rejectedInput: rejectedInput.length > 0 ? rejectedInput : undefined,
+        allCallsErrored,
+        // A run that never signed in proved nothing behavioural, so it settles nothing. (A run that
+        // got nothing but errors settles nothing either, by construction: a tool that answered any
+        // check with an error is never in `settledTools`.)
+        toolsSettled: authIncomplete ? [] : settledTools,
         dynamicDispatch: dynamicDispatch.length > 0 ? dynamicDispatch : undefined,
         hiddenCatalog: hiddenCatalog.length > 0 ? hiddenCatalog : undefined,
         hiddenProbed: hiddenProbed.length > 0 ? hiddenProbed : undefined,

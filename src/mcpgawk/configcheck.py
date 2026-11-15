@@ -60,6 +60,15 @@ SHORT: dict[str, str] = {
 RISKY_KINDS = frozenset({"config:tls-off", "config:plaintext-credential"})
 
 
+#: An exact release: 1.2.3, 1.0.0-rc.1, 1.2.3+build. Not a tag, a range, a wildcard or a partial.
+_EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-.]?(?:a|b|rc|alpha|beta|dev|post)?[0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z.-]+)?")
+
+
+#: PyPI: a complete PEP 440 release, two parts or more (`2.1` is a version there; npm reads `1.0` as a
+#: range). No wildcard, no comparison operator.
+_EXACT_PEP440 = re.compile(r"\d+(?:\.\d+)+(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A-Za-z.]+)?")
+
+
 def _unpinned_package(name: str, entry: dict[str, Any]) -> list[Finding]:
     command = entry.get("command") or ""
     if not command:
@@ -68,12 +77,17 @@ def _unpinned_package(name: str, entry: dict[str, Any]) -> list[Finding]:
     if not pkg:
         return []                                   # not a registry package (a path, a script, `uv run`, a git URL) — skip, never guess
     eco, spec = pkg
+    # ONLY AN EXACT VERSION IS A PIN (review N21, 2026-11-12). Anything else after `@` was counted as
+    # pinned, so `@next`, `@beta`, `@^1`, `@~1.2`, `@1` and `@1.x` read as pinned while each resolves
+    # to whatever upstream publishes next within it.
     if eco == "npm":
         _, pin = _split_npm_spec(spec)
-        floating = pin is None or pin in ("latest", "*", "")
+        floating = not (pin and _EXACT_VERSION.fullmatch(pin))
     else:  # pypi — uvx/pipx accept PEP 508 `pkg==1.2.3` and uv's `pkg@1.2.3`
-        _, _, tag = spec.partition("@")
-        floating = "==" not in spec and (not tag or tag == "latest")
+        _, eq, exact = spec.partition("==")
+        _, at, tag = spec.partition("@")
+        floating = not ((eq and _EXACT_PEP440.fullmatch(exact.strip()))
+                        or (at and _EXACT_PEP440.fullmatch(tag.strip())))
     if not floating:
         return []
     return [Finding(

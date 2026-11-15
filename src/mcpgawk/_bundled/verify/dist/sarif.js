@@ -63,11 +63,22 @@ export function toSarif(report) {
     // check" — distinct from `results` (findings). A checkError rendered as a `result` would read
     // as a vulnerability; rendered here it correctly reads as "this check didn't complete", which
     // is what it is. See model.ts's CheckError docstring for why this exists.
-    const toolExecutionNotifications = report.servers.flatMap((server) => server.checkErrors.map((c) => ({
-        descriptor: { id: c.code },
-        message: { text: `${server.server}/${c.tool}: check did not complete — ${c.detail}` },
-        level: "error",
-    })));
+    const toolExecutionNotifications = report.servers.flatMap((server) => [
+        ...server.checkErrors.map((c) => ({
+            descriptor: { id: c.code },
+            message: { text: `${server.server}/${c.tool}: check did not complete — ${c.detail}` },
+            level: "error",
+        })),
+        // A tool that answered the test input with its own error: not judged on those checks. A note,
+        // not an error: the run is judged on the tools that did answer (J1 narrowed, 2026-11-15).
+        ...(server.rejectedInput ?? []).flatMap((r) => r.checks.map((code) => ({
+            descriptor: { id: code },
+            message: {
+                text: `${server.server}/${r.tool}: the tool answered the test input with an error, so it was not judged on this check — ${r.detail}`,
+            },
+            level: "note",
+        }))),
+    ]);
     const sarif = {
         $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         version: "2.1.0",

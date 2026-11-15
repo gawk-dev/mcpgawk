@@ -6,6 +6,16 @@ export interface Observation {
     readonly egress: readonly EgressRecord[];
     /** The tool's returned text content, concatenated. */
     readonly resultText: string;
+    /**
+     * Set when the tool answered with its own error (`isError: true`) and sent nothing out: a short,
+     * redacted excerpt of what it said. An ANSWER, not a failed call (review J1, narrowed
+     * 2026-11-15): real tools reject the made-up input a check sends ("no such file"), and counting
+     * each of those as a check that never ran turned a clean filesystem server into "incomplete".
+     * `resultText` still holds the error text, so the output checks read it like any other answer.
+     * A check that got this answer proved nothing about the tool's behaviour: verify.ts lists the
+     * tool as having rejected the input and never counts it as checked or settled.
+     */
+    readonly errorAnswer?: string;
 }
 export interface CheckDecision {
     readonly reproduced: boolean;

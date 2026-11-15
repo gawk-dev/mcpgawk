@@ -346,6 +346,16 @@ def main(argv: list[str] | None = None) -> int:
             print("  Claude Code picks this up without a restart.")
             return 0
         if action == "uninstall":
+            # A PERSON, NOT AN AGENT (review G12, 2026-11-12). Removing the guard turns every later
+            # call into an unchecked one, and this had no gate while approve, unmute and
+            # --no-strict all do: an agent session could run it. Same evidence approve uses. Not
+            # the locked-machine passphrase: this command has no way to take it, and a person must
+            # always be able to remove the guard from their own terminal.
+            from . import history
+            blocked = history.approval_blocked_reason()
+            if blocked:
+                print(f"mcpgawk guard: refusing to uninstall — {blocked}", file=sys.stderr)
+                return 4
             print(uninstall(override))
             return 0
     except GuardError as exc:

@@ -91,7 +91,9 @@ export type AuditEvent = {
     code: string;
     label: string;
     severity: Severity;
-    outcome: "reproduced" | "clean" | "error";
+    /** `rejected` (J1 narrowed, 2026-11-15): the tool answered this check's made-up input with
+     * its own error, so the check concluded nothing about the tool. Not clean, not an error. */
+    outcome: "reproduced" | "clean" | "error" | "rejected";
     attemptsOk: number;
     attemptsRun: number;
     detail: string;
@@ -118,6 +120,8 @@ export type AuditEvent = {
         allowed: boolean;
     }[];
     infraDetail?: string;
+    /** The tool answered with its own error: what it said (see `Observation.errorAnswer`). */
+    errorAnswer?: string;
 };
 /**
  * `--isolate` (opt-in, NOT the default): Docker is required for full protection. When it's

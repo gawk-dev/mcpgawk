@@ -52,9 +52,10 @@ class Candidate:
         redactor already existed and this path simply did not call it; masking at the label fixes
         every consumer at once instead of one at a time.
         """
-        from .redact import redact_url
+        from .redact import redact_url_for_display
 
-        return f"{self.transport} {redact_url(self.url) or self.url}"
+        # The path too (review N19 follow-up, 2026-11-13): `https://host/<key>/sse` is a real shape.
+        return f"{self.transport} {redact_url_for_display(self.url) or self.url}"
 
 
 def _strip_known_suffix(path: str) -> str:

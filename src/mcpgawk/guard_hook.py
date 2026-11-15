@@ -208,10 +208,16 @@ def _session_sources(session: str | None, behaviour: dict) -> tuple[tuple[str, s
         # Session-SCOPED read: a global row budget would let a busy parallel session evict this
         # session's earlier source calls and the sequence check would fade out under load.
         # hasattr because the hook loads spool by file path — pair mismatches must degrade, not die.
+        #
+        # THE PATH IS PASSED, as `_already_told` does (review I1, 2026-11-12). Loaded by file, spool
+        # has no package and cannot find the store itself: without the path it raised, the except
+        # below swallowed it, sources were always empty, and on every install without
+        # MCPGAWK_SPOOL (all of them) the source-then-sink deny never fired.
+        path = spool.spool_path(store_path=str(history_path()))
         if hasattr(spool, "read_session"):
-            rows = spool.read_session(session)       # most recent first, session-bounded
+            rows = spool.read_session(session, path=path)   # most recent first, session-bounded
         else:
-            rows = spool.read()                      # most recent first, globally bounded
+            rows = spool.read(path=path)                    # most recent first, globally bounded
     except Exception:  # noqa: BLE001 — never break the hot path over its own memory
         return ()
     out: list[tuple[str, str]] = []
@@ -401,6 +407,20 @@ LOCKED_UNREADABLE = ("this machine is locked, and mcpgawk cannot read a current 
 LOCKED_UNREADABLE_HUMAN = ("mcpgawk blocked {server}.{tool} — this machine is locked and {cause}. "
                            "Run `mcpgawk scan` in your own terminal to rebuild it; that approves "
                            "nothing, it restores the copy of what you already signed.")
+
+
+#: STRICT mode on an unlocked machine, projection STALE (review G4, 2026-11-12). A stale projection
+#: deferred every call even in strict mode, so "nothing I did not approve runs" became "anything
+#: runs while the store and its copy disagree". The strict flag is read from the stale projection
+#: itself, which still parses; a missing or unreadable projection cannot say whether strict is on,
+#: and keeps deferring loudly.
+STRICT_STALE = ("the guard is in strict mode, and its copy of your approvals is out of date (the "
+                "baseline store changed without it), so mcpgawk cannot tell whether {server} is "
+                "approved. In strict mode that is a refusal. Run `mcpgawk scan` in your own "
+                "terminal to rebuild the copy; that approves nothing.")
+STRICT_STALE_HUMAN = ("mcpgawk blocked {server}.{tool} — strict mode, and the guard's copy of your "
+                      "approvals is out of date. Run `mcpgawk scan` in your own terminal to rebuild "
+                      "it; that approves nothing.")
 
 
 def _unreadable_cause(note: str | None) -> str | None:
@@ -863,8 +883,8 @@ def decide(event: dict, store_path: Path | None = None,
     return output, note
 
 
-def _decide(event: dict, store_path: Path | None,
-            fmt: str) -> tuple[dict | None, str | None, str, bool, str | None, str | None]:
+def _decide(event: dict, store_path: Path | None, fmt: str, *,
+            raw_names: bool = False) -> tuple[dict | None, str | None, str, bool, str | None, str | None]:
     """The full decision including WHICH BASIS produced it, so the record carries the evidence
     tier (declared vs observed) — an operator cannot calibrate trust in a deny without it.
 
@@ -872,6 +892,11 @@ def _decide(event: dict, store_path: Path | None,
     we DECLINED to check (no projection, stale projection, decision core unloadable) produced no
     verdict, and must not be logged the same way as a call that was checked and passed — `status`
     counted both and reported 802 calls "checked" where 801 were declines and none were enforced.
+
+    `raw_names`: the server name is the configured one, never an agent's rewrite of it, whatever
+    `fmt` says. A gateway (the Obot filter) reads a Claude-shaped event but names servers by its own
+    config, and the rewritten-name candidates produced the 0.1.71 false collision deny there
+    (review I10, 2026-11-12).
     """
     tool_name, _args = _read_event(fmt, event)
     if not isinstance(tool_name, str):
@@ -884,7 +909,7 @@ def _decide(event: dict, store_path: Path | None,
 
     store = store_path or history_path()
     record, note, strict_refuse, others = _lookup(
-        server, store, rewritten=fmt not in RAW_SERVER_NAME_FORMATS)
+        server, store, rewritten=not raw_names and fmt not in RAW_SERVER_NAME_FORMATS)
     approved, _props, _seen, seen_at, _grown, _reverted = _row_evidence(record, tool)
 
     # LOCKED: no verifiable signed approval for this name is a refusal — the strict mode the person
@@ -899,6 +924,13 @@ def _decide(event: dict, store_path: Path | None,
             reason = LOCKED_REFUSAL.format(server=server)
             human = LOCKED_HUMAN.format(server=server, tool=tool)
         # The stderr note travels too (it was dropped here): it is the operator's diagnostic.
+        return _deny(fmt, reason, human), note, "declared", True, reason, None
+
+    # STRICT + STALE (review G4): see STRICT_STALE. Before the core load, like the locked refusal:
+    # the reason is the projection, not anything the core decides.
+    if record is None and note and "STALE" in note and _strict(store):
+        reason = STRICT_STALE.format(server=server)
+        human = STRICT_STALE_HUMAN.format(server=server, tool=tool)
         return _deny(fmt, reason, human), note, "declared", True, reason, None
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME

@@ -182,12 +182,12 @@ function page(unsafeAllowed) {
   <hr class="divider"/>
   <h1 style="margin-top:26px">Verify a server in depth</h1>
   <p class="note" style="margin:6px 0 0">mcpgawk verify doesn't read tool descriptions and
-  guess — it <strong>runs</strong> each tool in a no-egress sandbox and watches what it actually does. Nothing leaves this machine.</p>
+  guess — it <strong>runs</strong> each tool in a sandbox and watches what it actually does. mcpgawk itself sends nothing off this machine.</p>
   <div class="panel">
     <h3>The approach — behavioural, reproduction-gated</h3>
     <ol class="steps">
-      <li>Spawn the server in a disposable <b>no-egress sandbox</b> — every outbound connection is blocked and recorded.</li>
-      <li>Enumerate its tools; in safe mode, <b>skip</b> anything that could mutate state or move money.</li>
+      <li>Start the server once to list its tools; in safe mode, <b>skip</b> anything that could mutate state or move money. This first start is outside the sandbox.</li>
+      <li>Run each check in a disposable <b>sandbox</b>: the server's HTTP(S) requests go through a proxy that blocks and records any host you did not declare. Raw sockets, DNS and UDP are not seen or blocked in this mode; <code>--isolate</code> runs the checks in a container that blocks them.</li>
       <li><b>Invoke</b> each tool with synthesised inputs and observe its real behaviour — egress and output.</li>
       <li>Convict only when the bad behaviour <b>reproduces N/N</b>. An infra failure never convicts.</li>
     </ol>
@@ -356,6 +356,7 @@ function lineFor(ev){
   if(ev.type==='check'){
     if(ev.outcome==='reproduced')return{cls:'ln-hit',txt:ev.tool+' · '+ev.label+' — REPRODUCED '+ev.attemptsOk+'/'+ev.attemptsRun+'   '+evSummary(ev)};
     if(ev.outcome==='error')return{cls:'ln-skip',txt:ev.tool+' · '+ev.label+' — could not verify (infra)'};
+    if(ev.outcome==='rejected')return{cls:'ln-skip',txt:ev.tool+' · '+ev.label+' — the tool answered the test input with an error (not judged)'};
     return{cls:'ln-ok',txt:ev.tool+' · '+ev.label+' — clean'};
   }
   return{cls:'',txt:''};
@@ -472,25 +473,70 @@ function allowedHostnames() {
         .filter(Boolean);
     return new Set([...LOOPBACK_HOSTS, ...extra]);
 }
-/** Reject anything but a same-origin local request — this endpoint can spawn processes. */
+/** The request's own host and port, parsed IPv6-aware: `[::1]:7777` was split on ":" into "[". */
+function hostOf(req) {
+    try {
+        const u = new URL(`http://${req.headers.host ?? ""}`);
+        return { hostname: u.hostname, port: u.port };
+    }
+    catch {
+        return undefined;
+    }
+}
+/** The three loopback names are one host: a page at localhost may reach the API at 127.0.0.1. */
+const sameHost = (a, b) => a === b || (LOOPBACK_HOSTS.has(a) && LOOPBACK_HOSTS.has(b));
+/** Requests that can SPAWN a process: verify a posted config, verify a fleet server by name, or
+ *  list the fleet with launchLocal=1 (which launches every local server to enumerate it). */
+function spawns(req) {
+    if (req.method === "POST" && (req.url === "/api/verify" || req.url === "/api/verify-server"))
+        return true;
+    if (req.method === "GET" && (req.url ?? "").startsWith("/api/fleet")) {
+        try {
+            return new URL(req.url ?? "/", "http://localhost").searchParams.get("launchLocal") === "1";
+        }
+        catch {
+            return true;
+        }
+    }
+    return false;
+}
+const isJson = (req) => ((req.headers["content-type"] ?? "").split(";")[0] ?? "").trim().toLowerCase() === "application/json";
+/** Reject anything but a local request; for a request that can spawn a process, anything but the
+ *  SAME ORIGIN (review P6, 2026-11-12). A page on another localhost port is another origin: the
+ *  Origin was compared by hostname only and any content type was parsed, so such a page could POST
+ *  a config whose command this server spawned. A request with no Origin comes from a non-browser
+ *  client (browsers send one on every POST); it is allowed, as JSON. */
 function isLocalRequest(req) {
     const allowed = allowedHostnames();
-    const host = (req.headers.host ?? "").split(":")[0] ?? "";
-    if (!allowed.has(host))
+    const host = hostOf(req);
+    if (!host || !allowed.has(host.hostname))
         return false;
     // A cross-site <img>/<script> GET sends no Origin but does send Sec-Fetch-Site; refuse it.
     const site = req.headers["sec-fetch-site"];
     if (site === "cross-site")
         return false;
+    const spawning = spawns(req);
     const origin = req.headers.origin;
     if (origin) {
+        let o;
         try {
-            if (!allowed.has(new URL(origin).hostname))
-                return false;
+            o = new URL(origin);
         }
         catch {
             return false;
         }
+        if (!allowed.has(o.hostname))
+            return false;
+        if (spawning && !(sameHost(o.hostname, host.hostname) && o.port === host.port))
+            return false;
+    }
+    if (spawning) {
+        // Another port of this machine is "same-site" to a browser; for spawning it is not enough.
+        if (site === "same-site")
+            return false;
+        // text/plain and form posts need no CORS preflight, so they are how a foreign page would POST.
+        if (req.method === "POST" && !isJson(req))
+            return false;
     }
     return true;
 }

@@ -157,13 +157,21 @@ def _frontmatter(text: str) -> tuple[dict[str, str], str | None]:
 
 
 def _find_skill_md(directory: Path) -> Path | None:
-    try:
-        for child in directory.iterdir():
-            if child.is_file() and child.name.lower() == "skill.md":
-                return child
-    except OSError:
-        pass
+    """The directory's SKILL.md, or None when it has none. RAISES OSError when the directory cannot
+    be read (WP6, 2026-11-12): this returned None, so an unreadable skill folder looked like "not a
+    skill" and was never scanned or mentioned. Callers report it (`_unreadable`)."""
+    for child in directory.iterdir():
+        if child.is_file() and child.name.lower() == "skill.md":
+            return child
     return None
+
+
+def _unreadable(path: Path, hosts: list[str], exc: OSError, what: str) -> "SkillSnapshot":
+    """A folder the scan could not read, as a finding: an unreadable store never reads as calm."""
+    why = exc.strerror or str(exc) or type(exc).__name__
+    return SkillSnapshot(name=path.name or str(path), root=str(path), hosts=hosts,
+                         findings=detect_skill_malformed(f"{what} could not be read ({why})",
+                                                         str(path)))
 
 
 def _walk_bounded(root: Path, skipped: "list[tuple[str, str]] | None" = None):
@@ -208,7 +216,10 @@ def parse_skill(directory: Path, hosts: list[str]) -> SkillSnapshot:
     directory = directory.resolve()
     snap = SkillSnapshot(name=directory.name, root=str(directory), hosts=hosts)
 
-    skill_md = _find_skill_md(directory)
+    try:
+        skill_md = _find_skill_md(directory)
+    except OSError as exc:
+        return _unreadable(directory, hosts, exc, "skill folder")
     if skill_md is None:
         snap.findings.extend(detect_skill_malformed(
             "no SKILL.md in the skill directory — nothing states what this skill claims to do",
@@ -307,10 +318,21 @@ def discover_skills(home: Path | None = None,
     def scan_root(root: Path, hosts: list[str]) -> None:
         try:
             children = sorted(root.iterdir())
-        except OSError:
+        except OSError as exc:            # an unreadable root read as "no skills" (WP6)
+            snaps.append(_unreadable(root, hosts, exc, "skills folder"))
             return
         for child in children:
-            if child.is_dir() and not child.is_symlink() and _find_skill_md(child) is not None:
+            if not child.is_dir() or child.is_symlink():
+                continue
+            try:
+                found = _find_skill_md(child)
+            except OSError as exc:        # an unreadable skill folder was skipped unmentioned (WP6)
+                key = str(child.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    snaps.append(_unreadable(child, hosts, exc, "skill folder"))
+                continue
+            if found is not None:
                 key = str(child.resolve())
                 if key not in seen:
                     seen.add(key)
@@ -319,13 +341,22 @@ def discover_skills(home: Path | None = None,
     if explicit_paths:
         for p in explicit_paths:
             p = p.expanduser()
-            if _find_skill_md(p) is not None:               # a single skill directory
+            try:
+                single = _find_skill_md(p) if p.is_dir() else None
+            except OSError:
+                single = None                # an unreadable directory: scan_root below reports it
+            if single is not None:                          # a single skill directory
                 key = str(p.resolve())
                 if key not in seen:
                     seen.add(key)
                     snaps.append(parse_skill(p, ["explicit"]))
                 continue
-            project_roots = [p / rel for rel in PROJECT_SKILL_DIRS if (p / rel).is_dir()]
+            try:
+                project_roots = [p / rel for rel in PROJECT_SKILL_DIRS if (p / rel).is_dir()]
+            except OSError:
+                # is_dir() RAISES PermissionError under an unreadable directory (it crashed the
+                # whole discovery); the skills-root branch below reports the folder instead.
+                project_roots = []
             if project_roots:                                # a project root
                 for r in project_roots:
                     scan_root(r, ["explicit"])

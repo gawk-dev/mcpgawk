@@ -62,6 +62,11 @@ async def _scan_fleet(launch_local: bool) -> dict[str, Any]:
     """Discover and scan. Remote servers are always probed (nothing local runs); local ones only
     when the caller opted in for this call."""
     configured = discover_servers()
+    # THE SAME PERMISSION AS scan_mcp_server (review N15, 2026-11-12). `launch_local` is chosen by
+    # the CALLING MODEL; without MCPGAWK_MCP_ALLOW_LAUNCH=1 this tool started every discovered local
+    # server with nobody there to approve, while the single-server tool refused one. Without the
+    # permission, local servers are skipped and listed, exactly as with launch_local=false.
+    launch_local = launch_local and os.environ.get("MCPGAWK_MCP_ALLOW_LAUNCH") == "1"
     targets = [(n, e) for n, e in configured.items() if launch_local or not e.get("command")]
     skipped = [(n, e) for n, e in configured.items() if not launch_local and e.get("command")]
     snaps = await asyncio.gather(*(probe(e, n) for n, e in targets)) if targets else []
@@ -122,7 +127,8 @@ def build_server() -> Server:
                     "Report every MCP server configured on this machine, grouped by the tool it is "
                     "configured in, with what each one can do and what it costs the context window. "
                     "Runs locally; no inventory is uploaded. Local servers are not started unless "
-                    "launch_local is set, because starting one runs its code."
+                    "launch_local is set AND the user has set MCPGAWK_MCP_ALLOW_LAUNCH=1, because "
+                    "starting one runs its code; otherwise they are listed as skipped."
                 ),
                 # Declared intent, and it must be the TRUTH about the worst this tool can do —
                 # not about its default. `launch_local` is chosen by the CALLING MODEL, and setting
@@ -146,7 +152,7 @@ def build_server() -> Server:
                         "launch_local": {
                             "type": "boolean",
                             "default": False,
-                            "description": "Start local (stdio) servers in order to scan them. This runs their code.",
+                            "description": "Start local (stdio) servers in order to scan them. This runs their code, and only happens when the user has set MCPGAWK_MCP_ALLOW_LAUNCH=1.",
                         }
                     },
                 },

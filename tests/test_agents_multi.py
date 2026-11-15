@@ -574,6 +574,40 @@ def test_the_free_hook_blocks_an_observed_sink_after_an_observed_source(tmp_path
         "the record must carry the observed basis, not the declared one"
 
 
+def test_the_installed_hook_blocks_the_sink_with_no_spool_variable_set(tmp_path):
+    """Review I1, proven by mutation 2026-11-12. Every hook test set MCPGAWK_SPOOL, and a real
+    install never does (`guard install` writes no such variable). Without it the hook's
+    session-sources read called spool without the store path; spool, loaded by file with no
+    package, raised; the hot path swallowed it; sources were always empty. So on every real
+    install the source-then-sink deny NEVER fired, and the suite could not see it.
+
+    Same scenario as the test above, with the variable REMOVED: the spool must be found beside
+    the history store, as the hook's own writer finds it."""
+    store = _store(tmp_path)
+    behaviour = tmp_path / "behaviour.json"
+    behaviour.write_text(json.dumps({"schema": "gawk.behaviour/1", "servers": _PROFILE}),
+                         encoding="utf-8")
+    env = {**_test_harness_env(), "MCPGAWK_HISTORY": str(store), "GAWK_BEHAVIOUR": str(behaviour),
+           "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    env.pop("MCPGAWK_SPOOL", None)
+
+    def run(event):
+        return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(event), text=True,
+                              capture_output=True, timeout=60, env=env)
+
+    r1 = run({"tool_name": "mcp__mail__read_inbox", "tool_input": {}, "session_id": "sess-i1"})
+    assert r1.returncode == 0 and _no_verdict(r1.stdout), "the source call itself defers"
+    beside = Path(store).parent / "calls.jsonl"
+    assert beside.exists(), "the source call was not recorded beside the store"
+
+    r2 = run({"tool_name": "mcp__notes__read_note", "tool_input": {}, "session_id": "sess-i1"})
+    payload = json.loads(r2.stdout or "{}")
+    decision = (payload.get("hookSpecificOutput") or {}).get("permissionDecision")
+    assert decision == "deny", (
+        "with no MCPGAWK_SPOOL (every real install) the sink after a source was NOT denied: "
+        f"{r2.stdout[:300]} {r2.stderr[-300:]}")
+
+
 def test_a_different_session_does_not_inherit_the_source(tmp_path):
     """Session memory is per session — yesterday's untrusted content must not poison today."""
     src = {"tool_name": "mcp__mail__read_inbox", "tool_input": {}, "session_id": "sess-one"}

@@ -55,7 +55,13 @@ def observed_followup(report: dict, store: dict, *, spool_path: str | None = Non
             ov = observed.observe(store, key, spool_path=spool_path)
         except Exception:  # noqa: BLE001 — a follow-up must never sink the verify exit
             ov = None
-        reasons = " ".join(str(x) for x in (s.get("incompleteReasons") or [])).lower()
+        # The "every call answered with an error" reason QUOTES the server's own first error. A
+        # "401 Unauthorized" in that quote is an expired or missing key, not a login bound to a
+        # live session, so that reason is left out of the keyword match below.
+        reasons = " ".join(
+            str(x) for x in (s.get("incompleteReasons") or [])
+            if not str(x).startswith("every call answered with an error")
+        ).lower()
         auth_ish = any(w in reasons for w in ("sign in", "sign-in", "log in", "login", "auth", "session"))
         if ov is not None:
             lines.append(f"  ℹ {name}: verify could not complete here, but wrap has observed it "

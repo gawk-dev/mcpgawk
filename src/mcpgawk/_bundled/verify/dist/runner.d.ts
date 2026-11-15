@@ -69,6 +69,15 @@ export declare function listTools(server: ServerConfig): Promise<ToolInfo[]>;
  * rather than throwing. NOT a behavioural probe (no sandbox/egress observation) — only used to read
  * a discover tool's listing. */
 export declare function callToolText(server: ServerConfig, toolName: string, args: Record<string, unknown>): Promise<string>;
+/**
+ * The allowed destinations the proxy could not reach during a call, in words, or "". The proxy
+ * has recorded these since it learned to fail fast, and nothing read them (review J12): a tool
+ * that errors because its own declared upstream is down was reported as just "an error".
+ */
+export declare function unreachableNote(records: readonly {
+    hostname: string;
+    unreachable?: string;
+}[]): string;
 export type ProbeResult = {
     ok: true;
     obs: Observation;

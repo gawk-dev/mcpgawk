@@ -95,7 +95,9 @@ def test_tls_off_names_co_resident_credentials_without_printing_them():
 
 
 def test_install_scripts_fires_on_allow_build_in_args_only():
-    assert [f.kind for f in check("s", _entry(args=["-y", "example-pkg@1.0", "--allow-build"]))] \
+    # `@1.0.0`, an exact pin: this test is about install scripts. (`@1.0` is an npm RANGE, 1.0.x,
+    # and since review N21 it is reported as unpinned too.)
+    assert [f.kind for f in check("s", _entry(args=["-y", "example-pkg@1.0.0", "--allow-build"]))] \
         == ["config:install-scripts"]
     assert check("s", _entry(env={"FLAGS": "--allow-build"})) == []
 

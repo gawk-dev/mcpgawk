@@ -42,6 +42,7 @@ import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any, BinaryIO
 
 
@@ -56,6 +57,12 @@ class Session:
         self.server_info: dict[str, Any] = {}
         self.tools: list[dict[str, Any]] = []
         self.pending: dict[Any, str] = {}          # request id -> method
+        #: ids of `tools/list` requests that START a list (no cursor). Their response replaces
+        #: what we hold; a request with a cursor continues the list in progress.
+        self.list_starts: set[Any] = set()
+        #: The complete list last recorded, as {name: canonical JSON}, to tell a new list from
+        #: the same one asked for again.
+        self.recorded_surface: dict[str, str] | None = None
         self.calls = 0
         self.recorded = False
         self.key: str | None = None
@@ -68,6 +75,10 @@ class Session:
 
 def _note(session: Session, msg: str) -> None:
     """Say it on stderr, where a client shows server logs — never on stdout, which is the wire."""
+    # ONE line, printable characters only: the message carries names the server chose (its own,
+    # its tools'), and a control sequence or a newline in one must not act on the terminal a
+    # client shows these logs in (the class review C5 closed in the drift report).
+    msg = "".join(c if c.isprintable() else "?" for c in str(msg))
     session.notes.append(msg)
     print(f"mcpgawk wrap: {msg}", file=sys.stderr, flush=True)
 
@@ -100,8 +111,16 @@ def record_baseline(session: Session, *, now: str | None = None) -> str | None:
     file: a baseline that arrives because the person used their server, not because they were
     asked to do a chore.
     """
-    if session.recorded or not session.tools:
+    if not session.tools:
         return None
+    # EVERY list the session receives, not only the first (review I4, 2026-11-13). A server can
+    # send a new one at any time (`notifications/tools/list_changed`, and the client asks again).
+    # Recording once meant a server could list clean tools, wait for the baseline, then list
+    # different ones: one sighting, of the clean list, and nothing said.
+    surface = _surface(session.tools)
+    if session.recorded and surface == session.recorded_surface:
+        return None                                # the same list again is not a new sighting
+    relisted = _relisted(session.recorded_surface, surface) if session.recorded else None
     try:
         from datetime import datetime, timezone
 
@@ -115,15 +134,41 @@ def record_baseline(session: Session, *, now: str | None = None) -> str | None:
         stamp = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
         sighting = _record_sighting(sn, m, now=stamp)
         session.recorded = True
+        session.recorded_surface = surface
         session.key = history.key_for(sn)
         if sighting is None:
             return None
-        _note(session, f"baseline recorded for {session.label}: {len(session.tools)} tool(s), "
-                       f"no scan and no sign-in needed")
+        if relisted is not None:
+            # A sighting, through the same recorder a scan uses. It never moves what was approved.
+            _note(session, f"{session.label} changed its tool list during this session: {relisted}. "
+                           f"Recorded as a new sighting; what you approved is unchanged. "
+                           f"`mcpgawk status` shows the difference.")
+        else:
+            _note(session, f"baseline recorded for {session.label}: {len(session.tools)} tool(s), "
+                           f"no scan and no sign-in needed")
         return session.key
     except Exception as exc:                       # noqa: BLE001 — rule 2
         _note(session, f"could not record the baseline ({type(exc).__name__}); traffic unaffected")
         return None
+
+
+def _surface(tools: list[dict[str, Any]]) -> dict[str, str]:
+    """{tool name: its whole definition as canonical JSON}: what one complete list said."""
+    return {str(t.get("name")): json.dumps(t, sort_keys=True, ensure_ascii=False) for t in tools}
+
+
+def _relisted(before: dict[str, str] | None, after: dict[str, str]) -> str:
+    """In words, how this list differs from the one before it in the same session."""
+    before = before or {}
+    parts = []
+    for label, names in (("added", sorted(set(after) - set(before))),
+                         ("removed", sorted(set(before) - set(after))),
+                         ("changed", sorted(n for n in set(before) & set(after)
+                                            if before[n] != after[n]))):
+        if names:
+            shown = ", ".join(names[:5]) + (f" (+{len(names) - 5} more)" if len(names) > 5 else "")
+            parts.append(f"{len(names)} {label} ({shown})")
+    return "; ".join(parts) or "the same tools in a different order"
 
 
 def check_call(session: Session, message: dict[str, Any]) -> None:
@@ -190,6 +235,9 @@ def _observe(session: Session, raw: bytes, *, from_client: bool) -> None:
         method, mid = msg.get("method"), msg.get("id")
         if isinstance(method, str) and mid is not None:
             session.pending[mid] = method
+            params = msg.get("params")
+            if method == "tools/list" and not (isinstance(params, dict) and params.get("cursor")):
+                session.list_starts.add(mid)       # a list from the top, not the next page of one
         if method == "tools/call":
             check_call(session, msg)
         return
@@ -210,6 +258,11 @@ def _observe(session: Session, raw: bytes, *, from_client: bool) -> None:
     elif method == "tools/list":
         tools = result.get("tools")
         if isinstance(tools, list):
+            if mid in session.list_starts:
+                # The answer to a list from the top REPLACES what we hold. It used to be added to
+                # it, so a second list was the first one plus the second (review I4).
+                session.list_starts.discard(mid)
+                session.tools = []
             # A paged tools/list is several responses; the baseline is all of them.
             session.tools.extend(t for t in tools if isinstance(t, dict))
             if not result.get("nextCursor"):
@@ -298,11 +351,22 @@ def run(argv: list[str], *, name: str | None = None,
 # per-client code.
 
 
-def _mcpgawk_path() -> str:
-    """The absolute mcpgawk a config file can rely on. A bare name would depend on the PATH of
-    whatever launched the client, which is not the shell the person tested in."""
+def _mcpgawk_path() -> str | None:
+    """The absolute mcpgawk a config file can rely on, or None. A bare name would depend on the PATH
+    of whatever launched the client, which is not the shell the person tested in.
+
+    NEVER `sys.executable` (review N9, 2026-11-12): that wrote `command: python3, args: [wrap, …]`,
+    which runs Python on a file called "wrap" and never starts the server. Off PATH, the console
+    script installed beside this interpreter (a venv's or a uv/pipx tool's bin/) is the same
+    program; without one there is nothing a client could launch, and install refuses."""
     import shutil
-    return shutil.which("mcpgawk") or sys.executable
+    found = shutil.which("mcpgawk")
+    if found:
+        return found
+    beside = Path(sys.executable).parent / "mcpgawk"
+    if beside.is_file() and os.access(beside, os.X_OK):
+        return str(beside)
+    return None
 
 
 def install(server: str, *, undo: bool = False, dry_run: bool = False, client: str | None = None,
@@ -350,10 +414,17 @@ def install(server: str, *, undo: bool = False, dry_run: bool = False, client: s
         log(f"no readable config file names {server}")
         return 2
 
+    launcher = None if undo else _mcpgawk_path()
+    if not undo and launcher is None:
+        log("mcpgawk is not on PATH and there is no mcpgawk launcher beside this Python, so a "
+            "wrapped entry would have nothing the client could start. Install it as a tool "
+            "(`uv tool install mcpgawk`, then make sure its bin directory is on PATH) and run "
+            "this again. Nothing was changed.")
+        return 2
     changed = 0
     for path in paths:
         edit = (configedit.plan_unwrap(path, server) if undo
-                else configedit.plan_wrap(path, server, mcpgawk=_mcpgawk_path()))
+                else configedit.plan_wrap(path, server, mcpgawk=launcher))
         if not edit.ok:
             log(f"  {path.name}: {edit.reason}")
             continue

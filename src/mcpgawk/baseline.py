@@ -343,6 +343,16 @@ def last_pin(key: str, path: str | None = None) -> str | None:
     return str(latest.get("pin")) if latest and latest.get("pin") else None
 
 
+def last_review_pin(key: str, path: str | None = None) -> str | None:
+    """The REVIEW pin (`history.review_pin`) of the newest sighting under `key`, or None: its pin
+    plus the MCP extensions it advertises. Differs from `last_pin` only when the sighting
+    advertises extensions, which a writer holding only tool hashes never showed anyone (advisor
+    follow-up, 2026-11-13). `last_pin` stays the plain pin: the reduced-sighting guard keys on it."""
+    store = history.load(path or history.default_path())
+    latest = history.last(store, key)
+    return (history.review_pin(latest) or None) if latest else None
+
+
 def approve_full(key: str, *, expect_pin: str, path: str | None = None,
                  signer: Any = None) -> dict[str, Any] | None:
     """Adopt the newest FULL sighting as the approved baseline — but only if it is the one the

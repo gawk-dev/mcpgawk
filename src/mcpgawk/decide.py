@@ -62,12 +62,24 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
         entry = (store.get("servers") or {}).get(key) or {}
         out.append({
             "key": key,
+            # The sighting an approval would adopt, as it stood when this page was drawn. The form
+            # carries it back and approve() refuses if a newer one has landed since (review
+            # G10/H3, 2026-11-12): without it, a change that arrived between the look and the
+            # click was approved unseen.
+            # The REVIEW pin, so an extension that lands after the look is refused too.
+            "pin": history.review_pin(history.last(store, key) or {}),
             "name": history.display_name(store, key),
             "report": report,
             # The step (since the current approval) and the TOTAL (since the original baseline):
             # a widening in small steps is invisible in the step alone. None when they coincide.
             "since_last": history.approval_change(approved, latest),
             "since_original": history.since_original(entry, latest),
+            # Every other change the latch holds that this diff does not show (review I6
+            # follow-up): trusting adopts THIS sighting and answers those too, so each is named,
+            # with its own diff while history still holds that sighting.
+            "unshown": [{**u, "report": drift.compare(approved, u["record"])
+                         if u["record"] is not None else None}
+                        for u in history.unshown_changes(store, key)],
             "hostile": list(report.hostile),
             # Sightings carry `measured_at`; `seen` is only in older test fixtures (audit
             # 2026-11-10, item H: this read `seen` alone, so it was always empty in real stores).
@@ -174,6 +186,14 @@ def _diff_block(report: drift.DriftReport) -> str:
                        if before or after else "") + "</div>")
     for tool in report.annotation_changed:
         rows.append(_hint_row(report, tool, mark="⚠ "))
+    # A server-level change no tool row shows (files-extension item 1): without it an
+    # extensions-only change read "No detail recorded." beside the Trust button.
+    for words in report.extension_words():
+        rows.append(f'<div class="ev{" danger" if words.startswith("now ") else ""}"><div class="lbl">'
+                    f'{"⚠ " if words.startswith("now ") else ""}{_esc(words)}</div>'
+                    '<div class="now">An MCP extension: an ability the server declares that no tool '
+                    'definition shows. Calls still go through; trusting this change adopts it.'
+                    '</div></div>')
     for tool in report.schema_changed:
         rows.append(_param_row(report, tool, mark="⚠ "))
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
@@ -234,6 +254,27 @@ def _blocks_calls(r: drift.DriftReport) -> bool:
     return not moved or any(r.permission_changes(k) for k in moved)
 
 
+def _unshown_block(unshown: Any) -> str:
+    """The changes the diff above leaves out (history.unshown_changes), each with its sighting's own
+    diff, or the plain fact that its text is gone. Empty when there are none."""
+    if not unshown:
+        return ""
+    parts = ['<div class="ev danger"><div class="lbl">⚠ Also changed since approval, and not in '
+             'the diff above. Trusting this change answers these too.</div></div>']
+    for u in unshown:
+        day = str(u.get("at") or "")[:10] or "a day not recorded"
+        tools = ", ".join(u.get("tools") or [])
+        if u.get("report") is not None:
+            parts.append(f'<div class="ev"><div class="lbl">{_esc(tools)} — the sighting of '
+                         f'{_esc(day)}:</div></div>' + _diff_block(u["report"]))
+        else:
+            parts.append(f'<div class="ev"><div class="lbl">{_esc(tools)} — changed on {_esc(day)}'
+                         '</div><div class="now">That sighting is no longer on record (the history '
+                         'keeps the last 50), so its text cannot be shown: only the tool and the '
+                         'day survive.</div></div>')
+    return "\n".join(parts)
+
+
 def _total_line(total: Any) -> str:
     """The change since the ORIGINAL baseline, under the step: what trusting this makes the server,
     measured from where it started. Empty when the step is the whole story."""
@@ -242,11 +283,20 @@ def _total_line(total: Any) -> str:
 
 
 def render_page(items: list[dict[str, Any]], token: str, note: str = "",
-                gaps: dict[str, Any] | None = None) -> str:
+                gaps: dict[str, Any] | None = None, store_error: str | None = None) -> str:
     """The whole UI. One file, no assets, no network — it must work on a machine with no internet
     and must never fetch anything, because a security tool that phones out to render itself is
     making a claim it cannot keep."""
-    if not items:
+    if store_error:
+        # Review H1, 2026-11-12: an unreadable store came back empty and this page said "Nothing is
+        # waiting on you. Every server with a baseline still matches it." over a check that never
+        # ran. It says what happened instead, and shows nothing that could be read as an all-clear.
+        body = ('<div class="b"><h1>Could not read your approvals</h1>'
+                f'<p>The baseline store could not be read ({_esc(store_error)}), so this page cannot '
+                'say whether anything has changed. Nothing here is a clean bill.</p>'
+                '<p>Run <code>mcpgawk status</code> to see the error, and restore the file from its '
+                '<code>.corrupt-*</code> or backup copy beside it before deciding anything.</p></div>')
+    elif not items:
         # SCOPED, not total. This page compares approved baselines against the latest scan; it
         # does not read the monitor's alerts and it cannot speak for a server that was never
         # approved. Claiming "every server your agents can reach matches" was a confident zero
@@ -290,9 +340,11 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
      {gate}</p>
   {_diff_block(r)}
   {_total_line(it.get('since_original'))}
+  {_unshown_block(it.get('unshown'))}
   {(f'''<form method="POST" action="/decide">
     <input type="hidden" name="token" value="{_esc(token)}">
     <input type="hidden" name="key" value="{_esc(it['key'])}">
+    <input type="hidden" name="pin" value="{_esc(it.get('pin') or '')}">
     <button name="action" value="keep" class="btn danger-btn">Keep blocking</button>
     <button name="action" value="approve" class="btn">Trust this change</button>
   </form>''') if token else
@@ -409,6 +461,21 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
 @media(prefers-color-scheme:dark){{p{{color:#A0A5AE}}}}</style>
 <div class="b"><h1>Refused</h1><p>{html.escape(self._REFUSAL)}</p></div>""")
 
+    def _foreign(self) -> bool:
+        """The PANEL's own local-request check, not a copy (review G14, 2026-11-12): decide had no
+        Host or Sec-Fetch-Site check, so a DNS-rebinding page could read the decide view. Returns
+        True (and has answered 403) when the request is refused."""
+        from .panel import local_request_refusal
+        if not local_request_refusal(self.headers.get("Host"), self.headers.get("Sec-Fetch-Site")):
+            return False
+        body = b"forbidden: mcpgawk decide answers only local requests"
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def do_GET(self) -> None:               # noqa: N802 - BaseHTTPRequestHandler's API
         """READ-ONLY, always. A page load must never be able to change trust.
 
@@ -418,15 +485,20 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         only had to GET the page and read it out of the hidden field first. The token is served
         back only to a request that already proves it has it; everyone else gets the read view.
         """
-        store = history.load(history.default_path())
+        if self._foreign():
+            return
+        store, store_error = history.load_checked(history.default_path())
         q = parse_qs(urlparse(self.path).query)
         server = self._decide_server()
         shown = (server.token
                  if secrets.compare_digest((q.get("t") or [""])[0], server.token) else "")
         self._send(200, render_page(pending_decisions(store), shown,
-                                    getattr(self.server, "note", ""), uncovered(store)))
+                                    getattr(self.server, "note", ""), uncovered(store),
+                                    store_error=store_error))
 
     def do_POST(self) -> None:              # noqa: N802
+        if self._foreign():
+            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         form: dict[str, str] = {}
@@ -444,10 +516,7 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         key, action = form.get("key", ""), form.get("action", "")
         note = ""
         if action == "approve" and key:
-            rec = history.approve(key, path=history.default_path(),
-                                  signer=self._decide_server().signer)
-            note = (f"Approved. {key} is trusted again and your agents can call it."
-                    if rec else f"Nothing recorded for {key} yet — scan it first.")
+            note = _approve_reviewed(key, form.get("pin", ""), self._decide_server().signer)
         elif action == "keep":
             note = "Left blocked. Your agents still cannot call it."
         self._decide_server().note = note
@@ -456,6 +525,25 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         self.send_response(303)
         self.send_header("Location", f"/?t={quote(self._decide_server().token)}")
         self.end_headers()
+
+
+def _approve_reviewed(key: str, pin: str, signer: Any = None) -> str:
+    """Approve exactly the sighting this page showed, or say why not (review G10/H3, 2026-11-12).
+
+    The form carries the pin of the sighting on screen; approve() refuses inside its lock if a
+    newer one has landed since. A post without a pin is a page drawn before this rule, or not a
+    page at all: refused. `source="decide"` records where the approval came from."""
+    if not pin:
+        return "Not approved: this page is out of date. Reload it and decide again."
+    path = history.default_path()
+    rec = history.approve(key, path=path, expect_pin=pin, source="decide", signer=signer)
+    if rec:
+        return f"Approved. {key} is trusted again and your agents can call it."
+    now = history.last(history.load_checked(path)[0], key)
+    if now is None:
+        return f"Nothing recorded for {key} yet — scan it first."
+    return (f"Not approved: {key} changed again after this page was drawn. Nothing was "
+            f"trusted; the new change is shown below.")
 
 
 def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int:
@@ -486,9 +574,14 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
     # reader. In the URL it stays where this comment always claimed: the terminal and the browser.
     url = f"http://{HOST}:{port}/?t={token}"
 
-    store = history.load(history.default_path())
+    store, store_error = history.load_checked(history.default_path())
     waiting = len(pending_decisions(store))
-    if waiting:
+    if store_error:
+        # Review H1: "No server has changed since its baseline." was printed over an unreadable
+        # store. Say what happened; never print the all-clear.
+        log(f"\n  ⚠ Could not read your approvals ({store_error}).\n"
+            f"    Nothing below is a clean bill. `mcpgawk status` shows the error.")
+    elif waiting:
         log(f"\n  {waiting} server(s) waiting on a decision.")
     else:
         # The SAME scoping the page uses. This line is what a user reads before the browser even

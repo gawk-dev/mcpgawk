@@ -298,7 +298,15 @@ def canonical(payload: dict[str, Any]) -> bytes:
 def payload(key: str, tools: Any, props: Any, approved_at: Any) -> dict[str, Any]:
     """THE signed payload — one definition for the writer (history.approval_payload) and the guard
     hook (which rebuilds it from a projection row): the server key, the tool hashes, the approved
-    parameter names in the projection's shape, and when. Every input the guard decides on."""
+    parameter names in the projection's shape, and when.
+
+    WHAT THE SIGNATURE COVERS, AND WHAT IT DOES NOT (review G6, 2026-11-13). It covers the
+    APPROVAL: nobody without the passphrase can create one or alter one. It does not cover the
+    rest of what the guard reads beside it: what was last SEEN of the server, the changes found
+    since approval, which names a server answers to, and whether a later approval replaced this
+    one. Those are written at every scan, when no passphrase is present, so they cannot be
+    signed with it. This docstring used to end "every input the guard decides on"; that was
+    not true."""
     return {"v": 1, "key": key, "tools": dict(tools or {}), "props": props,
             "approved_at": approved_at}
 

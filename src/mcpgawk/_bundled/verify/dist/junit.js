@@ -15,8 +15,12 @@
  * actually checked on. The synthetic pass is now only added when there are truly zero cases of
  * any kind, so it can never paper over a checkError.
  */
+// XML 1.0 forbids every C0 control but tab, LF and CR, plus U+FFFE/U+FFFF and lone surrogates. One
+// in a tool name made the whole report unparseable (review P16, 2026-11-12); replaced visibly.
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 function esc(s) {
     return s
+        .replace(XML_ILLEGAL, "\uFFFD")
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -46,6 +50,11 @@ export function toJUnit(report) {
         for (const f of suppressed) {
             cases.push(`    <testcase name="${esc(`${f.tool} :: ${f.code}`)}" classname="${esc(server.server)}">\n      <skipped message="${esc(f.suppressionReason ?? "reviewed and accepted")}"/>\n    </testcase>`);
         }
+        // A tool that answered the test input with its own error was not judged on those checks:
+        // JUnit's word for that is `skipped`, never a pass and never an error (J1 narrowed).
+        for (const r of server.rejectedInput ?? []) {
+            cases.push(`    <testcase name="${esc(`${r.tool} :: ${r.checks.join(", ")}`)}" classname="${esc(server.server)}">\n      <skipped message="${esc(`the tool answered the test input with an error, so it was not judged on this: ${r.detail}`)}"/>\n    </testcase>`);
+        }
         for (const c of server.checkErrors) {
             cases.push(`    <testcase name="${esc(`${c.tool} :: ${c.code}`)}" classname="${esc(server.server)}">\n      <error message="${esc(c.detail)}">check did not complete — infra failure, not a verdict</error>\n    </testcase>`);
         }
@@ -64,7 +73,15 @@ export function toJUnit(report) {
         totalTests += Math.max(cases.length, 1);
         totalFailures += active.length;
         totalErrors += serverErrors;
-        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length}" errors="${serverErrors}" skipped="${suppressed.length}">\n${cases.join("\n")}\n  </testsuite>`);
+        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length}" errors="${serverErrors}" skipped="${suppressed.length + (server.rejectedInput?.length ?? 0)}">\n${cases.join("\n")}\n  </testsuite>`);
+    }
+    // A server that FAILED TO START is in report.errors, not report.servers. It reached the XML only
+    // when nothing else ran (the empty-run suite below), so one verified server plus one that never
+    // started read tests="1" errors="0" (review P7, 2026-11-12). Each gets its own <error> suite.
+    for (const e of report.errors) {
+        suites.push(`  <testsuite name="${esc(e.server)}" tests="1" failures="0" errors="1" skipped="0">\n    <testcase name="server start" classname="${esc(e.server)}">\n      <error message="${esc(e.message)}">the server could not be verified — not a verdict, not a clean pass</error>\n    </testcase>\n  </testsuite>`);
+        totalTests += 1;
+        totalErrors += 1;
     }
     // A run with no server suites at all (empty config, every server failed to start) would otherwise
     // render as a green, empty test tree — "0 tests, 0 failures" reads as success in every CI UI.

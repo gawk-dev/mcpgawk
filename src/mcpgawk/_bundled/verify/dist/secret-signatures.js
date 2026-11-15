@@ -98,7 +98,7 @@ export const SECRET_SIGNATURES = [
     // Sentry DSN
     /https:\/\/[a-f0-9]+@o[0-9]+\.ingest\.sentry\.io\/[0-9]+/g,
     // private key block
-    /-----BEGIN (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----/g,
+    /-----BEGIN (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----(?:[\s\S]*?-----END (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----|[A-Za-z0-9+\/=\s\\]*)/g,
     // JSON Web Token
     /\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b/g,
     // basic-auth URL

@@ -164,8 +164,28 @@ def _change_bits(x: dict[str, Any]) -> tuple[list[str], list[str], bool]:
             for key, word in (("added", "added"), ("removed", "removed"), ("changed", "rewritten")):
                 if d.get(key):
                     parts.append(f"{len(d[key])} {word}")
+            # EVERY change scan fails on (review N5, 2026-11-12). Schema-only and annotation-only
+            # changes, and the server-level ones below, left this row CLEAN while scan exited 1.
+            if d.get("schema_changed"):
+                parts.append(f"{len(d['schema_changed'])} input schema(s) changed")
+            if d.get("annotation_changed"):
+                parts.append(f"{len(d['annotation_changed'])} annotation(s) changed")
             if not parts and d.get("pin_changed"):
                 parts.append("definitions differ")
+            if d.get("login_changed"):
+                parts.append("measured through a different sign-in")
+            tc = d.get("transport_changed")
+            if tc:
+                parts.append(f"transport {tc[0]} → {tc[1]}")
+            pc = d.get("protocol_changed")
+            if pc and not d.get("protocol_migration"):
+                parts.append(f"MCP protocol {pc[0]} → {pc[1]}")
+            ec = d.get("extensions_changed")
+            if ec:
+                # Same words as drift.DriftReport.extension_words (the JSON carries the pair only).
+                before, after = set(ec[0] or ()), set(ec[1] or ())
+                parts += [f"now advertises {x}" for x in sorted(after - before)]
+                parts += [f"no longer advertises {x}" for x in sorted(before - after)]
             if parts:
                 lead.append(f"⚠ CHANGED {since}: " + ", ".join(parts)
                             + (" — injection or escalation" if d.get("hostile") else ""))

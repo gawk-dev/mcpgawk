@@ -66,12 +66,19 @@ def _get(port: int, path: str) -> str:
 def approvals(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(history, "approve", lambda key, *a, **k: calls.append(key) or True)
+    # These tests are about the APPROVAL CODE gate, not about finding the server. Since review H4
+    # (2026-11-12) the panel resolves the posted name against the store first and refuses a name
+    # that matches nothing; the posted keys here exist in no store, so resolution is stubbed to
+    # "this key is the stored key". Resolution itself is tested in
+    # tests/test_panel_row_approve_reaches_the_stored_server.py.
+    monkeypatch.setattr(history, "load_checked", lambda *a, **k: ({"servers": {}}, None))
+    monkeypatch.setattr(history, "resolve_all", lambda store, key: [key])
     return calls
 
 
 def test_the_token_alone_cannot_approve(tmp_path, monkeypatch, approvals):
     port, token, seen = _start(tmp_path, monkeypatch)
-    r = _post(port, {"token": token, "act": "approve", "key": "mcp:srv"})
+    r = _post(port, {"token": token, "act": "approve", "key": "mcp:srv", "pin": "p1"})
     assert r.status == 303 and approvals == []
     page = _get(port, f"/?t={token}")
     assert 'name="code"' in page and "needs the approval code" in page
@@ -85,21 +92,21 @@ def test_the_token_alone_cannot_approve(tmp_path, monkeypatch, approvals):
 
 def test_a_wrong_code_is_refused(tmp_path, monkeypatch, approvals):
     port, token, _ = _start(tmp_path, monkeypatch)
-    _post(port, {"token": token, "act": "approve", "key": "mcp:srv", "code": "AAAA-AAAA"})
+    _post(port, {"token": token, "act": "approve", "key": "mcp:srv", "code": "AAAA-AAAA", "pin": "p1"})
     assert approvals == []
     assert "does not match" in _get(port, f"/?t={token}")
 
 
 def test_the_code_approves_and_unlocks_this_browser(tmp_path, monkeypatch, approvals):
     port, token, seen = _start(tmp_path, monkeypatch)
-    r = _post(port, {"token": token, "act": "unlock", "then": "approve", "key": "mcp:srv",
+    r = _post(port, {"token": token, "act": "unlock", "then": "approve", "key": "mcp:srv", "pin": "p1",
                      "code": _code(seen).lower().replace("-", " ")})
     assert approvals == ["mcp:srv"]
     cookie = r.getheader("Set-Cookie") or ""
     assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
-    _post(port, {"token": token, "act": "approve", "key": "mcp:two"}, cookie=cookie.split(";")[0])
+    _post(port, {"token": token, "act": "approve", "key": "mcp:two", "pin": "p1"}, cookie=cookie.split(";")[0])
     assert approvals == ["mcp:srv", "mcp:two"]
-    _post(port, {"token": token, "act": "approve", "key": "mcp:three"}, cookie=f"mcpgawk_unlock_{port}=forged")
+    _post(port, {"token": token, "act": "approve", "key": "mcp:three", "pin": "p1"}, cookie=f"mcpgawk_unlock_{port}=forged")
     assert approvals == ["mcp:srv", "mcp:two"]
 
 
@@ -107,12 +114,12 @@ def test_ten_wrong_codes_void_the_code(tmp_path, monkeypatch, approvals):
     port, token, seen = _start(tmp_path, monkeypatch)
     first = _code(seen)
     for _ in range(panel._CODE_MAX_FAILS):
-        _post(port, {"token": token, "act": "approve", "key": "k", "code": "ZZZZ-ZZZZ"})
+        _post(port, {"token": token, "act": "approve", "key": "k", "code": "ZZZZ-ZZZZ", "pin": "p1"})
     second = _code(seen)
     assert second != first
-    _post(port, {"token": token, "act": "approve", "key": "k", "code": first})
+    _post(port, {"token": token, "act": "approve", "key": "k", "code": first, "pin": "p1"})
     assert approvals == []
-    _post(port, {"token": token, "act": "approve", "key": "k", "code": second})
+    _post(port, {"token": token, "act": "approve", "key": "k", "code": second, "pin": "p1"})
     assert approvals == ["k"]
 
 

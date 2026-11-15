@@ -22,7 +22,9 @@
  */
 import { SECRET_SIGNATURES } from "./secret-signatures.js";
 const SECRETS = [
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
+    // The WHOLE block (review P2, 2026-11-12): BEGIN, body, END; or a body cut before END (with any
+    // JSON \n escapes). The BEGIN line alone left the key body after "[REDACTED]".
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+\/=\s\\]*)/g,
     // All four AWS key prefixes, matching mcpgawk/secret_corpus.py. `AKIA` alone was the shipped
     // shape until 2026-09-11, when the Python side was measured DETECTING ASIA/ABIA/ACCA and
     // redacting none of them — an AWS temporary STS credential was named as a secret and then
@@ -60,15 +62,29 @@ function redactUrls(text) {
                     changed = true;
                 }
             }
-            return changed ? decodeURIComponent(url.toString()) : raw;
+            if (!changed)
+                return raw;
+            // P14 (2026-11-12): decodeURIComponent THROWS on a stray `%` in the path or fragment, and the
+            // catch below returned the RAW url, credential and all. A masked URL that will not decode is
+            // returned masked and encoded instead.
+            try {
+                return decodeURIComponent(url.toString());
+            }
+            catch {
+                return url.toString();
+            }
         }
         catch {
             return raw; // not parseable as a URL: leave the text alone rather than mangle it
         }
     });
 }
+/** A JSON-shaped Authorization value (review P9, 2026-11-12): the header pattern never matched
+ *  `"Authorization": "Bearer …"` (the closing quote sits between the name and the colon). The key
+ *  and its quotes stay, so the JSON stays JSON; only the credential goes. */
+const AUTH_JSON_VALUE = /(\bauthorization["']\s*:\s*["'])(?:bearer|basic)\s+[^\s"']+/gi;
 export function redactText(text) {
-    let out = redactUrls(text);
+    let out = redactUrls(text).replace(AUTH_JSON_VALUE, "$1[REDACTED]");
     for (const pattern of SECRETS)
         out = out.replace(pattern, "[REDACTED]");
     return out;
@@ -80,7 +96,7 @@ export function redactText(text) {
  */
 export function redactAuditEvent(event) {
     const out = { ...event };
-    for (const field of ["resultTextExcerpt", "infraDetail", "tool", "server"]) {
+    for (const field of ["resultTextExcerpt", "infraDetail", "errorAnswer", "tool", "server"]) {
         const value = out[field];
         if (typeof value === "string")
             out[field] = redactText(value);

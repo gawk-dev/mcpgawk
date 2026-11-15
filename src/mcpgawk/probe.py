@@ -61,6 +61,11 @@ class ServerSnapshot:
     #: The server's own `initialize` capabilities. Previously discarded, which left no way to tell
     #: a server that declares `resources` from one that does not.
     capabilities: dict[str, Any] = field(default_factory=dict)
+    #: True only when `capabilities` came from `server/discover`, the one response a server
+    #: advertises MCP extensions in. MEASURED 2026-11-12: an SDK `MCPServer(extensions=[Apps()])`
+    #: states no extensions on `initialize` and `io.modelcontextprotocol/ui` on a fresh
+    #: `server/discover`. False = NOT ASKED: an absent `extensions` then proves nothing.
+    extensions_asked: bool = False
     server_card: dict[str, Any] | None = None   # self-declared .well-known card (http/sse only)
     error: str | None = None
     # Typed failure classification (closed set) — for messaging and so tests/canaries can assert on
@@ -126,6 +131,61 @@ def _dump(items: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _capabilities_of(result: Any) -> dict[str, Any]:
+    """The server's declared capabilities from an `initialize` or `server/discover` result, in
+    wire form. Evidence, never load-bearing: anything unreadable is an empty dict."""
+    caps = getattr(result, "capabilities", None)
+    try:
+        return (caps.model_dump(by_alias=True, mode="json", exclude_none=True)
+                if caps is not None and hasattr(caps, "model_dump") else dict(caps or {}))
+    except Exception:             # noqa: BLE001 — capabilities are evidence, never load-bearing
+        return {}
+
+
+#: Pages read from one list before the listing is called endless. Generous for any real server;
+#: a bound is what keeps a hostile cursor from holding a scan for ever.
+_MAX_LIST_PAGES = 100
+
+
+class ListingIncomplete(RuntimeError):
+    """A paged list that did not finish: a repeated cursor, or more pages than _MAX_LIST_PAGES."""
+
+
+async def _list_all(session: Any, method: str, attr: str) -> list:
+    """Every page of a `tools/list` / `prompts/list` / `resources/list` (review I3, 2026-11-12).
+
+    One call read page one only: a server that pages its tools was measured, pinned and approved on
+    its first page, and a tool on page two was invisible to drift, the guard and every report.
+    The cursor is followed to the end; a cursor seen twice, or more than _MAX_LIST_PAGES pages,
+    raises ListingIncomplete, because a partial list presented as the whole surface is the one
+    outcome this tool must never produce."""
+    from mcp import types as _types
+    items: list = []
+    cursor = None
+    seen: set[str] = set()
+    for _ in range(_MAX_LIST_PAGES):
+        params = _types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None
+        res = await getattr(session, method)(params=params) if params is not None \
+            else await getattr(session, method)()
+        items.extend(getattr(res, attr) or [])
+        cursor = getattr(res, "next_cursor", None) or getattr(res, "nextCursor", None)
+        if cursor is None:
+            return items
+        if cursor in seen:
+            raise ListingIncomplete(f"{method} returned the same cursor twice; the listing would "
+                                    f"never end, and a partial list is not the surface")
+        seen.add(cursor)
+    raise ListingIncomplete(f"{method} did not finish within {_MAX_LIST_PAGES} pages; a partial "
+                            f"list is not the surface")
+
+
+async def list_all_tools(session: Any) -> Any:
+    """`session.list_tools()`, every page: an object with `.tools` (the shape the gateway's startup
+    code reads), so the enforce proxy and aggregator list a paging backend in full (review I3)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(tools=await _list_all(session, "list_tools", "tools"))
+
+
 async def _snapshot(session: ClientSession, name: str, transport: str) -> ServerSnapshot:
     # LEGACY FIRST, modern as the fallback — deliberately, and the order matters twice over.
     # The 2026-07-28 revision replaces `initialize` with a stateless `server/discover`, and the
@@ -145,32 +205,32 @@ async def _snapshot(session: ClientSession, name: str, transport: str) -> Server
         protocol_version = init.protocol_version
         _si = init.server_info
         server_info = _si.model_dump(by_alias=True, mode="json") if _si else {}
-        caps = getattr(init, "capabilities", None)
-        try:
-            capabilities = (caps.model_dump(by_alias=True, mode="json", exclude_none=True)
-                            if caps is not None and hasattr(caps, "model_dump") else dict(caps or {}))
-        except Exception:         # noqa: BLE001 — capabilities are evidence, never load-bearing
-            capabilities = {}
+        capabilities = _capabilities_of(init)
+        extensions_asked = False  # initialize states no extensions (measured 2026-11-12)
     except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
         disc = await session.discover()
         protocol_version = (disc.supported_versions[0] if disc.supported_versions else None)
         server_info = {}          # server/discover carries capabilities, not serverInfo
-        capabilities = {}
+        # ...and they were thrown away here until 2026-11-12, though this is the response the
+        # 2026-07-28 revision states them in — `extensions` among them (the draft files
+        # extension is advertised nowhere else). Kept as evidence, exactly as on the legacy path.
+        capabilities = _capabilities_of(disc)
+        extensions_asked = True
     snap = ServerSnapshot(
         name=name,
         transport=transport,
         protocol_version=protocol_version,
         server_info=server_info,
         capabilities=capabilities,
+        extensions_asked=extensions_asked,
     )
     # tools/list is the load-bearing surface; prompts/resources are optional per server.
-    snap.tools = _dump((await session.list_tools()).tools)
+    snap.tools = _dump(await _list_all(session, "list_tools", "tools"))
     snap.enumerated.append("tool")
     for attr, kind, method in (("prompts", "prompt", "list_prompts"),
                                ("resources", "resource", "list_resources")):
         try:
-            res = await getattr(session, method)()
-            setattr(snap, attr, _dump(getattr(res, attr)))
+            setattr(snap, attr, _dump(await _list_all(session, method, attr)))
         except Exception:
             # Still degrades — an optional surface must never fail a scan. What changed is that
             # the failure is now RECORDED instead of swallowed: the kind stays out of
@@ -302,6 +362,22 @@ def _not_mcp_answer(response, credentialed: bool) -> bool:
         # answer `notifications/initialized` 200-empty (the spec says 202) and still be MCP.
         return bool(ctype) and ctype not in _MCP_CONTENT_TYPES
     return False
+
+
+#: Wall-clock bound for the public server card, fetched AFTER the measurement (review N20).
+CARD_TIMEOUT = 8.0
+
+
+async def _card_after(url: str) -> Any:
+    """The public server card, fetched after the MCP snapshot has completed and under its own bound.
+
+    It used to be fetched inside the probe's time budget, so a card endpoint that hung cancelled a
+    measurement that had already succeeded and the server was reported as "no MCP response". The
+    card is optional evidence; a slow or failing one leaves it None and the snapshot stands."""
+    try:
+        return await asyncio.wait_for(fetch_card(url), CARD_TIMEOUT)
+    except Exception:                              # noqa: BLE001 — None means "no card", as before
+        return None
 
 
 async def _bounded(coro_factory, name: str, transport: str, timeout: float,
@@ -641,10 +717,11 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
                 async with ClientSession(read, write) as session:
                     snap = await _snapshot(session, name, "http")
         snap.anonymous = _anonymous(url, headers, auth)
-        snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
     snap = await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["refused"] or seen["status"],
                           not_mcp_hint=lambda: _not_mcp_signal(seen))
+    if not snap.error:
+        snap.server_card = await _card_after(url)
     if snap.error and seen["denied"] and snap.error_kind == "auth-required":
         snap.error_kind = "access-denied"
         if isinstance(seen["denied"], str):
@@ -660,9 +737,11 @@ async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
             async with ClientSession(read, write) as session:
                 snap = await _snapshot(session, name, "sse")
         snap.anonymous = _anonymous(url, headers, auth)
-        snap.server_card = await fetch_card(url)
         return snap
-    return await _bounded(_do, name, "sse", timeout)
+    snap = await _bounded(_do, name, "sse", timeout)
+    if not snap.error:
+        snap.server_card = await _card_after(url)
+    return snap
 
 
 async def probe_url(name: str, url: str, headers: dict[str, str] | None = None,
@@ -735,9 +814,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     # <redacted url>" (transport.Candidate.label).
     given: set = set()
     if url:
-        from .redact import redact_url
+        from .redact import redact_url, redact_url_for_display
         # Candidates label a bare host with its normalised `host/`; the config says `host`. Same URL.
-        mine = {u.rstrip("/") for u in (url, redact_url(url) or url)}
+        # The label masks a path key as well (review N19 follow-up), so its form joins here too.
+        mine = {u.rstrip("/") for u in (url, redact_url(url) or url, redact_url_for_display(url) or url)}
         given = {s.error_kind for label, s in attempts if label.split(" ", 1)[-1].rstrip("/") in mine}
     # THE USER'S OWN URL TIMING OUT outranks a guessed path's web page (30-server rescan,
     # 2026-09-26): bureau's /mcp timed out once, `/` and `/sse` answered 405/404/HTML, and the

@@ -1,13 +1,17 @@
 name: 'mcpgawk MCP hygiene gate'
-description: 'Fail the build when an MCP server your agents can reach changes, costs too much context, or can do more than you approved. Runs on the runner; nothing is uploaded.'
+description: 'Fail the build when an MCP server cannot be scanned, costs too much context, or, given your committed baseline, has changed since you approved it. Runs on the runner; nothing is uploaded.'
 author: 'Nativerse Ventures'
 branding:
   icon: 'shield'
   color: 'orange'
 
 inputs:
+  baseline:
+    description: 'Path to a committed copy of your ~/.mcpgawk/history.json (written when you scan and approve on your own machine). With it, a server that changed since that copy fails the build, and so does a server that is not in it at all. The file is only read: the scan works on a copy. Without it there is nothing to compare against, so changes are not checked.'
+    required: false
+    default: ''
   config:
-    description: 'Path to an mcp.json config to scan.'
+    description: 'Path to an mcp.json config to scan. Local (stdio) servers named in it are started on the runner so they can be scanned.'
     required: false
     default: 'mcp.json'
   stdio:
@@ -62,4 +66,5 @@ runs:
         MCPGAWK_SSE: ${{ inputs.sse }}
         MCPGAWK_MAX_TOKENS: ${{ inputs.max-tokens }}
         MCPGAWK_FAIL_ON_FLAGGED: ${{ inputs.fail-on-flagged }}
+        MCPGAWK_BASELINE: ${{ inputs.baseline }}
       run: python "${{ github.action_path }}/scripts/ci_gate.py"

@@ -43,6 +43,29 @@ PAID_PREFIXES = ("gawk_platform/",)
 #: caught (e.g. someone moves `enforce/` up a level to "simplify packaging").
 PAID_MODULE_NAMES = ("trustindex", "finix", "receipt.py")
 
+#: EVERY top-level directory and module of src/gawk_platform whose name src/mcpgawk does not also
+#: use (review K3, 2026-11-12). Until then only the three names above were checked, so a paid
+#: `enforce/`, `monitor/` or `licensing.py` moved under `mcpgawk/` shipped with the gate green.
+#: Written out here because this file also runs in the PUBLIC repo, where the paid tree does not
+#: exist; tests/test_public_artifact_gate.py derives both sets from the paid tree and fails the
+#: moment they differ, so a new paid module cannot be forgotten. Shared names (cli.py, adapters,
+#: _bundled) cannot be told apart by name; the package-root check covers those.
+PAID_DIRS = ("detectors", "enforce", "finix", "monitor", "trustindex")
+PAID_FILES = ("licensing.py", "receipt.py", "schema.py", "secrets.py", "source_audit.py")
+
+
+def _re_homed_paid(member: str) -> bool:
+    """Is `member` a paid module sitting inside OUR package? Only the path below a `mcpgawk/`
+    segment is judged, and never below `_bundled/` (vendored JavaScript may well have a folder
+    called `monitor`)."""
+    segs = member.split("/")
+    if "mcpgawk" not in segs:
+        return False
+    below = segs[segs.index("mcpgawk") + 1:]
+    if "_bundled" in below:
+        return False
+    return any(d in below[:-1] for d in PAID_DIRS) or (bool(below) and below[-1] in PAID_FILES)
+
 #: Free things the public package MUST contain. Over-exclusion is a failure too: a wheel with no
 #: verify engine is a broken free product, and a "clean" report would be hiding that.
 REQUIRED_MEMBERS = ("mcpgawk/__init__.py", "mcpgawk/discover.py", "mcpgawk/cli.py")
@@ -113,7 +136,7 @@ def check(path: Path) -> list[str]:
     for _raw, m in pairs:
         if any(m.startswith(p) or f"/{p}" in m for p in PAID_PREFIXES):
             problems.append(f"PAID MODULE in artefact: {m}")
-        elif any(n in m for n in PAID_MODULE_NAMES):
+        elif any(n in m for n in PAID_MODULE_NAMES) or _re_homed_paid(m):
             problems.append(f"PAID SUBSYSTEM in artefact: {m}")
 
     # 2. A DECLARED DEPENDENCY on the paid half would install it even with no file present.

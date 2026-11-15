@@ -246,8 +246,20 @@ def check_npm(spec: str, fetch=_get_json, now: datetime | None = None) -> Supply
     name, pin = _split_npm_spec(spec)
     try:
         data = fetch(f"https://registry.npmjs.org/{name.replace('/', '%2F')}")
-        version = pin or (data.get("dist-tags") or {}).get("latest")
+        tags = data.get("dist-tags") or {}
         versions = data.get("versions") or {}
+        # THE VERSION THE SPEC INSTALLS (review I5, 2026-11-12). The suffix was used as the version,
+        # so `@latest` and `@^1` looked up versions["latest"] / versions["^1"], found nothing and
+        # read as "not deprecated". A dist-tag resolves through dist-tags; an exact version is
+        # looked up; a range or an unknown tag is not checkable — an error, never a clean answer.
+        version = tags.get(pin or "latest") if (pin is None or pin in tags) else pin
+        if version not in versions:
+            return SupplyChainFinding(
+                "npm", name, pin, deprecated=False,
+                error=(f"not checkable: `{pin}` is a version range or a tag this registry does not "
+                       f"resolve, so the version it installs cannot be named"
+                       if pin and pin not in tags else
+                       f"not checkable: the registry lists no version {version!r} for `{pin or 'latest'}`"))
         meta = versions.get(version or "", {})
         dep = meta.get("deprecated")
         f = SupplyChainFinding("npm", name, version, deprecated=bool(dep), detail=dep or None)

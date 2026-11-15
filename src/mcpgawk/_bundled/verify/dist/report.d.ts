@@ -1,10 +1,13 @@
 import type { Severity } from "@gawk/oracle";
-import type { CheckError, HiddenTool, ServerReport, Transport } from "./model.js";
+import type { CheckError, HiddenTool, RejectedInput, ServerReport, Transport } from "./model.js";
 import type { Drift } from "./pins.js";
 import { type SuppressionsFile } from "./suppressions.js";
 /** 1.2 (2026-07-14): added `checkErrors`/`summary.checkErrors` — see {@link CheckError}'s
- * docstring in model.ts for the incident that made this necessary. */
-export declare const REPORT_SCHEMA_VERSION = "1.2";
+ * docstring in model.ts for the incident that made this necessary.
+ * 1.3 (2026-11-15): added `servers[].rejectedInput`, `servers[].allCallsErrored` and
+ * `summary.rejectedInput`. A check a tool answered with its own error is no longer a check
+ * error: it is in neither check count and the tool is listed (review J1, narrowed). */
+export declare const REPORT_SCHEMA_VERSION = "1.3";
 /**
  * The honest coverage boundary of the current sandbox backend. Egress-based checks observe HTTP(S)
  * traffic routed through the proxy; a target that exfiltrates over a RAW socket / DNS / UDP is NOT
@@ -16,6 +19,14 @@ export declare const EGRESS_COVERAGE: string;
 export declare const DOCKER_COVERAGE: string;
 /** The ADR-0014 claim: isolation AND observation in the same run — the strongest coverage. */
 export declare const PROXIED_COVERAGE: string;
+/**
+ * What NO backend covers today (review J5, 2026-11-14). Before any check runs, verify starts
+ * each local server once, directly on this machine, to list its tools (and, for a hidden
+ * catalogue, to ask for it): full environment, full network, no proxy, in every mode including
+ * `--isolate`. The coverage claims above are about the checks. This sentence goes with every
+ * one of them until that first start runs inside the sandbox too.
+ */
+export declare const ENUMERATION_SCOPE: string;
 /** What replaces every coverage CLAIM when the run did not complete. Deliberately contains none of
  * the strong-claim wording (no "BLOCKED", no "is recorded") — an incomplete run has established
  * nothing to make a claim about. Followed by the specific reasons and {@link EGRESS_COVERAGE}. */
@@ -39,6 +50,9 @@ export interface ReportFinding {
      * `status`/`bySeverity`/the CI exit code. See suppressions.ts. */
     readonly suppressed: boolean;
     readonly suppressionReason?: string;
+    /** A suppression exists for this finding's id but does not cover what this run saw (the tool
+     * reached a host nobody reviewed). The finding is NOT suppressed; this says why it is back. */
+    readonly suppressionLapsed?: string;
 }
 export interface ReportServer {
     readonly server: string;
@@ -64,6 +78,12 @@ export interface ReportServer {
     /** Checks that hit infra noise on every attempt and never reached a verdict — NOT the same as
      * clean. See {@link CheckError}. */
     readonly checkErrors: readonly CheckError[];
+    /** Tools that answered a check's made-up input with their own error. They are not judged on
+     * those checks and the server is judged on the rest. See {@link RejectedInput}. */
+    readonly rejectedInput?: readonly RejectedInput[];
+    /** Set when every call that got an answer got an error: nothing was proven about the server.
+     * Forces `incomplete`; also the first entry this adds to `incompleteReasons`. */
+    readonly allCallsErrored?: string;
     /** Inventory drift vs a baseline (rug-pull) — present only when a baseline was provided. */
     readonly drift?: Drift;
     /** Which sandbox actually enforced no-egress for this server's checks (see {@link ServerReport}). */
@@ -109,6 +129,9 @@ export interface VerificationReport {
          * >0 here means the run is INCOMPLETE, not clean — check `status`/`findings` alongside this,
          * never in isolation. See {@link CheckError}. */
         readonly checkErrors: number;
+        /** Tools (across all servers) that answered the test input with their own error and were
+         * not judged on those checks. Not a failure of the run: the servers are judged on the rest. */
+        readonly rejectedInput: number;
         /** Number of servers hiding a larger tool catalog behind dynamic dispatch that was NOT
          * enumerated. >0 means the run is INCOMPLETE, not clean — same spirit as checkErrors. */
         readonly dynamicDispatch: number;
@@ -189,6 +212,7 @@ export declare function serverCompleteness(r: DispatchCoverage & {
     readonly checksPlanned?: number;
     readonly checksCompleted?: number;
     readonly authIncomplete?: string;
+    readonly allCallsErrored?: string;
 }): Completeness;
 /** Completeness for the WHOLE run: every server complete, at least one server, at least one tool
  * anywhere, and no server that failed outright. */

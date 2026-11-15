@@ -238,11 +238,16 @@ def _runs() -> tuple[Section, str, str]:
         runlog.reconcile_stale()
     except Exception:                                            # noqa: BLE001 — read-only path still works
         pass
-    rows = runlog.list_runs(limit=5000)
+    rows, read_error = runlog.list_runs_checked(limit=5000)
     payload = [redact_record(asdict(row)) for row in rows]
-    state = INCLUDED if payload else EMPTY
-    detail = (f"{len(payload)} run(s), newest first" if payload
-              else "the run registry exists but holds no runs")
+    if read_error:
+        # Review N23: an unreadable registry is not an empty one.
+        state = UNAVAILABLE
+        detail = f"the run registry could not be read ({read_error})"
+    else:
+        state = INCLUDED if payload else EMPTY
+        detail = (f"{len(payload)} run(s), newest first" if payload
+                  else "the run registry exists but holds no runs")
     section = Section("runs", state, detail, source=scrub_paths(runlog.default_path()),
                       records=len(payload))
     return section, "runs.json", json.dumps(payload, indent=2)

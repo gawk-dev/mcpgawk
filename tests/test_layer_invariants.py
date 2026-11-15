@@ -294,7 +294,8 @@ def test_the_behaviour_profile_has_one_owner_and_an_override():
 #: numbers are a prompt to look, not a target to satisfy.
 PAID_CROSSINGS = {
     "cli.py": 3,      # run_account, platform_main, run_pillar — the licence seam
-    "panel.py": 6,    # monitor status/store, never_succeeded, the staleness rule, issue_key, license_state
+    "panel.py": 7,    # monitor status/store, never_succeeded, the staleness rule, issue_key, license_state,
+                      # update_registry (review Q14: the role bundle goes through the registry's one locked writer)
     "status.py": 1,   # license_state, for the grace/ended badge
     "verify.py": 1,   # run_source_audit
 }

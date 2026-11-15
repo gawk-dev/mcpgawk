@@ -71,7 +71,11 @@ SECRET_SIGNATURES: list[tuple[str, re.Pattern[str]]] = [
     ("New Relic key",              re.compile(r"\b(?:NRAA|NRAK|NRBR)-[A-F0-9]{27}\b")),
     ("Sentry DSN",                 re.compile(r"https://[a-f0-9]+@o[0-9]+\.ingest\.sentry\.io/[0-9]+")),
     # --- generic high-signal shapes ---
-    ("private key block",          re.compile(r"-----BEGIN (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----")),
+    # The WHOLE block (review R5/P2): the redactors use these signatures too, and a header-only
+    # match left the key body in place after "[REDACTED]".
+    ("private key block",          re.compile(r"-----BEGIN (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----"
+                                              r"(?:[\s\S]*?-----END (?:RSA |EC |DSA |PGP |OPENSSH )?PRIVATE KEY-----"
+                                              r"|[A-Za-z0-9+/=\s\\]*)")),
     ("JSON Web Token",             re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
     ("basic-auth URL",             re.compile(r"https?://[^/\s:@]+:[^/\s:@]{3,}@[^/\s]+")),
 ]

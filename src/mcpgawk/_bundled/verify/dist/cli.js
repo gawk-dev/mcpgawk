@@ -20,7 +20,7 @@ const USAGE = `usage: mcpgawk verify <config.json> [--unsafe] [--isolate] [--jso
                           [--baseline <file>] [--webhook <url>] [--audit-log <file>] [--out <file>]
                           [--audit-source] [--source-dir <path>] [--server-timeout <seconds>]
        mcpgawk verify serve [--port <n>] [--host <addr>]   # local web UI
-       mcpgawk verify suppress <findingId> --file <file> --reason "<why>" [--approved-by "<who>"]
+       mcpgawk verify suppress <findingId> --file <file> --reason "<why>" [--approved-by "<who>"] [--hosts <a,b>]
 
 config.json:
 {
@@ -120,6 +120,15 @@ licenseOpts = {}) {
         const filePath = flagValue("--file");
         const reason = flagValue("--reason");
         const approvedBy = flagValue("--approved-by");
+        // The hosts that were reviewed, for an egress finding. With them the suppression stops
+        // applying when the tool reaches any other host; without them it is by finding id alone.
+        const hostsFlag = flagValue("--hosts");
+        const hosts = hostsFlag === undefined
+            ? undefined
+            : hostsFlag
+                .split(",")
+                .map((h) => h.trim())
+                .filter((h) => h.length > 0);
         if (!findingId || findingId.startsWith("--")) {
             err('mcpgawk verify suppress: a findingId is required, e.g. mcpgawk verify suppress F-abc123... --file suppressions.json --reason "..."');
             return 2;
@@ -140,8 +149,15 @@ licenseOpts = {}) {
             err(`cannot read '${filePath}': ${e.message}`);
             return 2;
         }
-        saveSuppressions(filePath, withSuppression(existing, findingId, reason, approvedBy));
+        if (hosts !== undefined && hosts.length === 0) {
+            err("mcpgawk verify suppress: --hosts needs at least one host, e.g. --hosts api.github.com");
+            return 2;
+        }
+        saveSuppressions(filePath, withSuppression(existing, findingId, reason, approvedBy, undefined, hosts));
         log(`mcpgawk verify: suppressed ${findingId} → ${filePath}`);
+        log(hosts !== undefined
+            ? `  it covers ${hosts.join(", ")} only; the finding counts again if the tool reaches another host`
+            : "  it covers this finding whatever it reaches. For an egress finding, add --hosts <a,b> to accept only the hosts you reviewed");
         return 0;
     }
     const unsafe = argv.includes("--unsafe");
@@ -342,6 +358,7 @@ licenseOpts = {}) {
                 return 2;
             }
             const priorByServer = new Map(base.pins.map((p) => [p.server, p.tools]));
+            const unlisted = [];
             for (const r of reports) {
                 const prior = priorByServer.get(r.server);
                 if (prior) {
@@ -349,6 +366,21 @@ licenseOpts = {}) {
                     driftByServer[r.server] = d;
                     if (hasDrift(d))
                         drifted = true;
+                }
+                else {
+                    unlisted.push(r);
+                }
+            }
+            // J8 (2026-11-12): a server the file did not list was neither compared nor added, silently,
+            // so a server that joined after the baseline ran unbaselined for ever. It is recorded now,
+            // the way the first run records every server, and stderr names it: nothing to compare
+            // against this run, the next run compares it.
+            if (unlisted.length > 0) {
+                const updated = { ...base, pins: [...base.pins, ...unlisted.map((r) => r.pins)] };
+                writeFileSync(baselinePath, `${JSON.stringify(updated, null, 2)}\n`);
+                for (const r of unlisted) {
+                    err(`mcpgawk verify: ${r.server} was not in the baseline ${baselinePath}; added it ` +
+                        "(nothing to compare against this run; the next run compares it)");
                 }
             }
         }
@@ -444,6 +476,12 @@ licenseOpts = {}) {
         // masking afterwards would rewrite the file on every run as the two forms disagreed.
         const freshProfile = redactDocument(behaviourProfile(report));
         const verifiedNames = new Set(report.servers.map((s) => s.server));
+        // J3: the tools each server SETTLED this run (every planned check concluded), as verify
+        // collected them. Only these may clear a conviction. Subtraction (listed tools less skipped
+        // and errored) called a run that never signed in a full re-check (J3 follow-up, 2026-11-13).
+        const settled = new Map();
+        for (const r of reports)
+            settled.set(r.server, new Set(r.toolsSettled ?? []));
         for (const target of targets) {
             const isExplicit = target === behaviourPath;
             try {
@@ -457,7 +495,7 @@ licenseOpts = {}) {
                 catch {
                     existing = null; // absent or corrupt — the merge treats both as nothing to retain
                 }
-                const merged = mergeBehaviourProfiles(existing, freshProfile, verifiedNames);
+                const merged = mergeBehaviourProfiles(existing, freshProfile, verifiedNames, settled);
                 // 0600 for the same reason as the report. `mode` applies only when the file is NEW, so
                 // a profile written before this fix keeps its 0644 until it is recreated — narrowed
                 // explicitly below rather than left to chance.
@@ -590,6 +628,20 @@ export function printText(report, log) {
             const more = s.skipped.length > 8 ? `, +${s.skipped.length - 8} more` : "";
             log(`  - skipped ${s.skipped.length} not-read-only tool(s): ${shown}${more}`);
         }
+        if (s.rejectedInput && s.rejectedInput.length > 0) {
+            // J1 narrowed (2026-11-15): the tools that answered verify's made-up input with their own
+            // error. Not a failure of the run and not a clean check: named, with what the tool said,
+            // so the reader knows exactly which tools this result does NOT speak for.
+            const shown = s.rejectedInput
+                .slice(0, 8)
+                .map((r) => redactText(r.tool))
+                .join(", ");
+            const more = s.rejectedInput.length > 8 ? `, +${s.rejectedInput.length - 8} more` : "";
+            log(`  - ${s.rejectedInput.length} tool(s) answered the test input with an error and were NOT judged on it: ${shown}${more}`);
+            const said = redactText(s.rejectedInput[0]?.detail ?? "");
+            if (said)
+                log(`      ↳ ${redactText(s.rejectedInput[0]?.tool ?? "")} said: ${said}`);
+        }
         const d = s.drift;
         if (d && (d.changed.length || d.removed.length || d.added.length)) {
             const parts = [];
@@ -630,6 +682,12 @@ export function printText(report, log) {
             // tool was skipped (safe mode skips not-read-only tools, so an all-mutating server checks
             // nothing) printed the same green tick as a genuinely exercised one — found live 2026-07-27
             // against mcpgawk's own server, 0 checked and still ticked.
+            if (s.toolsChecked === 0 && s.allCallsErrored) {
+                // Not the safe-mode case below: the tools WERE called, and each answered with an error.
+                // Telling this reader to re-run with --unsafe would send them the wrong way.
+                log(`  ⊘ INCOMPLETE — ${redactText(s.allCallsErrored)}`);
+                continue;
+            }
             if (s.toolsChecked === 0) {
                 log("  ⊘ INCONCLUSIVE — no tool was actually exercised, so nothing was proven about this " +
                     "server. Safe mode skips tools that are not read-only; re-run with --unsafe in a " +
@@ -638,8 +696,12 @@ export function printText(report, log) {
             }
             // The green tick belongs ONLY to a server that completed. Anything else says incomplete
             // first — it is the same derived field the JSON/HTML/SARIF/JUnit and the exit code use.
+            // With tools that rejected the test input, the tick speaks only for the tools checked.
+            const unjudged = s.rejectedInput?.length ?? 0;
             log(s.complete
-                ? "  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced"
+                ? unjudged > 0
+                    ? `  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced in the ${s.toolsChecked} tool(s) checked; ${unjudged} not judged, listed above`
+                    : "  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced"
                 : `  ⊘ INCOMPLETE (${s.checksCompleted}/${s.checksPlanned} check(s) completed) — nothing reproduced in the checks that DID complete, which is not a clean result: ${s.incompleteReasons.join("; ")}`);
             continue;
         }
@@ -652,6 +714,11 @@ export function printText(report, log) {
         const rest = s.findings.filter((f) => !(f.class === "undeclared-egress" && !f.suppressed));
         for (const line of egressClusterLines(activeEgress))
             log(line);
+        // A finding someone suppressed that is back: say why, where the reader is looking.
+        for (const f of s.findings) {
+            if (f.suppressionLapsed)
+                log(`    ↳ ${f.tool} (${f.findingId}): ${f.suppressionLapsed}`);
+        }
         for (const f of rest) {
             const mark = f.suppressed ? "~" : "✗";
             const suffix = f.suppressed ? `  [suppressed: ${f.suppressionReason}]` : "";
@@ -687,7 +754,9 @@ export function printText(report, log) {
     }
     else {
         log(`\nmcpgawk verify: no findings reproduced — status ${report.summary.status} ` +
-            `(${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed).${suppressedNote}`);
+            `(${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed${report.summary.rejectedInput > 0
+                ? `; ${report.summary.rejectedInput} tool(s) answered the test input with an error and were not judged`
+                : ""}).${suppressedNote}`);
     }
     log(`\nCoverage: ${report.coverage}`);
 }

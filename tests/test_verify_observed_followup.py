@@ -52,6 +52,17 @@ def test_incomplete_but_not_auth_and_no_wrap_data_says_nothing(tmp_path):
     assert observed_followup(report, _store(), spool_path=sp) == []
 
 
+def test_a_server_that_only_answered_errors_is_not_told_its_login_is_session_bound(tmp_path):
+    # J1 narrowed (2026-11-15): the reason now QUOTES the server's first error. "401 Unauthorized"
+    # in that quote is an expired or missing key, not a login held by a live session, and the
+    # keyword match on "auth" would have said the opposite about it.
+    sp = _spool(tmp_path, [])
+    report = {"servers": [{"server": "kite", "status": "INCOMPLETE", "incompleteReasons": [
+        "every call answered with an error, so nothing was proven about this server "
+        "(first: 401 Unauthorized: token expired)"]}]}
+    assert observed_followup(report, _store(), spool_path=sp) == []
+
+
 def test_the_followup_never_corrupts_a_machine_readable_stdout(tmp_path, monkeypatch, capsys):
     """`--json` promises stdout IS the report. This follow-up is printed by the WRAPPER after the
     engine has finished, so until 2026-09-18 it landed inside that report: `mcpgawk verify --json |

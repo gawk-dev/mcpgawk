@@ -10,8 +10,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+
+
+#: The drift fields that mean the server moved since its baseline (the scan JSON's `drift`).
+_CHANGE_KEYS = ("added", "removed", "changed", "schema_changed", "annotation_changed",
+                "extensions_changed", "transport_changed", "login_changed")
 
 
 def _env(key: str, default: str = "") -> str:
@@ -28,6 +35,10 @@ def main() -> int:
     except ValueError:
         max_tokens = 0
     fail_on_flagged = _env("MCPGAWK_FAIL_ON_FLAGGED", "false").lower() == "true"
+    # The approvals to compare against (review B7, 2026-11-12): a fresh runner has no baseline, so
+    # "fail when a server changes" was a promise with nothing behind it. A committed approvals file
+    # (what `mcpgawk approve` writes) makes it checkable.
+    baseline = _env("MCPGAWK_BASELINE")
 
     cmd = ["mcpgawk", "scan", "--json"]
     if stdio:
@@ -37,12 +48,49 @@ def main() -> int:
     elif sse:
         cmd += ["--sse", sse]
     elif config:
-        cmd += [config]
+        # `--yes`: a non-interactive scan does not launch a config's local servers without
+        # consent, and naming the config as this step's input IS that consent. Without it the
+        # scan measured nothing and this gate printed an empty table and "passed" (real drive,
+        # 2026-11-14).
+        cmd += [config, "--yes"]
     else:
         print("::error::mcpgawk-action: provide one of `config`, `stdio`, `http`, or `sse`.")
         return 2
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    env = dict(os.environ)
+    if baseline and not os.path.isfile(baseline):
+        # Left alone, the scan CREATES the file it was told to compare against, and passes.
+        print(f"::error::mcpgawk-action: the baseline file `{baseline}` does not exist. "
+              "Commit a copy of your ~/.mcpgawk/history.json and point `baseline` at it.")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="mcpgawk-baseline-") as work:
+        approved_before: set[str] = set()
+        copy = os.path.join(work, "history.json")
+        if baseline:
+            # The scan compares against a COPY. Pointed at the committed file it rewrote it on
+            # every run, left its lock and state files in the checkout, and tightened the
+            # checkout directory's permissions (real drive, 2026-11-14).
+            shutil.copyfile(baseline, copy)
+            approved_before = _server_keys(copy)
+            env["MCPGAWK_HISTORY"] = copy
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        # A server the baseline has never held reads exactly like one that matches it (no drift
+        # either way). The scan records what it sees, so a key that is new afterwards is a server
+        # nobody approved.
+        unapproved = sorted(_server_keys(copy) - approved_before) if baseline else []
+    return _judge(proc, unapproved, max_tokens, fail_on_flagged)
+
+
+def _server_keys(path: str) -> set[str]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            servers = json.load(fh).get("servers")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return set(servers) if isinstance(servers, dict) else set()
+
+
+def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) -> int:
     match = re.search(r"(\[.*\]|\{.*\})", proc.stdout, re.S)
     if not match:
         print("::error::mcpgawk-action: no JSON label produced by the scan.")
@@ -57,6 +105,17 @@ def main() -> int:
 
     rows = []
     failures = []
+    # The scan's own exit code (review B7): 0 = clean, 1 = something to review, anything else = the
+    # scan itself did not complete. It was ignored, so only the two opt-in thresholds could fail.
+    if proc.returncode not in (0, 1):
+        failures.append(f"the scan did not complete (exit {proc.returncode}); nothing below is a pass")
+    if not servers:
+        # An empty table is not a clean fleet (real drive, 2026-11-14).
+        failures.append("nothing was scanned: the scan returned no servers, so there is nothing "
+                        "here to pass")
+    if unapproved:
+        failures.append(f"{len(unapproved)} server(s) are not in your baseline and have never "
+                        f"been approved: {', '.join(unapproved)}")
     for server in servers:
         x = server.get("x-mcpgawk", {}) or {}
         name = server.get("name", "?")
@@ -65,6 +124,20 @@ def main() -> int:
         signals = x.get("bounded_signals") or []
         nsig = len(signals)
         status = "ok"
+        if x.get("is_failure"):
+            # A server nobody scanned rendered "ok" with 0 tools (review B7). Fails by default.
+            why = "; ".join([str(x.get("error_kind") or "")] + [str(c) for c in (x.get("caveats") or [])])
+            failures.append(f"{name}: not scanned ({why.strip('; ') or 'no reason given'})")
+            rows.append((name, tools, tokens, nsig, "not scanned"))
+            continue
+        drift = x.get("drift") or {}
+        if drift.get("compared") is False:
+            failures.append(f"{name}: its baseline could not be compared — treat as unreviewed")
+            status = "not compared"
+        elif any(drift.get(k) for k in _CHANGE_KEYS):
+            moved = [k for k in _CHANGE_KEYS if drift.get(k)]
+            failures.append(f"{name}: changed since its baseline ({', '.join(moved)})")
+            status = "changed"
         if max_tokens and tokens > max_tokens:
             failures.append(f"{name}: {tokens:,} tokens at connect exceeds the {max_tokens:,} budget")
             status = "over budget"

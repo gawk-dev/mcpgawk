@@ -1,7 +1,10 @@
-import { isSuppressed } from "./suppressions.js";
+import { isSuppressed, unreviewedHosts } from "./suppressions.js";
 /** 1.2 (2026-07-14): added `checkErrors`/`summary.checkErrors` — see {@link CheckError}'s
- * docstring in model.ts for the incident that made this necessary. */
-export const REPORT_SCHEMA_VERSION = "1.2";
+ * docstring in model.ts for the incident that made this necessary.
+ * 1.3 (2026-11-15): added `servers[].rejectedInput`, `servers[].allCallsErrored` and
+ * `summary.rejectedInput`. A check a tool answered with its own error is no longer a check
+ * error: it is in neither check count and the tool is listed (review J1, narrowed). */
+export const REPORT_SCHEMA_VERSION = "1.3";
 /**
  * The honest coverage boundary of the current sandbox backend. Egress-based checks observe HTTP(S)
  * traffic routed through the proxy; a target that exfiltrates over a RAW socket / DNS / UDP is NOT
@@ -17,9 +20,20 @@ export const DOCKER_COVERAGE = "egress is enforced at the OS level (--network no
 /** The ADR-0014 claim: isolation AND observation in the same run — the strongest coverage. */
 export const PROXIED_COVERAGE = "egress is enforced at the OS level AND observed: the target runs on an internal container " +
     "network whose only route out is the verifying egress proxy, so raw-socket / DNS / UDP " +
-    "exfiltration is BLOCKED while every HTTP(S) destination — including the npx/uvx install " +
-    "fetch — is recorded. A non-allowlisted host in this report was seen by the only possible " +
-    "way out, not by a bypassable observer.";
+    "exfiltration is BLOCKED during the checks, and every HTTP(S) destination reached during the " +
+    "checks, including the npx/uvx install fetch of those launches, is recorded. A " +
+    "non-allowlisted host in this report was seen by the only possible way out, not by a " +
+    "bypassable observer.";
+/**
+ * What NO backend covers today (review J5, 2026-11-14). Before any check runs, verify starts
+ * each local server once, directly on this machine, to list its tools (and, for a hidden
+ * catalogue, to ask for it): full environment, full network, no proxy, in every mode including
+ * `--isolate`. The coverage claims above are about the checks. This sentence goes with every
+ * one of them until that first start runs inside the sandbox too.
+ */
+export const ENUMERATION_SCOPE = "SCOPE: these claims cover the checks. Each local server was first started once outside the " +
+    "sandbox, on this machine with its normal environment and network, to list its tools; what " +
+    "it did during that start, including any install fetch, was not observed and not blocked.";
 /** What replaces every coverage CLAIM when the run did not complete. Deliberately contains none of
  * the strong-claim wording (no "BLOCKED", no "is recorded") — an incomplete run has established
  * nothing to make a claim about. Followed by the specific reasons and {@link EGRESS_COVERAGE}. */
@@ -100,7 +114,9 @@ export function serverCompleteness(r) {
     if (completed !== planned) {
         reasons.push(`${planned - completed} check(s) never completed (infra failure, not a verdict) — ${completed}/${planned} completed`);
     }
-    if (r.toolsChecked === 0) {
+    // When every call was answered with an error, THAT is why nothing was exercised: it is said
+    // once, below, in the server's own words, not twice.
+    if (r.toolsChecked === 0 && !r.allCallsErrored) {
         reasons.push("no tool was actually exercised, so nothing was proven about this server");
     }
     if (dispatchForcesIncomplete(r)) {
@@ -110,6 +126,11 @@ export function serverCompleteness(r) {
         // A run whose every read answered "not signed in" completed its checks against auth-failure
         // responses — those are verdicts about the login wall, not the tools behind it.
         reasons.push(r.authIncomplete);
+    }
+    if (r.allCallsErrored) {
+        // Every call was answered with an error. Those answers are in neither check count, so the
+        // counts alone would read 0/0: the reason has to be stated, in the server's own words.
+        reasons.push(r.allCallsErrored);
     }
     return {
         checksPlanned: planned,
@@ -190,7 +211,14 @@ export function dispatchForcesIncomplete(s) {
 export function buildReport(reports, generatedAt, driftByServer = {}, errors = [], suppressions) {
     const servers = reports.map((r) => {
         const findings = r.findings.map((f) => {
-            const entry = suppressions ? isSuppressed(f.findingId, suppressions) : undefined;
+            const entry = suppressions ? isSuppressed(f.findingId, suppressions, f.evidence) : undefined;
+            // A suppression exists for this id but does not cover what this run saw: say which hosts
+            // nobody reviewed, where a reader looks for why a suppressed finding is back (review P5).
+            const recorded = suppressions?.suppressed[f.findingId];
+            const outside = recorded && !entry ? unreviewedHosts(recorded, f.evidence) : [];
+            const lapsed = outside.length > 0
+                ? `a suppression covers ${(recorded?.hosts ?? []).join(", ") || "no host"} only; this run also reached ${outside.join(", ")}`
+                : undefined;
             return {
                 findingId: f.findingId,
                 code: f.candidate.code,
@@ -202,6 +230,7 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
                 evidence: f.evidence,
                 suppressed: entry !== undefined,
                 suppressionReason: entry?.reason,
+                ...(lapsed ? { suppressionLapsed: lapsed } : {}),
             };
         });
         const active = findings.filter((f) => !f.suppressed);
@@ -225,6 +254,8 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             findings,
             skipped: r.skipped.map((s) => ({ tool: s.tool, class: s.klass })),
             checkErrors: [...r.checkErrors],
+            rejectedInput: r.rejectedInput,
+            allCallsErrored: r.allCallsErrored,
             drift: driftByServer[r.server],
             sandboxBackend: r.sandboxBackend,
             sandboxDegradedReason: r.sandboxDegradedReason,
@@ -260,6 +291,7 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             suppressed: allFindings.length - activeFindings.length,
             errors: errors.length,
             checkErrors: servers.reduce((n, s) => n + s.checkErrors.length, 0),
+            rejectedInput: servers.reduce((n, s) => n + (s.rejectedInput?.length ?? 0), 0),
             dynamicDispatch: dispatchServers,
             checksPlanned: completeness.checksPlanned,
             checksCompleted: completeness.checksCompleted,
@@ -283,6 +315,11 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
  * `isolate` requested (today's default) — that's not a degradation, just the normal mode.
  */
 function coverageOf(servers, completeness) {
+    const claim = coverageClaimOf(servers, completeness);
+    // Said once, whenever any local server ran: the first start is outside every backend.
+    return servers.some((s) => s.sandboxBackend !== "none") ? `${claim} ${ENUMERATION_SCOPE}` : claim;
+}
+function coverageClaimOf(servers, completeness) {
     // No coverage CLAIM on an incomplete run. What we can honestly say is what was NOT established.
     if (!completeness.complete) {
         return `${INCOMPLETE_COVERAGE} ${completeness.reasons.join("; ")}. ${EGRESS_COVERAGE}`;

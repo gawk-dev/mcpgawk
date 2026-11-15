@@ -146,6 +146,9 @@ async def test_fleet_scan_launches_locals_only_when_explicitly_asked(server, mon
     monkeypatch.setattr(mcp_server, "discover_servers", lambda: {"local": {"command": "npx"}})
     monkeypatch.setattr(mcp_server, "detect_unscannable", lambda **kw: [])
     monkeypatch.setattr(mcp_server, "probe", fake_probe)
+    # Since review N15 (2026-11-12) launch_local also needs the same deliberate permission the
+    # single-server tool requires; without it see test_mcp_fleet_tool_never_launches_without_permission.
+    monkeypatch.setenv("MCPGAWK_MCP_ALLOW_LAUNCH", "1")
 
     await _call(server, "scan_mcp_fleet", {"launch_local": True})
 

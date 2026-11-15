@@ -21,6 +21,7 @@ export function behaviourProfile(report) {
             toolsChecked: s.toolsChecked,
             skipped: s.skipped.map((t) => t.tool),
             checkErrors: s.checkErrors.length,
+            ...(s.rejectedInput?.length ? { rejectedInput: s.rejectedInput.map((r) => r.tool) } : {}),
             checksRun: [...s.checksRun],
             backend: s.sandboxBackend,
         };
@@ -52,22 +53,34 @@ export function behaviourProfile(report) {
  * is replaced even to empty (its old convictions may describe a server that has since been
  * fixed); an unverified server's entry is retained untouched.
  */
-export function mergeBehaviourProfiles(existing, fresh, verified) {
+export function mergeBehaviourProfiles(existing, fresh, verified, 
+// J3 (2026-11-12): per verified server, the tools THIS run exercised FULLY (ran every check, no
+// check error, not skipped). Required, so no caller can fall back to wiping convictions.
+settled) {
     const out = {};
     const prior = existing && typeof existing === "object" && !Array.isArray(existing)
         ? (existing.servers ?? {})
         : {};
     if (prior && typeof prior === "object" && !Array.isArray(prior)) {
         for (const [srv, tools] of Object.entries(prior)) {
-            if (verified.has(srv))
-                continue; // this run's observation of srv wins, even when empty
-            if (tools && typeof tools === "object" && !Array.isArray(tools)) {
-                out[srv] = tools;
+            if (!(tools && typeof tools === "object" && !Array.isArray(tools)))
+                continue;
+            const priorTools = tools;
+            if (!verified.has(srv)) {
+                out[srv] = priorTools;
+                continue;
             }
+            // A verified server: this run decides ONLY the tools it exercised fully (a fixed tool is
+            // cleared). A tool it skipped, could not complete or never saw keeps its conviction: a
+            // safe-mode run used to erase a sink an earlier run had convicted (review J3).
+            const done = settled.get(srv) ?? new Set();
+            const kept = Object.fromEntries(Object.entries(priorTools).filter(([t]) => !done.has(t)));
+            if (Object.keys(kept).length > 0)
+                out[srv] = kept;
         }
     }
     for (const [srv, tools] of Object.entries(fresh.servers))
-        out[srv] = tools;
+        out[srv] = { ...(out[srv] ?? {}), ...tools };
     // `verified` merges by the SAME rule as `servers`: this run's observation of a server it verified
     // wins; every other server's prior observation is retained. Without this, verifying one server
     // would erase the record that any other had ever been looked at — the same data-loss bug the

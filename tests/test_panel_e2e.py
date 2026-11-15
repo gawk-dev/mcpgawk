@@ -358,7 +358,12 @@ def test_drift_is_pending_until_approved_via_the_button(panel):
     # Approve via the button (non-interactive hatch set in the panel's own env).
     guard_before = (panel.guard_projection.read_bytes()
                     if panel.guard_projection.is_file() else b"")
-    status, body = panel.post("approve", key="mcp:fixture")
+    # The pin of the version on screen, taken from the page's own approve form (review G10,
+    # 2026-11-12: an approve without it is refused, so a later change is never trusted unseen).
+    _, page = panel.get("/")
+    pins = re.findall(r'name="pin" value="([^"]+)"', page)
+    assert pins, "the page offers no approve form carrying the version on screen"
+    status, body = panel.post("approve", key="mcp:fixture", pin=pins[0])
     assert status == 200, f"approve refused: {body[:400]}"
     panel.wait_for(
         lambda: panel.record()["approved"]["texts"]["tool.read_notes"] == HOSTILE_DESC,

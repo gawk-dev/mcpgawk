@@ -65,7 +65,12 @@ _READER_DIRECTED = re.compile(
     r"ignore\s+(?:all\s+|the\s+|your\s+|any\s+)*(?:previous|prior|above|earlier|preceding)\s+"
     r"(?:instruction|prompt|message|context)"
     r"|disregard\s+(?:the\s+|all\s+|any\s+)*(?:previous|prior|above|earlier)"
-    r"|do\s*n?o?t?'?\s*(?:tell|inform|mention|reveal|notify|disclose)\s+(?:the\s+)?(?:user|human)"
+    # Every common spelling of the refusal (review N16, 2026-11-13). The old form could not match
+    # "don't tell the user" with either apostrophe, nor "never tell", and it DID match "do tell
+    # the user". A possessive ("the user's password") is a different sentence and is left alone.
+    r"|(?:do\s*not|don[’'`]?t|never|must\s*n(?:o|[’'])t|should\s*n(?:o|[’'])t)\s+(?:ever\s+)?"
+    r"(?:tell|inform|mention|reveal|notify|disclose)\s+"
+    r"(?:(?:this|that|it|anything|any\s+of\s+this)\s+)?(?:to\s+)?(?:the\s+)?(?:user|human)(?![’']s)"
     r"|(?:you\s+are|act\s+as|you\s+must\s+act)\s+an?\s+(?:ai|assistant|language\s+model|agent)"
     r"|(?:your|the)\s+system\s+prompt"
     r"|new\s+instructions?\s*:",
@@ -168,6 +173,68 @@ def _scan_params(item: dict, tool: str) -> list[Finding]:
         return []
     return [Finding(tool=tool, kind="injection:context-harvest",
                     evidence=f"asks for the conversation as an argument: {', '.join(hits)[:100]}")]
+
+
+#: Where a JSON Schema keeps more schemas. Enough to reach any parameter a client would show.
+_SCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions")
+_SCHEMA_ONE = ("items", "additionalProperties", "not", "if", "then", "else", "contains")
+_SCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+#: Bounds on the walk: a hostile schema must not be able to make the scan slow or recurse forever.
+_SCHEMA_MAX_DEPTH, _SCHEMA_MAX_NODES = 8, 2000
+
+
+def _schema_texts(schema: object) -> list[tuple[str, str]]:
+    """`(where, text)` for every description and title in a tool's input schema."""
+    out: list[tuple[str, str]] = []
+    seen: set[int] = set()
+    stack: list[tuple[object, str, int]] = [(schema, "", 0)]
+    visits = 0                       # every node taken off the stack, so no single guard is load-bearing
+    while stack and visits < _SCHEMA_MAX_NODES:
+        visits += 1
+        node, where, depth = stack.pop()
+        if not isinstance(node, dict) or id(node) in seen or depth > _SCHEMA_MAX_DEPTH:
+            continue
+        seen.add(id(node))
+        for field in ("description", "title"):
+            text = node.get(field)
+            if isinstance(text, str) and text.strip():
+                out.append((where or "the input schema", text))
+        for key in _SCHEMA_MAPS:
+            sub = node.get(key)
+            if isinstance(sub, dict):
+                for name, child in sub.items():
+                    stack.append((child, f"{where}.{name}" if where else str(name), depth + 1))
+        for key in _SCHEMA_ONE:
+            stack.append((node.get(key), where, depth + 1))
+        for key in _SCHEMA_LISTS:
+            sub = node.get(key)
+            if isinstance(sub, list):
+                stack.extend((child, where, depth + 1) for child in sub)
+    return out
+
+
+def _scan_param_text(item: dict, tool: str) -> list[Finding]:
+    """The text detectors, over what a tool says about its PARAMETERS (review N8, 2026-11-13).
+    The model reads a parameter's description when it fills the arguments, exactly as it reads
+    the tool's own; only the tool's own was scanned. One finding per kind per parameter, and the
+    evidence says which parameter, so the person knows where to look."""
+    if not isinstance(item, dict):
+        return []
+    out: list[Finding] = []
+    done: set[tuple[str, str]] = set()
+    for where, text in _schema_texts(item.get("inputSchema")):
+        for f in _scan_text(text, tool):
+            if (f.kind, where) in done:
+                continue
+            done.add((f.kind, where))
+            out.append(Finding(tool=f.tool, kind=f.kind, confidence=f.confidence,
+                               evidence=f"in parameter {_safe_where(where)}: {f.evidence}"[:160]))
+    return out
+
+
+def _safe_where(where: str) -> str:
+    """A parameter name is the server's too: printable characters only, bounded."""
+    return repr("".join(c if c.isprintable() else "?" for c in where)[:60])
 
 
 def is_instruction_finding(kind: str | None) -> bool:
@@ -371,6 +438,7 @@ def detect(snap: ServerSnapshot) -> list[Finding]:
     for t in snap.tools:
         findings.extend(_scan_text(t.get("description") or "", t.get("name", "?")))
         findings.extend(_scan_params(t, t.get("name", "?")))
+        findings.extend(_scan_param_text(t, t.get("name", "?")))
     for pr in snap.prompts:
         findings.extend(_scan_text(pr.get("description") or "", f"prompt:{pr.get('name', '?')}"))
     return findings

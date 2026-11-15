@@ -312,6 +312,12 @@ _PREFIXES = ("stdio:", "http:", "https:", "sse:")
 #: no `@`, nothing long enough to be an identifier.
 _PLAIN = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
 _ENV_REF = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+#: A flag whose NAME says its value is a credential (review N11, 2026-11-12). Each token used to be
+#: classified alone, so `--api-key 9f8a7b6c5d4e3f2a1b0c` (a value not credential-shaped by itself)
+#: shipped in both modes. For a separate argument the name is the signal.
+_SECRET_FLAG = re.compile(
+    r"^-{1,2}(?:[\w.-]*[_.-])?(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|key|"
+    r"secret|token|password|passwd|pass|pwd|auth|authorization|bearer|credential|cookie)s?$", re.I)
 
 
 def _token(tok: str) -> str:
@@ -389,5 +395,11 @@ def redact_command(value: str) -> str:
         return value
     program = Path(tokens[0]).name or tokens[0]
     kept = [program if _PLAIN.match(program) else "<program>"]
-    kept += [_token(t) for t in tokens[1:]]
+    prev = ""
+    for t in tokens[1:]:
+        if _SECRET_FLAG.match(prev) and not t.startswith("-") and not _ENV_REF.match(t):
+            kept.append("<redacted>")      # the value of a secret-named flag (review N11)
+        else:
+            kept.append(_token(t))
+        prev = t
     return prefix + " ".join(kept)

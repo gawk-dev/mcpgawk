@@ -39,7 +39,14 @@ function serverCard(s) {
     // table. Machine formats keep every finding; this is the human report only.
     const activeEgress = s.findings.filter((f) => f.class === "undeclared-egress" && !f.suppressed);
     const rest = s.findings.filter((f) => !(f.class === "undeclared-egress" && !f.suppressed));
-    const egressBlock = egressCard(activeEgress);
+    // A finding someone suppressed that is back, said beside the hosts it reached.
+    const lapsed = s.findings.filter((f) => f.suppressionLapsed);
+    const egressBlock = egressCard(activeEgress) +
+        (lapsed.length
+            ? `<p class="note" style="color:var(--warn)">${lapsed
+                .map((f) => `<strong>${esc(f.tool)}</strong> (${esc(f.findingId)}): ${esc(f.suppressionLapsed ?? "")}`)
+                .join("<br>")}</p>`
+            : "");
     const findings = rest.length
         ? `<table class="findings">
         <thead><tr><th>severity</th><th>class</th><th>tool</th><th>evidence</th><th>N/N</th><th>id</th></tr></thead>
@@ -64,6 +71,11 @@ function serverCard(s) {
         })
             .join("")}</ul>`
         : "";
+    const rejectedInput = s.rejectedInput?.length
+        ? `<p class="note">${s.rejectedInput.length} tool(s) answered the test input with an error and were not judged on it:</p><ul class="note">${s.rejectedInput
+            .map((r) => `<li>${esc(r.tool)}${r.detail ? `: ${esc(r.detail)}` : ""}</li>`)
+            .join("")}</ul>`
+        : "";
     const remoteNote = remote
         ? `<p class="note">Remote server — can’t be sandboxed; egress checks not applicable. Ran: ${s.checksRun.map(esc).join(", ")}.</p>`
         : "";
@@ -78,7 +90,7 @@ function serverCard(s) {
       <h2>${esc(s.server)} <span class="transport">${esc(s.transport)}</span></h2>
       <span class="pill pill-${s.status}">${STATUS_LABEL[s.status]}</span>
     </div>
-    ${remoteNote}${sandboxNote}${dispatchNote}${skipped}${checkErrors}${egressBlock}${findings}
+    ${remoteNote}${sandboxNote}${dispatchNote}${skipped}${rejectedInput}${checkErrors}${egressBlock}${findings}
   </section>`;
 }
 /** F4: the hidden catalog, each tool marked probed vs NOT probed — so the HTML report (not just the

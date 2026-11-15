@@ -187,6 +187,11 @@ _PROJECT_LOCATIONS: tuple[tuple[str, str, str], ...] = (
 _MAX_PROJECTS = 40
 
 
+#: (total project keys in ~/.claude.json, how many were swept) from the last `project_dirs` call,
+#: so discover_report can say when the cap left projects unchecked (review N3, 2026-11-12).
+_LAST_PROJECT_SWEEP: tuple[int, int] = (0, 0)
+
+
 def project_dirs(home: Path, cwd: Path | None = None) -> list[Path]:
     """Which project directories to look in: the ones this machine's agents actually know about
     (Claude Code records every project it has opened in ~/.claude.json) plus the current working
@@ -220,8 +225,15 @@ def project_dirs(home: Path, cwd: Path | None = None) -> list[Path]:
         add(cwd)
     data = _read_config(home / ".claude.json")
     projects = (data or {}).get("projects")
+    global _LAST_PROJECT_SWEEP
+    _LAST_PROJECT_SWEEP = (0, 0)
     if isinstance(projects, dict):
-        for raw in list(projects)[:_MAX_PROJECTS]:
+        # The MOST RECENT projects (review N3): Claude Code appends a project when it is first
+        # opened, so the first 40 keys were the oldest, and current work was the part left out.
+        keys = list(projects)
+        kept = keys[-_MAX_PROJECTS:]
+        _LAST_PROJECT_SWEEP = (len(keys), len(kept))
+        for raw in kept:
             add(Path(str(raw)))
     return out
 
@@ -392,6 +404,29 @@ def _read_config(path: Path, shape: str = "") -> dict[str, Any] | None:
     return data
 
 
+def _merge_project_server(merged: dict[str, Any], name: str, entry: Any, proj_path: str) -> None:
+    """Add one project's server to the ~/.claude.json map without losing a same-named one
+    (review N2, 2026-11-12). `dict.update` kept only the last project's `db` when two projects
+    each define `db` differently, so the other was never scanned, baselined or guarded. The same
+    entry in two projects is still one server; a DIFFERENT entry under a taken name is kept under
+    `<name> (<project folder>)`."""
+    if name not in merged:
+        merged[name] = entry
+        return
+    try:
+        same = json.dumps(merged[name], sort_keys=True, default=str) == json.dumps(
+            entry, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        same = False
+    if same:
+        return
+    folder = proj_path.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or proj_path
+    alt, n = f"{name} ({folder})", 2
+    while alt in merged:
+        alt, n = f"{name} ({folder} {n})", n + 1
+    merged[alt] = entry
+
+
 def _extract(data: dict[str, Any], shape: str) -> dict[str, Any]:
     """Pull the {name: entry} server map out of a parsed config by its shape."""
     if shape == _SHAPE_CLAUDE_CODE:
@@ -408,9 +443,10 @@ def _extract(data: dict[str, Any], shape: str) -> dict[str, Any]:
             merged.update(data["mcpServers"])
         projects = data.get("projects")
         if isinstance(projects, dict):
-            for proj in projects.values():
+            for proj_path, proj in projects.items():
                 if isinstance(proj, dict) and isinstance(proj.get("mcpServers"), dict):
-                    merged.update(proj["mcpServers"])
+                    for name, entry in proj["mcpServers"].items():
+                        _merge_project_server(merged, str(name), entry, str(proj_path))
         return merged
     if shape == _SHAPE_CODEX_TOML:
         # `[mcp_servers.<name>]` only. config.toml also carries `[projects."..."]` and top-level
@@ -485,6 +521,15 @@ def _normalise_entry(entry: Any) -> Any:
     cmd = out.get("command")
     if isinstance(cmd, list) and cmd:
         out = {**out, "command": str(cmd[0]), "args": [str(a) for a in cmd[1:]]}
+    # Zed's older settings: command is an OBJECT {"path", "args", "env"} (review N4, 2026-11-12).
+    # Unhandled, it reached `_identity` as a dict, raised TypeError (unhashable) and aborted
+    # discovery for EVERY client, not just Zed.
+    elif isinstance(cmd, dict) and isinstance(cmd.get("path"), str) and cmd.get("path"):
+        args = cmd.get("args") if isinstance(cmd.get("args"), list) else []
+        env = {**(out.get("env") if isinstance(out.get("env"), dict) else {}),
+               **(cmd.get("env") if isinstance(cmd.get("env"), dict) else {})}
+        out = {**out, "command": cmd["path"], "args": [str(a) for a in args],
+               **({"env": env} if env else {})}
     # Goose: `cmd` instead of `command`.
     if not out.get("command") and out.get("cmd"):
         out = {**out, "command": out["cmd"]}
@@ -500,7 +545,9 @@ def _is_disabled(entry: Any) -> bool:
     """`disabled: true` (Cursor/VS Code mcp.json) means the CLIENT will not launch this server.
     Scanning it as live overstates the fleet; dropping it silently understates it. So it is
     skipped AND counted, and the report names it."""
-    return isinstance(entry, dict) and entry.get("disabled") is True
+    # `enabled: false` is how Zed, opencode and Goose say the same thing (review N17, 2026-11-12):
+    # those servers were launched and scanned as live, through the consent prompt.
+    return isinstance(entry, dict) and (entry.get("disabled") is True or entry.get("enabled") is False)
 
 
 def _claude_code_plugins(home: Path) -> list[tuple[str, Path]]:
@@ -541,7 +588,15 @@ def _identity(entry: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(entry, dict):
         return None
     if entry.get("command"):
+        # A command we cannot read as one executable is unrecognised — named in the report — never
+        # a crash. A dict or list here raised TypeError (unhashable) out of the whole discovery,
+        # for every client (review N4).
+        if not isinstance(entry["command"], str):
+            return None
         args = entry.get("args") or []
+        if isinstance(args, list):
+            args = [a if isinstance(a, str) else json.dumps(a, sort_keys=True, default=str)
+                    for a in args]
         # ENV IS PART OF THE IDENTITY. Same binary, different credentials is a DIFFERENT server: two
         # GitHub orgs, two Slack workspaces, dev vs prod tokens — all the same command and args,
         # pointed at different data. Collapsing them scanned the first and left the rest invisible:
@@ -747,6 +802,12 @@ def discover_report(home: Path | str | None = None, platform: str | None = None,
         for _client, rel, shape in _PROJECT_LOCATIONS:
             sweep(proj, _client, rel, shape, label=str(proj / rel))
         sources[before:] = [r for r in sources[before:] if r["status"] != ABSENT]
+    _total, _kept = _LAST_PROJECT_SWEEP
+    if _total > _kept:
+        # Said, not silent: a partial sweep must never pass as a complete one (problem_lines).
+        sources.append({"client": "claude-code", "path": ".claude.json (projects)", "status": OK,
+                        "servers": 0, "disabled": [], "unrecognised": [],
+                        "capped": (_total, _kept)})
 
     out: dict[str, dict[str, Any]] = {}
     for ident in order:
@@ -770,6 +831,11 @@ def problem_lines(sources: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for s in sources:
         where = f"{s['client']}: ~/{s['path']}"
+        if s.get("capped"):
+            total, kept = s["capped"]
+            lines.append(f"{where} — {total} project folders are listed; only the {kept} most "
+                         f"recent were checked for a project .mcp.json, so servers in the other "
+                         f"{total - kept} are NOT included")
         if s["status"] == NO_PARSER:
             lines.append(f"{where} — this config is YAML and PyYAML is not installed, so this "
                          f"client's servers are NOT included (pip install pyyaml)")

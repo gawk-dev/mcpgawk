@@ -304,7 +304,15 @@ def display_kind(run: Any) -> str:
 
 def list_runs(*, kind: str | None = None, limit: int = 100, since: str | None = None,
               path: str | None = None) -> list[Run]:
-    """Most recent first. The timeline's read path."""
+    """Most recent first. The timeline's read path. A read failure is reported on stderr and
+    comes back as []; a caller that must not mistake that for "no runs" uses `list_runs_checked`."""
+    return list_runs_checked(kind=kind, limit=limit, since=since, path=path)[0]
+
+
+def list_runs_checked(*, kind: str | None = None, limit: int = 100, since: str | None = None,
+                      path: str | None = None) -> tuple[list[Run], str | None]:
+    """`(runs, error)`. The same read as `list_runs`, plus the reason it came back empty (review
+    N23, 2026-11-12: a corrupt runs.db read as "the run registry holds no runs")."""
     sql = "select * from runs"
     where: list[str] = []
     args: list[Any] = []          # query parameters: strings here, an int for the limit below
@@ -323,8 +331,8 @@ def list_runs(*, kind: str | None = None, limit: int = 100, since: str | None = 
             rows = conn.execute(sql, args).fetchall()
     except Exception as exc:  # noqa: BLE001
         _report("read", exc)
-        return []
-    return [_row_to_run(r) for r in rows]
+        return [], f"{type(exc).__name__}: {exc}"
+    return [_row_to_run(r) for r in rows], None
 
 
 def get_run(run_id: str, *, path: str | None = None) -> Run | None:

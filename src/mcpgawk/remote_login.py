@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -77,6 +78,17 @@ def _token_path(url: str) -> Path:
     """Same derivation as oauth_login.FileTokenStorage — one owner of the scheme would be better,
     but duplicating a sha256 prefix is safer than importing the login machinery into a read path."""
     return _store_dir() / f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.json"
+
+
+def token_stamp(url: str) -> tuple[int, int] | None:
+    """`(mtime_ns, size)` of this URL's stored sign-in, or None when there is none. For telling
+    whether a sign-in flow WROTE the token, as opposed to finding one that was already there
+    (review Q4): compare the stamp from before the flow with the one after it."""
+    try:
+        st = _token_path(url).stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
 
 def stored_access_token(url: str) -> str:
@@ -257,6 +269,20 @@ def auth_needed(path: Path | None = None) -> dict[str, str]:
     return {str(k): str(v) for k, v in doc.items() if v} if isinstance(doc, dict) else {}
 
 
+def auth_needed_state(path: Path | None = None) -> str:
+    """Whether the sign-in record can be read: "ok", "absent" (no scan has written it yet) or
+    "unreadable". `auth_needed` returns {} for all three, and only "ok" may be read as "nothing
+    needs a login" (review Q11, 2026-11-12)."""
+    p = path or _auth_needed_path()
+    if not p.exists():
+        return "absent"
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable"
+    return "ok" if isinstance(doc, dict) else "unreadable"
+
+
 def refused_after_login(url: str, path: Path | None = None) -> bool | None:
     """Did the last scan's refusal happen AFTER the stored login? None when it cannot be told.
 
@@ -350,6 +376,33 @@ def consent_text(name: str, entry: dict[str, Any]) -> str:
 #: Standard OAuth servers never get here — the panel tries the challenge/discovery flow first.
 _INBAND_LOGIN_NAMES = ("login", "authorize", "authenticate", "connect")
 
+#: The only other words a login tool's name may carry. A name is a login tool when it says login
+#: (or sign in) and EVERY other word is one of these. A list of allowed words, not of forbidden
+#: ones: `delete_login`, `login_history` and `create_login` all contain "login", and the first
+#: version called whichever came first, with empty arguments (review N24, 2026-11-14).
+_LOGIN_NAME_WORDS = frozenset({
+    "start", "begin", "init", "initiate", "do", "perform", "request", "open", "get", "url", "link",
+    "oauth", "sso", "browser", "web", "device", "interactive", "flow", "user", "account", "with",
+    "via", "to"})
+
+
+def login_tool_name(names: "list[str] | tuple[str, ...]") -> str | None:
+    """The tool to call to START this server's own sign-in, or None. An exact auth name first,
+    wherever the server listed it; otherwise the first name in which login is the action."""
+    for exact in _INBAND_LOGIN_NAMES:
+        if exact in names:
+            return exact
+    for name in names:
+        snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name)).lower()
+        tokens = [t for t in re.split(r"[^a-z0-9]+", snake) if t]
+        if "signin" in tokens:
+            tokens = [t for t in tokens if t != "signin"] + ["login"]
+        elif "sign" in tokens and "in" in tokens:
+            tokens = [t for t in tokens if t not in ("sign", "in")] + ["login"]
+        if "login" in tokens and all(t == "login" or t in _LOGIN_NAME_WORDS for t in tokens):
+            return str(name)
+    return None
+
 #: Tools that don't return an auth URL but DO return the server's own sign-in instructions —
 #: Revolut X's `check_auth_status` answers "Not configured" with numbered steps and explicitly
 #: instructs clients to present them all. Relaying those verbatim IS the sign-in flow for this
@@ -385,8 +438,7 @@ def inband_login(url: str | None = None, headers: dict[str, str] | None = None,
         await session.initialize()
         tools = await session.list_tools()
         names = [t.name for t in tools.tools]
-        target = next((n for n in names if n in _INBAND_LOGIN_NAMES
-                       or "login" in n.lower()), None)
+        target = login_tool_name(names)
         kind = "login"
         if target is None:
             # OUR preference order, not the server's listing order: a status tool answers "what
@@ -679,8 +731,7 @@ def held_session(url: str | None = None, *, command: str | None = None,
             async def drive(session: Any) -> bool:
                 await session.initialize()
                 listed = await session.list_tools()
-                name = next((t.name for t in listed.tools
-                             if t.name in _INBAND_LOGIN_NAMES or "login" in t.name.lower()), None)
+                name = login_tool_name([t.name for t in listed.tools])
                 if name is None:
                     out.put(None)
                     return False

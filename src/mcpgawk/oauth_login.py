@@ -32,7 +32,14 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import AnyUrl
 from mcp.client.auth import OAuthClientProvider
 from mcp.client.auth import oauth2 as _sdk_oauth2
-from mcp.client.auth.utils import issuers_match
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+    create_oauth_metadata_request,
+    handle_auth_metadata_response,
+    handle_protected_resource_response,
+    issuers_match,
+)
 # The ORIGINAL check, from the module we never patch. Taking it from `oauth2`'s attribute made the
 # shim capture itself when this module was re-imported, and recurse (full suite, 2026-09-24).
 from mcp.client.auth.utils import validate_metadata_issuer as _sdk_validate_metadata_issuer
@@ -40,6 +47,7 @@ from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
     OAuthClientMetadata,
+    OAuthMetadata,
     OAuthToken,
 )
 
@@ -161,7 +169,13 @@ def lock_refreshes(provider: OAuthClientProvider, server_url: str) -> OAuthClien
         latest = await provider.context.storage.get_tokens()
         if latest is not None and latest.refresh_token:
             provider.context.current_tokens = latest       # never spend a token someone else spent
-        return await build()
+        try:
+            return await build()
+        except BaseException:
+            # No request was built, so no response will ever come to free the lock (review C1):
+            # it stayed held and every other process waited out the thirty seconds.
+            _release()
+            raise
 
     async def handle_refresh_response(response):
         try:
@@ -173,6 +187,166 @@ def lock_refreshes(provider: OAuthClientProvider, server_url: str) -> OAuthClien
     provider._refresh_token = refresh_token  # type: ignore[method-assign]
     provider._handle_refresh_response = handle_refresh_response  # type: ignore[method-assign]
     provider._mcpgawk_refresh_lock = True  # type: ignore[attr-defined]  # our marker on the SDK object
+    return provider
+
+
+
+class RefreshEndpointUnknown(RuntimeError):
+    """Where a stored sign-in is refreshed could not be CONFIRMED, so nothing was sent.
+
+    Not `LoginNeeded`: the stored login may be perfectly good. A timeout or a 5xx while looking
+    up the sign-in server is a reason to try again, never a reason to sign in again."""
+
+
+#: The store's record of the authorisation server a sign-in went through.
+AS_METADATA_KEY = "as_metadata"
+DISCOVERY_TIMEOUT_S = 10.0
+
+
+def _stored_as_metadata(server_url: str) -> Optional[OAuthMetadata]:
+    raw = FileTokenStorage(server_url)._read().get(AS_METADATA_KEY)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        meta = OAuthMetadata.model_validate(raw)
+    except ValueError:
+        return None                                       # unreadable record: look it up instead
+    return meta if meta.token_endpoint else None
+
+
+async def _discover_as_metadata(provider: OAuthClientProvider,
+                                server_url: str) -> Optional[OAuthMetadata]:
+    """Look up the authorisation server for `server_url`, the way the SDK's sign-in does.
+
+    Three answers, and they are kept apart:
+      * found: its metadata;
+      * definitively absent (every candidate answered "not here"): None. The sign-in itself then
+        used `/token` on the MCP origin (the 2025-03-26 shape), so that is where a refresh belongs;
+      * could not tell (a timeout, a 5xx, a refused connection, metadata naming another issuer):
+        `RefreshEndpointUnknown`. Guessing here is what sent refresh tokens to the wrong party.
+
+    A plain client: no credentials attached, redirects not followed.
+    """
+    import httpx2
+
+    def unknown(why: str) -> RefreshEndpointUnknown:
+        return RefreshEndpointUnknown(
+            f"could not confirm where the stored sign-in for {server_url} is refreshed ({why}); "
+            f"nothing was sent. Try again; the stored sign-in is untouched.")
+
+    async with httpx2.AsyncClient(timeout=DISCOVERY_TIMEOUT_S, follow_redirects=False) as client:
+        async def get(url: str):
+            try:
+                return await client.send(create_oauth_metadata_request(url))
+            except httpx2.HTTPError as exc:
+                raise unknown(f"{url} did not answer: {type(exc).__name__}") from exc
+
+        auth_server: Optional[str] = None
+        failed: Optional[str] = None
+        for url in build_protected_resource_metadata_discovery_urls(None, server_url):
+            response = await get(url)
+            if response.status_code >= 500 or response.status_code == 429:
+                failed = f"{url} answered HTTP {response.status_code}"
+                continue
+            prm = await handle_protected_resource_response(response)
+            if prm:
+                try:
+                    await provider._validate_resource_match(prm)
+                except Exception as exc:  # noqa: BLE001 - the SDK's own refusal, any shape
+                    raise unknown(f"{url} describes a different resource") from exc
+                if prm.authorization_servers:
+                    auth_server = str(prm.authorization_servers[0])
+                break
+        else:
+            if failed is not None:
+                raise unknown(failed)
+
+        expected = auth_server or _sdk_oauth2._origin_issuer(server_url)
+        for url in build_oauth_authorization_server_metadata_discovery_urls(auth_server, server_url):
+            response = await get(url)
+            ok, meta = await handle_auth_metadata_response(response)
+            if not ok:
+                raise unknown(f"{url} answered HTTP {response.status_code}")
+            if meta is None:
+                continue
+            if auth_server is None and issuers_match(str(meta.issuer), expected):
+                expected = str(meta.issuer)
+            try:
+                _validate_metadata_issuer(meta, expected)
+            except Exception as exc:  # noqa: BLE001
+                raise unknown(f"{url} names a different issuer than {expected}") from exc
+            return meta
+    return None
+
+
+def know_the_token_endpoint(provider: OAuthClientProvider, server_url: str) -> OAuthClientProvider:
+    """A refresh goes to the server that issued the sign-in, never to a guess (review C1).
+
+    The SDK refreshes BEFORE it discovers anything; with no authorisation-server metadata in hand
+    it posts the refresh token, and a client secret if there is one, to `{MCP host}/token`. We never
+    stored that metadata, so every refresh from a stored login went there, whichever origin the
+    sign-in server is really on. Two halves:
+
+      * WRITE: whenever tokens are stored, the metadata the provider holds is stored with them
+        (inside the same write, so it cannot race a rotated refresh token);
+      * READ: before a refresh request is built, the stored record is loaded; a login stored
+        before this existed is looked up first (`_discover_as_metadata`).
+
+    Applied OUTSIDE `lock_refreshes`, so a lookup that fails never takes the per-server lock.
+    Every provider this package builds goes through here.
+    """
+    storage = provider.context.storage
+    if isinstance(storage, FileTokenStorage):
+        storage.metadata_source = lambda: provider.context.oauth_metadata
+    inner = provider._refresh_token
+
+    async def refresh_token():
+        ctx = provider.context
+        if ctx.oauth_metadata is None:
+            meta = _stored_as_metadata(server_url) or await _discover_as_metadata(provider, server_url)
+            recorded = getattr(ctx.client_info, "issuer", None) if ctx.client_info else None
+            if meta is not None and recorded and not issuers_match(str(recorded), str(meta.issuer)):
+                # The client was registered with a different sign-in server than the one named
+                # now. Its refresh token is not this server's to receive.
+                raise LoginNeeded(
+                    f"the sign-in server for {server_url} has changed since you signed in — sign "
+                    f"in again: mcpgawk scan --http {server_url} --login")
+            ctx.oauth_metadata = meta
+        return await inner()
+
+    provider._refresh_token = refresh_token  # type: ignore[method-assign]  # deliberate SDK wrap
+    return provider
+
+
+
+def _stored_expiry(doc: dict) -> float:
+    """When the stored access token expires: obtained-at plus its lifetime. A store with no stamp
+    gets 1.0, a POSITIVE instant in 1970 (the SDK reads zero as "unknown, so valid"): one refresh
+    before the first request, and the refresh response sets the real expiry from then on."""
+    obtained = doc.get("tokens_obtained_at")
+    expires_in = (doc.get("tokens") or {}).get("expires_in")
+    if isinstance(obtained, (int, float)) and isinstance(expires_in, (int, float)):
+        return float(obtained) + float(expires_in)
+    return 1.0
+
+
+def know_the_expiry(provider: OAuthClientProvider, server_url: str) -> OAuthClientProvider:
+    """Tell the SDK when the STORED token expires, for a provider that is not `refresh_only_provider`.
+
+    The SDK's `_initialize` loads tokens from storage and leaves the expiry unset, which reads as
+    valid for ever: the expired token is sent, the 401 goes to a browser flow, the refresh token
+    in the store is never used. The gateway's provider had exactly that (found 2026-11-14): after
+    the access token's lifetime it told the operator to sign in again. Only when a refresh token
+    is stored; without one there is nothing to refresh with and the token is sent as it is."""
+    inner = provider._initialize
+
+    async def initialize() -> None:
+        await inner()
+        doc = FileTokenStorage(server_url)._read()
+        if (doc.get("tokens") or {}).get("refresh_token"):
+            provider.context.token_expiry_time = _stored_expiry(doc)
+
+    provider._initialize = initialize  # type: ignore[method-assign]  # deliberate SDK wrap
     return provider
 
 
@@ -371,11 +545,30 @@ class FileTokenStorage:
         except OSError:
             pass                      # a directory we cannot narrow is not a reason to lose a login
         payload = _encrypt_doc(data)
-        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # A NEW file, then one rename over the old one (review I7, 2026-11-14). Rewriting in place
+        # truncated the store before writing it: a second process reading in that gap (a scan
+        # and the monitor share this file) got "no sign-in" and its own next write saved a
+        # document with no tokens, and a crash in the gap left the empty file. A reader now
+        # sees the old sign-in or the new one, never neither. O_EXCL and a per-process name: two
+        # writers never share a temporary file, and a leftover is never written through.
+        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
         try:
-            os.write(fd, payload)
-        finally:
-            os.close(fd)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            os.unlink(tmp)                        # our own leftover from a write that died
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         # O_CREAT honours the mode only when the file is NEW; an existing file keeps whatever mode
         # it already had, including a 0644 left behind by the old code path. Narrow it explicitly so
         # a store written before this fix is repaired the next time a token is refreshed.
@@ -408,6 +601,15 @@ class FileTokenStorage:
         # the same process; a token loaded from disk has no expiry and is treated as valid
         # forever — sent stale, 401, browser flow, never a refresh (notion, 2026-09-03).
         d["tokens_obtained_at"] = time.time()
+        # WHERE they were obtained (review C1): the authorisation server's metadata, in this same
+        # write. Without it the next process refreshes at a guess. A new sign-in that found none
+        # drops the old record: it described a different sign-in.
+        source = getattr(self, "metadata_source", None)
+        meta = source() if source is not None else None
+        if meta is not None and meta.token_endpoint:
+            d[AS_METADATA_KEY] = meta.model_dump(mode="json", exclude_none=True)
+        elif self._new_login:
+            d.pop(AS_METADATA_KEY, None)
         if self._new_login or not d.get("login_id"):
             # Back-filling an existing store is safe: `drift.compare` claims nothing when either
             # side lacks the field, so a store that gains its first id does not report a change.
@@ -554,11 +756,7 @@ def refresh_only_provider(server_url: str) -> Optional[OAuthClientProvider]:
     # first request (an expiry of 1.0 — a POSITIVE instant in 1970; the SDK reads a zero as
     # "unknown" and therefore valid): one cheap round trip, and the refresh response sets the
     # real expiry from then on.
-    obtained = doc.get("tokens_obtained_at")
-    expires_in = tokens.get("expires_in")
-    expiry = (float(obtained) + float(expires_in)
-              if isinstance(obtained, (int, float)) and isinstance(expires_in, (int, float))
-              else 1.0)
+    expiry = _stored_expiry(doc)
 
     class _KnowsExpiry(OAuthClientProvider):
         known_expiry: float | None = None
@@ -571,20 +769,37 @@ def refresh_only_provider(server_url: str) -> Optional[OAuthClientProvider]:
                             storage=storage, redirect_handler=_no_browser,
                             callback_handler=_no_callback)
     provider.known_expiry = expiry            # visible, so a test can pin the arithmetic
-    return lock_refreshes(_fit_auth_method_to_server(provider), server_url)
+    return know_the_token_endpoint(
+        lock_refreshes(_fit_auth_method_to_server(provider), server_url), server_url)
 
 
-def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientProvider, HTTPServer]:
-    """Construct an OAuthClientProvider that opens the system browser for approval and catches the
-    redirect on a local loopback port. Returns (provider, callback_server); the caller MUST call
-    server.shutdown() when the scan is done."""
-    _SdkFlowLog.last = None          # a stale reason must never explain a NEW flow's failure
-    captured: dict[str, Optional[str]] = {"code": None, "state": None, "iss": None, "error": None}
-    done = threading.Event()
+def _callback_handler(captured: dict, done: "threading.Event") -> type:
+    """The request handler for the local sign-in callback.
+
+    ONLY THE PROVIDER'S ANSWER ENDS THE WAIT (review C7, 2026-11-14): a redirect that carries a
+    `code`, or an `error`. Any request used to end it: a favicon fetch, a browser preconnect or
+    another page poking at localhost left the flow with an empty code and a tab saying "Sign-in
+    complete". Anything else now gets a 404 and the wait goes on. The first answer stands; a
+    later request cannot replace it. (Whether the `state` is ours is checked by the caller.)
+    """
+    import html as _html
 
     class _Handler(BaseHTTPRequestHandler):
+        def _page(self, status: int, heading: str, text: str) -> None:
+            body = (f"<html><body style='font:16px system-ui;padding:3rem'><h2>{_html.escape(heading)}"
+                    f"</h2><p>{_html.escape(text)}</p></body></html>").encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:  # noqa: N802
             qs = parse_qs(urlparse(self.path).query)
+            if done.is_set() or not (qs.get("code") or qs.get("error")):
+                self._page(404, "Not the sign-in answer.",
+                           "This address only receives the sign-in provider's redirect.")
+                return
             # A cancelled or malformed callback has no code. Recorded as EMPTY, not None: the
             # waiter checks for a value, and an absent one must read as "no code came back".
             captured["code"] = (qs.get("code") or [""])[0]
@@ -595,18 +810,29 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
             captured["iss"] = qs["iss"][0] if qs.get("iss") else None
             captured["error"] = " — ".join(v[0] for k in ("error", "error_description")
                                            if (v := qs.get(k))) or None
-            body = (b"<html><body style='font:16px system-ui;padding:3rem'>"
-                    b"<h2>Sign-in complete.</h2><p>You can close this tab and return to your terminal.</p>"
-                    b"</body></html>")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            if captured["error"]:
+                self._page(200, "Sign-in was not completed.",
+                           f"The provider answered: {captured['error']}. Return to your terminal.")
+            else:
+                self._page(200, "Sign-in complete.",
+                           "You can close this tab and return to your terminal.")
             done.set()
 
         def log_message(self, *args) -> None:  # silence default request logging
             pass
+
+    return _Handler
+
+
+def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientProvider, HTTPServer]:
+    """Construct an OAuthClientProvider that opens the system browser for approval and catches the
+    redirect on a local loopback port. Returns (provider, callback_server); the caller MUST call
+    server.shutdown() when the scan is done."""
+    _SdkFlowLog.last = None          # a stale reason must never explain a NEW flow's failure
+    captured: dict[str, Optional[str]] = {"code": None, "state": None, "iss": None, "error": None}
+    done = threading.Event()
+
+    _Handler = _callback_handler(captured, done)
 
     # A PRE-REGISTERED client (stored via store_preregistered_client) pins everything: its
     # redirect URI is registered with the provider and cannot move, so the callback binds that
@@ -706,4 +932,5 @@ def build_login_provider(server_url: str, scope: str = "") -> tuple[OAuthClientP
         # A pre-registered client already has its identity; everyone else offers the CIMD URL.
         client_metadata_url=None if _pre is not None else CLIENT_METADATA_URL,
     )
-    return lock_refreshes(_fit_auth_method_to_server(provider), server_url), server
+    return know_the_token_endpoint(
+        lock_refreshes(_fit_auth_method_to_server(provider), server_url), server_url), server

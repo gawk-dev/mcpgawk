@@ -129,6 +129,29 @@ const postForm = async (url, body) => {
         clearTimeout(timer);
     }
 };
+/**
+ * WHOSE licence is this? (review P12, 2026-11-12). Lemon Squeezy's validate endpoint answers for
+ * every store, so valid + active only proves the key is real SOMEWHERE: anyone can open a store and
+ * mint one. The same pin as the Python engine (src/gawk_platform/licensing.py _provenance_ok) and
+ * the site (site/api/_lib/products.js); tests/test_license_pins_agree.py keeps all three equal.
+ * store_id/product_id are read from `meta`, falling back to `license_key`, as licensing.py does.
+ * A response that cannot name its store is refused, never passed.
+ */
+export const EXPECTED_STORE_ID = 431133;
+export const EXPECTED_PRODUCT_ID = 1377799;
+function soldByUs(resp) {
+    const meta = (resp.meta ?? {});
+    const lk = (resp.license_key ?? {});
+    const field = (name) => (meta[name] === undefined ? lk[name] : meta[name]);
+    if (field("test_mode") === true)
+        return false;
+    for (const [want, name] of [[EXPECTED_STORE_ID, "store_id"], [EXPECTED_PRODUCT_ID, "product_id"]]) {
+        const got = field(name);
+        if (got === undefined || got === null || Number(got) !== want)
+            return false;
+    }
+    return true;
+}
 /** true/false on a real answer from Lemon Squeezy; null if it could not be reached. */
 async function validate(key, instanceId, post) {
     const body = { license_key: key };
@@ -144,7 +167,7 @@ async function validate(key, instanceId, post) {
     if (resp.valid !== true)
         return false;
     const lk = resp.license_key;
-    return (lk?.status ?? null) === "active";
+    return (lk?.status ?? null) === "active" && soldByUs(resp);
 }
 /**
  * Mirrors licensing.py::check_license_detailed, including its offline policy: fail OPEN inside a

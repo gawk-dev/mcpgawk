@@ -219,8 +219,13 @@ def test_the_right_token_does_approve(tmp_path, monkeypatch):
     """The gate must not be so tight it stops the human it exists to serve."""
     httpd, store_path = _live_server(tmp_path, monkeypatch)
     try:
+        # The pin of the version on screen, as the page's form carries it (review G10, 2026-11-12:
+        # an approve without it is refused, so a change landing after the page was drawn is never
+        # trusted unseen).
+        shown = str((history.last(json.loads(store_path.read_text()), "mcp:gitnexus") or {}).get("pin") or "")
+        assert shown, "the fixture's sighting carries no pin"
         assert _post(httpd.server_address[1],
-                     "token=GOOD-TOKEN&action=approve&key=mcp:gitnexus") == 303
+                     f"token=GOOD-TOKEN&action=approve&key=mcp:gitnexus&pin={shown}") == 303
         assert history.pending(json.loads(store_path.read_text())) == [], "approval did not land"
     finally:
         httpd.shutdown()

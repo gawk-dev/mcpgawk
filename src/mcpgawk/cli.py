@@ -20,7 +20,7 @@ import shlex
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
@@ -38,9 +38,40 @@ from .supplychain import check as check_supply_chain
 
 
 def _load_config(path: str) -> dict:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("mcpServers", data)
+    """The servers in a config FILE the person named. One shape is read: JSON with a top-level
+    `mcpServers` (or a bare object of servers). Anything else ends in a sentence and the usage
+    exit code: until 2026-11-15 a TOML or YAML agent config, or a path that does not exist, ended
+    in a JSONDecodeError / FileNotFoundError traceback, and our own docs sent people there."""
+    def refuse(why: str) -> NoReturn:
+        print(f"mcpgawk scan: {path} {why}.\n"
+              "  `scan <file>` reads a JSON config with a top-level `mcpServers`. To read every "
+              "agent's own config on this machine, whatever its format, run `mcpgawk scan` with "
+              "no file.", file=sys.stderr)
+        raise SystemExit(2)
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        refuse("does not exist")
+    except IsADirectoryError:
+        refuse("is a folder, not a config file")
+    except OSError as exc:
+        refuse(f"could not be read ({exc.strerror or type(exc).__name__})")
+    except ValueError:                             # JSONDecodeError and bad UTF-8 are both ValueError
+        refuse("is not JSON")
+    if not isinstance(data, dict):
+        refuse("is not a JSON object")
+    if "mcpServers" in data:
+        if not isinstance(data["mcpServers"], dict):
+            refuse("has a `mcpServers` that is not an object")
+        return data["mcpServers"]
+    # No `mcpServers`: the file may be a bare object of servers, each one an object. If it is
+    # anything else (Claude Code's ~/.claude.json with only project servers, a settings file),
+    # its keys are not servers; reading them as servers ended in an AttributeError.
+    if not data or not all(isinstance(v, dict) for v in data.values()):
+        refuse("has no top-level `mcpServers`")
+    return data
 
 
 def _consent_agents(entries: dict | None) -> list[str]:
@@ -313,6 +344,9 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
               "    mcpgawk scan --stdio \"npx -y <server>\"\n"
               "  Or point it at a config:  mcpgawk scan path/to/mcp.json",
               file=sys.stderr)
+        # Review N1: a config that exists but could not be read means there WAS something to
+        # measure. The exit code must say so; the lines above go to stderr, which CI never reads.
+        args._unreadable_sources = list(_discovery_problems(sources))
         return [], {}, []
     if is_discovery:
         for line in _discovery_problems(sources):
@@ -838,7 +872,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="The one screen a human is required for. Opens a LOCAL page showing each "
                     "server that changed since you trusted it, what changed, and lets you approve "
                     "or keep blocking. Read-only over your state until you click; approval needs "
-                    "the token printed here, so an agent cannot drive it.")
+                    "the token printed here, and mcpgawk refuses an approval when it can see "
+                    "an agent running it.")
     d.add_argument("--port", type=int, default=7717, help="local port (default: 7717)")
     d.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
@@ -846,9 +881,9 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="is anything watching, against what, and when did it last see something",
         description="One answer to 'am I protected'. Read-only — opens nothing, starts nothing. "
-                    "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
-                    "Claude Code only, so a single cheerful tick would tell a Cursor user they "
-                    "are covered when they are not.")
+                    "Coverage is reported PER AGENT, never in aggregate: only some agents have a "
+                    "hook point, so a single cheerful tick would tell the user of an agent "
+                    "without one that they are covered when they are not.")
     st.add_argument("--json", action="store_true",
                     help="the same facts as JSON (schema gawk.status/1), plus one row per server "
                          "with approval provenance, last sighting, tier and verify facts — for "
@@ -932,8 +967,9 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="run mcpgawk as an MCP server over stdio (what `mcpgawk-mcp` runs)",
         description="Run mcpgawk as an MCP server over stdio — the same server the `mcpgawk-mcp` "
-                    "console script starts. Read-only tools (scan_mcp_fleet, scan_mcp_server); "
-                    "no flags. Example client entry: `uvx mcpgawk mcp`.")
+                    "console script starts. Two tools (scan_mcp_fleet, scan_mcp_server); they can "
+                    "launch local servers when asked to, so they are not declared read-only. "
+                    "No flags. Example client entry: `uvx mcpgawk mcp`.")
 
     # DISCOVERY ONLY — these never reach argparse at runtime. `_dispatch` intercepts `verify` and
     # the account commands before the parser is built, because each owns its own flags and the free
@@ -1776,8 +1812,16 @@ def _run_platform_command(command: str, rest: list[str]) -> int:
 PLATFORM_CAPABILITIES = {
     "enforce": "guard a live server, call by call",
     "monitor": "watch a server for drift after you approved it",
-    "build": "generate a server from an OpenAPI spec (in development)",
 }
+
+#: Not offered at present (FOUNDER 2026-11-14: "remove it but try to fix it"). `build` is out of
+#: the help and out of the capability list; typing it says it is withdrawn, in one line. With the
+#: Platform installed the answer comes from there, which also holds the developer switch.
+WITHDRAWN_CAPABILITIES = {
+    "build": "generating an MCP server from an OpenAPI spec is withdrawn while it is being fixed. "
+             "It will return in a later release; nothing else in mcpgawk is affected.",
+}
+
 
 _PLATFORM_UNAVAILABLE = (
     "mcpgawk {cap}: {desc}.\n"
@@ -1798,6 +1842,10 @@ def _run_platform_capability(capability: str, rest: list[str]) -> int:
     try:
         from gawk_platform.cli import run_pillar
     except ImportError:
+        if capability in WITHDRAWN_CAPABILITIES:
+            # Not something a licence would unlock: say what it is, not where to buy.
+            print(f"mcpgawk {capability}: {WITHDRAWN_CAPABILITIES[capability]}", file=sys.stderr)
+            return 3
         print(
             _PLATFORM_UNAVAILABLE.format(capability=capability, cap=capability,
                                          desc=PLATFORM_CAPABILITIES[capability]),
@@ -2183,7 +2231,12 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
     current = drift.build_record(sn, m, measured_at=now)
     asserted = history.key_for(sn, target=alias)
     key = history.legacy_key_for(sn) if asserted in collided else asserted
-    store = history.load()
+    store, _store_err = history.load_checked(history.default_path())
+    if _store_err and os.path.exists(history.default_path()):
+        # Every recording path comes through here (the main pass and the batched sign-in pass):
+        # never record over a store that exists and cannot be read (review I2). The main pass
+        # says so once and fails the scan.
+        return None
     # `migrate_from` carries every key this server could already be recorded under — the legacy
     # `transport:name` variants (B3), the un-discriminated `mcp:<asserted>` from before the login
     # joined the identity, and `credential_shed_keys` for the reverse move made on 2026-08-27, when
@@ -2517,6 +2570,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return run_verify(raw[1:])
     if raw and raw[0] in PLATFORM_CAPABILITIES:
         return _run_platform_capability(raw[0], raw[1:])
+    if raw and raw[0] in WITHDRAWN_CAPABILITIES:
+        # The same hand-over as a paid capability (one import across the licence wall, not a
+        # second): with the Platform installed the answer comes from there.
+        return _run_platform_capability(raw[0], raw[1:])
     if raw and raw[0] in ACCOUNT_COMMANDS:
         return _run_account_command(raw[0], raw[1:])
     if raw and raw[0] in PLATFORM_COMMANDS:
@@ -2674,6 +2731,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # THE FLEET CHECK. Only on a discovery run — an explicit config or URL is not "your fleet".
     appeared, fleet_since = _appeared_this_run(args, entries, skipped)
     held_names: dict[str, str] = {}          # appeared name -> what happened to its baseline
+    store_unreadable: str | None = None      # review I2: set when the store exists but cannot be read
     if args.track:
         # Keying on the server's asserted identity (so a rename can't orphan a baseline) means two
         # config entries for the SAME server collapse onto one key. Left alone they overwrite each
@@ -2681,7 +2739,22 @@ def _dispatch(argv: list[str] | None = None) -> int:
         # run trains the user to ignore the one signal that matters. Where a scan sees a collision,
         # keep those entries distinct by their config identity instead.
         collided = _collisions(snaps)
-        for sn, m in zip(snaps, measurements):
+        # AN UNREADABLE STORE IS NOT AN EMPTY ONE (review I2, 2026-11-12). `record` loads through
+        # `history.load`, which reads a corrupt file as {}: every server then looked like a first
+        # sighting, its CURRENT tools became the approved baseline, drift was never reported and
+        # the scan exited 0. Checked once, before anything is written: nothing is recorded over a
+        # store that exists and cannot be read, and the scan fails.
+        _store_path = history.default_path()
+        _store_err = (history.load_checked(_store_path)[1]
+                      if os.path.exists(_store_path) else None)
+        if _store_err:
+            store_unreadable = _store_err
+            print(f"mcpgawk: the baseline store could not be read ({_store_err}). Nothing was "
+                  f"recorded: recording over it would make every server's current tools its new "
+                  f"baseline, and a change since your approval would never be reported. Restore "
+                  f"{_store_path} from its backup or .corrupt-* copy, then scan again.",
+                  file=sys.stderr)
+        for sn, m in (() if _store_err else zip(snaps, measurements)):
             seen_now = _record_sighting(sn, m, now=now, collided=collided,
                                         alias=_adhoc_name(sn.name, entries.get(sn.name)),
                                         hold=sn.name in appeared)
@@ -2739,6 +2812,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # would pass while the exit code says otherwise. Say plainly that no comparison
             # happened, so a consumer can distinguish "checked, clean" from "not checked".
             d["compared"] = rep.unreadable is None
+            # A forward MCP revision is a migration, not drift (DriftReport.protocol_migration);
+            # the fleet row needs the same answer the exit code used (review N5).
+            d["protocol_migration"] = rep.protocol_migration
             lab["x-mcpgawk"]["drift"] = d
         if lab["name"] in pin_notes:
             # The terminal says "nothing itemised changed, but <the pin was not checked>"; the
@@ -2765,7 +2841,24 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # ONE exit code for both output modes (see _scan_failed). `--json` used to `return 0`
     # unconditionally — so a failed probe or a detected rug-pull reported success to CI, the same
     # class of lie as a false CLEAN.
-    failed = _scan_failed(labels, drift_reports, reidentified) or bool(held_changes)
+    failed = (_scan_failed(labels, drift_reports, reidentified) or bool(held_changes)
+              or bool(store_unreadable))
+    # MEASURED NOTHING, WITH SOMETHING TO MEASURE (review N1, 2026-11-12). Consent skipped every
+    # server (CI: no terminal, no --yes) or the only config could not be read: `[]` and exit 0,
+    # which a CI gate reads as clean. Not a pass. A machine with no MCP config at all is still 0.
+    if not snaps and (skipped or getattr(args, "_unreadable_sources", None)):
+        failed = True
+        why = (f"{len(skipped)} server(s) were found but not launched (no consent: pass --yes "
+               f"to scan them non-interactively)" if skipped
+               else "a config exists but could not be read (see the lines above)")
+        print(f"mcpgawk: this scan measured nothing — {why}. Exiting non-zero: nothing here is "
+              f"a clean result.", file=sys.stderr)
+
+    # ONE exit rule for every output mode (review N7, 2026-11-12): the text view failed on a server
+    # that APPEARED since the fleet was approved, while --json and --fleet-json (what CI reads) did
+    # not, so the same fleet passed a CI gate and failed in the terminal.
+    if appeared:
+        failed = True
 
     if args.json:
         print(json.dumps(labels, indent=2))

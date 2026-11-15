@@ -65,16 +65,16 @@ request, used or not.
 
 ## Features
 
-- 🛑 **Block a changed tool before it runs** — `mcpgawk guard install` puts one pre-execution hook in
-  your agent's loop. The decision is local, in about 10ms, with nothing to sign in to. Works on **6 of
+- 🛑 **Block a changed tool before it runs** — running `mcpgawk` puts one pre-execution hook in the
+  loop of each agent on your machine that has a hook point (`mcpgawk guard install` does Claude Code alone). The decision is local, in about 10ms, with nothing to sign in to. Works on **6 of
   the 21 supported clients**; the rest have no hook point and are named, not glossed over.
 - 🧪 **Run it, don't just read it** — `mcpgawk verify` drives tools in a sandbox and reports what they
   did: exfiltration, SSRF, tool poisoning, secret leaks. The sandbox is a proxy by default, so it
   needs no Docker; Docker adds full container isolation when you have it. Safe mode drives only
   provably read-only tools, and every tool it skips is named as skipped.
 - 🧑‍⚖️ **Approval needs a person** — `mcpgawk decide` opens a local screen for what changed. The buttons
-  live on the tokened link printed in your terminal, so an agent that opened the page cannot approve
-  its own way past a block.
+  live on the tokened link printed in your terminal, and mcpgawk refuses an approval when it can see
+  an agent running it.
 - 🖥️ **One local panel** — `mcpgawk panel`: every server, every decision, every piece of evidence.
 - 📜 **The changelog no vendor publishes** — `mcpgawk changes` shows every change to a server's tool
   surface between the snapshots you have recorded: tools added or removed, input schemas widened,
@@ -85,7 +85,7 @@ request, used or not.
 - 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema, plus a
   trust-surface summary (% write, % exfil-capable, destructive-declared count) and an annotation-completeness
   score.
-- 📌 **Integrity pin + drift** — catch a server that silently rewrites its tools (`--track`).
+- 📌 **Integrity pin + drift** — catch a server that silently rewrites its tools. Every scan is recorded locally; `--no-track` skips it.
 - 🚩 **Bounded signals** — injection-shaped descriptions, cross-server shadowing, under-declaring Server Cards — pointers for a human, never verdicts.
 - 🔒 **Zero egress, by construction** — the measurement layers import no network library. Enforced by a test.
   Two checks are opt-in and make an explicit exception (see [Guarantees](#guarantees)): `--supply-chain` and
@@ -103,9 +103,9 @@ mcpgawk                              # finds every agent config on the machine i
 
 Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
 
-**Editor** (VS Code / Cursor): install **mcpgawk** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=gawk-dev.mcpgawk) or [Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
+**Editor** (VS Code / Cursor): install **mcpgawk** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=gawk-dev.mcpgawk) or [Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk). It is a sidebar panel: every MCP server configured across your AI tools, grouped by the tool it lives in, with what each one can reach and which need attention. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
 
-**CI** (GitHub Action): gate every PR on token budget / drift ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
+**CI** (GitHub Action): gate every PR on token budget, flagged signals and, with a committed baseline, a server that changed since you approved it ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
 ```yaml
 - uses: gawk-dev/mcpgawk@v1
   with: { config: mcp.json, max-tokens: 8000, fail-on-flagged: true }
@@ -117,7 +117,7 @@ Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
   you already approved does not get called.
 - **Before you add a server** — see what it costs and what it can do, before you trust it.
 - **When your agent feels slow or picks the wrong tool** — it's often MCP bloat (too many / too-heavy tools).
-- **On every PR** — the CI gate catches drift and creeping token cost.
+- **On every PR** — the CI gate catches creeping token cost and flagged signals, and, given a committed baseline, a server that changed since you approved it.
 - **If you *publish* an MCP server** — see what it costs your users and how it reads to a client, and fix it (usually one line per tool). Lean + well-annotated is a differentiator.
 
 ## Use
@@ -141,7 +141,8 @@ mcpgawk scan mcp.json                                              # a whole con
 mcpgawk scan --stdio "npx -y @modelcontextprotocol/server-filesystem@2026.8.31 /tmp"
 mcpgawk scan --http https://host/mcp --header "Authorization: Bearer $TOKEN"
 mcpgawk scan --sse  https://host/sse
-mcpgawk scan mcp.json --track                                     # record + detect rug-pulls over time
+mcpgawk scan mcp.json                                             # recorded locally: the next scan reports what changed
+mcpgawk scan mcp.json --no-track                                  # measure without recording
 mcpgawk scan mcp.json --json                                      # machine-readable labels
 mcpgawk scan mcp.json --verbose                                   # full per-tool table, not just flagged tools
 mcpgawk scan mcp.json --supply-chain                              # opt-in: npm/PyPI deprecation check (network)
@@ -168,8 +169,8 @@ never a value.
 - **Annotation completeness** — a transparent composite (annotated ÷ total tools declaring read/write
   intent), not a risk score.
 - **Coverage** — tools, prompts, and resources counted (`--verbose` for the full per-tool table).
-- **Integrity pin** — a hash that changes if the server silently rewrites its tools; `--track`
-  turns it into rug-pull detection over time.
+- **Integrity pin** — a hash that changes if the server silently rewrites its tools. Scans are
+  recorded locally by default, which turns it into rug-pull detection over time (`--no-track` skips it).
 - **Bounded signals** — precise, low-false-positive pointers *for a human to review*, never verdicts:
   injection-shaped descriptions (tools **and** prompts), cross-server name shadowing, and public
   Server Cards that under-declare what the server actually exposes.
@@ -180,7 +181,8 @@ never a value.
 ## Guarantees
 
 - **No inventory egress.** The only network is the protocol client talking to the server you point
-  it at. The measurement layers import no network library — they *cannot* egress by construction
+  it at, plus one anonymous request to PyPI about once a day asking whether a newer mcpgawk exists
+  (it says nothing about your servers; `MCPGAWK_NO_UPDATE_CHECK=1` turns it off). The measurement layers import no network library — they *cannot* egress by construction
   (enforced by a test). Public Server Card discovery is fetched with no auth and no redirect-following.
   Two flags are the explicit, opt-in exception: `--supply-chain` sends the launched package's name
   (and pinned version, if any) — never your tool inventory — to the public npm registry or PyPI JSON
@@ -200,15 +202,21 @@ uv run --extra dev --with mcp --with tiktoken --with httpx python -m pytest -q
 ## CI gate — GitHub Action
 
 Scan your MCP servers on every pull request and fail the build if one gets too heavy or trips a signal.
+Give it a committed copy of your approvals and it also fails when a server changed since that copy, or is not in it.
 It runs entirely in your runner — nothing is uploaded — and posts a per-server cost/flag table to the job summary.
 
 ```yaml
 - uses: gawk-dev/mcpgawk@v1
   with:
-    config: mcp.json        # or: stdio / http / sse — a single server
+    config: mcp.json        # local (stdio) servers named in it are started on the runner
+                            # or: stdio / http / sse — a single server
+    baseline: mcpgawk-baseline.json   # optional: a committed copy of your ~/.mcpgawk/history.json
     max-tokens: 8000        # fail if any server loads more than this at connect
     fail-on-flagged: true   # fail if any bounded signal fires
 ```
+
+Without `baseline` there is nothing to compare against, so changes are not checked. The baseline file is
+only read. It records your server names and who approved them, so commit it only where that is fine to share.
 
 Available on the [GitHub Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate).
 
@@ -235,5 +243,4 @@ Let your coding agent run the checks itself — whenever it adds, upgrades or au
 mkdir -p ~/.claude/skills && cp -r plugin/skills/mcpgawk ~/.claude/skills/mcpgawk
 ```
 
-The skill teaches the agent to measure a server BEFORE trusting it, audit an MCP-2 upgrade as a
-baseline diff instead of blind re-trust, and relay every consent prompt to you verbatim.
+The skill teaches the agent to measure a server BEFORE trusting it and relay every consent prompt to you verbatim.

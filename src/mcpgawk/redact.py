@@ -53,7 +53,10 @@ PLACEHOLDER = "[REDACTED]"
 
 #: Credential shapes. Each is anchored on a structure a secret has and prose does not.
 _SECRETS = [
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    # THE WHOLE BLOCK (review R5/P2, 2026-11-12): BEGIN line, body, END line; or, when the text was
+    # cut before END, the rest of the body (with any JSON \\n escapes). Matching the BEGIN line
+    # alone printed "[REDACTED]" followed by the full key.
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s\\]*)"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                    # AWS access key id
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),                          # GitHub tokens
     # Vendor-prefixed API keys. Hyphens/underscores are allowed INSIDE the body ("sk-live-…",
@@ -119,6 +122,12 @@ def register_value(value: str) -> None:
         _ALL.append(pattern)
 
 
+#: A JSON-shaped Authorization value (review P9, 2026-11-12): `authorization\s*:` never matched
+#: `"Authorization": "Bearer …"` (the closing quote sits between the name and the colon), on all
+#: three runtimes. The key and its quotes stay, so the JSON stays JSON; only the credential goes.
+_AUTH_JSON_VALUE = re.compile(r"(?i)(\bauthorization[\"']\s*:\s*[\"'])(?:bearer|basic)\s+[^\s\"']+")
+
+
 def redact(text: str | None) -> str | None:
     """Replace credential and PII shapes with a placeholder. ``None`` in, ``None`` out.
 
@@ -127,6 +136,7 @@ def redact(text: str | None) -> str | None:
     """
     if text is None:
         return None
+    text = _AUTH_JSON_VALUE.sub(lambda m: m.group(1) + PLACEHOLDER, text)
     for pattern in _ALL:
         text = pattern.sub(PLACEHOLDER, text)
     return text
@@ -186,7 +196,40 @@ def redact_urls_in_text(text: str | None) -> str | None:
     """
     if not text:
         return text
-    return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)) or m.group(0), text)
+    return _URL_IN_TEXT.sub(lambda m: redact_url_for_display(m.group(0)) or m.group(0), text)
+
+
+def redact_url_for_display(url: str | None) -> str | None:
+    """`redact_url` plus a token carried in the URL's PATH: the form for a URL that is SHOWN.
+
+    Review N19 follow-up (2026-11-13): the free-text masker handled a path token, but the display
+    surfaces that build a URL another way (the probe's candidate label, `/api/state`) printed it.
+    NEVER for a URL that is USED or STORED: history keys (`adhoc_target`) would re-key and could
+    merge two servers whose paths differ only by the token, and the fleet JSON `url` is what the
+    VS Code extension signs in with. A path segment is masked by shape, and a tenant id has the
+    same shape as a key."""
+    if not url:
+        return url
+    return _mask_path_secrets(redact_url(url) or url)
+
+
+def _looks_like_path_secret(segment: str) -> bool:
+    return (len(segment) >= 24 and re.fullmatch(r"[A-Za-z0-9_-]+", segment) is not None
+            and re.search(r"\d", segment) is not None and re.search(r"[A-Za-z]", segment) is not None)
+
+
+def _mask_path_secrets(url: str) -> str:
+    """A token carried in a URL's PATH (`https://host/<32-hex>/sse`), masked for free text (review
+    N19, 2026-11-12). Not in `redact_url`: it also builds history keys, and masking there would
+    re-key stored servers and could merge two whose paths differ only by the token."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    segs = parts.path.split("/")
+    masked = ["***" if _looks_like_path_secret(s) else s for s in segs]
+    return url if masked == segs else urlunsplit(parts._replace(path="/".join(masked)))
 
 
 def redact_ident(value: str) -> str:
