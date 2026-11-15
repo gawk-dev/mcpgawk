@@ -17,6 +17,7 @@
 [![Open VSX](https://img.shields.io/open-vsx/v/gawk-dev/mcpgawk?label=VS%20Code%20%2F%20Cursor)](https://open-vsx.org/extension/gawk-dev/mcpgawk)
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-C8401F?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
 [![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
+[![MCPGawk on StartupScores](https://startupscores.com/badge/mcpgawk.svg?style=shield&v=combo&theme=dark)](https://startupscores.com/open-source/mcpgawk)
 
 Your agents call [Model Context Protocol](https://modelcontextprotocol.io) servers that can
 change what their tools do *after* you approved them, and the agent will call the new one without
