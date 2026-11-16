@@ -1,7 +1,7 @@
 {
   "name": "mcpgawk",
-  "description": "One checkpoint between your agent and its MCP servers: a tool that changed after you approved it is refused until you decide. Your inventory stays on your machine.",
-  "version": "0.1.90",
+  "description": "Catches an MCP server that changed after you approved it, and holds the call before your agent runs it. Your inventory stays on your machine.",
+  "version": "0.1.91",
   "author": {
     "name": "Nativerse",
     "email": "hello@nativerse-ventures.com"

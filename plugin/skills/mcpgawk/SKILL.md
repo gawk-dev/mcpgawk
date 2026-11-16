@@ -7,8 +7,14 @@ description: Be told when an MCP server changes after you approved it, and refus
 
 mcpgawk is a local CLI. It records what each MCP tool said when the user approved it, reports any
 change after that, and with the guard installed it refuses a call to a changed tool before it runs.
-State lives in `~/.mcpgawk` and `~/.gawk`, on this machine. mcpgawk connects out only for its
-PyPI version check, `--supply-chain` lookups, `install-node`, `login` and `push`.
+State lives in `~/.mcpgawk` and `~/.gawk`, on this machine. mcpgawk connects out only to: the
+servers it scans (and their sign-in pages, when the user asks to sign in), each scanned server's
+public Server Card, PyPI about once a day for a version check (`MCPGAWK_NO_UPDATE_CHECK=1` turns it
+off), the npm registry or PyPI with `--supply-chain`, nodejs.org with `install-node`, mcp.gawk.dev
+with `login` (which also downloads the paid engine from a short-lived signed link), Lemon Squeezy
+to check a paid key (at login, then about once a day), your hosted fleet view with `push`, and a
+URL you pass to `verify --webhook`. Those are the free CLI's connections; the paid engine's
+gateway and monitor also reach the servers and destinations you configure for them.
 
 Install once (ask before running an installer):
 
@@ -17,12 +23,12 @@ Install once (ask before running an installer):
 
 ## Rules for you, the agent
 
-1. **Never run `mcpgawk approve` or `mcpgawk decide`.** Both refuse to run inside an agent session,
-   on purpose: accepting a changed tool surface is the person's decision. Print the exact command
-   and let the user run it in their own terminal.
+1. **Never run `mcpgawk approve` or `mcpgawk decide`.** Both refuse when they can see an agent
+   running them, on purpose: accepting a changed tool surface is the person's decision. Print the
+   exact command and let the user run it in their own terminal.
 2. Relay consent questions verbatim. A bare `mcpgawk` asks before it launches a local server;
-   `mcpgawk verify` launches servers in a sandbox and says so. Do not answer for the user, and
-   never add `--yes` (it skips that prompt; scanning a stdio server runs its code) unless the user
+   `mcpgawk verify` launches local servers too, and says what its sandbox covers. Do not answer for
+   the user, and never add `--yes` (it skips that prompt; scanning a stdio server runs its code) unless the user
    has told you to in this conversation.
 3. Report coverage statements exactly as printed. mcpgawk distinguishes "clean" from "not checked";
    that distinction is the point. Never summarise a partial picture as a clean one.
@@ -46,8 +52,11 @@ hand over the approval:
 
 ## When the user asks what their servers can do, or what they cost
 
-    mcpgawk                                      # every server in every agent config on this machine
+    mcpgawk scan --fleet-json                    # every server in every agent config on this machine
     mcpgawk panel                                # the local control panel (a tokened 127.0.0.1 URL)
+
+`scan --fleet-json` answers the question and installs no hooks. Do not run a bare `mcpgawk` for a
+read-only question: it also writes the guard hook into each agent's config (next section).
 
 ## When a server updates, or the user suspects it changed
 
@@ -61,19 +70,29 @@ stays flagged until the user decides.
 
 ## When the user wants the refusal to happen automatically
 
-    mcpgawk guard install                        # one pre-execution hook; checks every MCP tool call
+    mcpgawk                                      # scans, then adds the guard hook to each agent it finds
     mcpgawk guard status
 
-Six clients expose a hook point today (Claude Code, Codex, Cursor, Gemini CLI, Windsurf, Kimi); the
-docs list the rest and what covers them. After install, a tool that changed since approval, or a
-tool that appeared after approval, is refused at call time with a reason the agent can read.
+Six clients expose a hook point today (Claude Code, Codex, Cursor, Gemini CLI, Windsurf, Kimi). A
+bare `mcpgawk` writes a pre-execution hook into the config of each of those it finds on this
+machine (`~/.claude/settings.json`, `~/.cursor/hooks.json`, `~/.codex/hooks.json`,
+`~/.gemini/settings.json`, `~/.kimi/config.toml`, `~/.codeium/windsurf/hooks.json`), keeping any
+hooks already there. Say that before you run it. `mcpgawk guard install` adds the hook to Claude
+Code only. The docs list the other clients and what covers them. With the hook in place, a tool
+that changed since approval, or a tool that appeared after approval, is refused at call time with a
+reason the agent can read.
 
 ## When the user wants behaviour, not declarations
 
-    mcpgawk verify <config.json>                 # runs local servers in a no-egress sandbox and watches
+    mcpgawk verify <config.json>                 # drives the tools and reports what they did
 
+By default verify watches local servers' outbound HTTP(S) through a proxy; raw-socket, DNS and UDP
+traffic is not observed. `--isolate` runs the checks in a Docker container that blocks raw-socket,
+DNS and UDP traffic; it needs Docker and falls back to the proxy, with a warning, without it. In
+every mode, `--isolate` included, each local server is first started once outside the sandbox, to
+list its tools.
 Remote (http/sse) servers cannot be sandboxed; verify says so and runs output checks only. Report
-that limit as printed.
+every limit as printed in the run's coverage lines.
 
 ## Try it on a server that changes on purpose
 
