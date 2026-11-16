@@ -1,5 +1,5 @@
 name: 'mcpgawk MCP hygiene gate'
-description: 'Fail the build when an MCP server cannot be scanned, costs too much context, or, given your committed baseline, has changed since you approved it. Runs on the runner; nothing is uploaded.'
+description: 'Fail the build when an MCP server cannot be scanned, costs too much context, or, given your committed baseline, has changed since you approved it. Runs on the runner; your inventory stays on the runner.'
 author: 'Nativerse Ventures'
 branding:
   icon: 'shield'

@@ -157,7 +157,7 @@ def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) 
         lines.append(f"| {name} | {tools} | {tokens:,} | {nsig} | {icon} {status} |")
     if max_tokens:
         lines.append(f"\nToken budget: **{max_tokens:,}** per server.")
-    lines.append("\n_Measured locally by mcpgawk — nothing left the runner._")
+    lines.append("\n_Measured on the runner by mcpgawk; no scan result was uploaded._")
     summary = "\n".join(lines)
 
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")

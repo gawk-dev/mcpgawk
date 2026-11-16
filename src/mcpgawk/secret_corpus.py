@@ -78,6 +78,12 @@ SECRET_SIGNATURES: list[tuple[str, re.Pattern[str]]] = [
                                               r"|[A-Za-z0-9+/=\s\\]*)")),
     ("JSON Web Token",             re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
     ("basic-auth URL",             re.compile(r"https?://[^/\s:@]+:[^/\s:@]{3,}@[^/\s]+")),
+    # --- our own ---
+    # mcpgawk trial key, both shapes: `gawk-beta.<body>.<32 hex>` and the site-signed
+    # `gawk-beta.<body>.<96 hex>.<32 hex>` (review C9). Found 2026-11-15: a trial key standing
+    # alone in a tool's output (no `key=` before it) passed every redactor, so the verify audit log
+    # and the drift store would keep it. The body never contains a dot or whitespace.
+    ("mcpgawk trial key",          re.compile(r"\bgawk-beta\.[^\s.'\"]+(?:\.[0-9a-f]{96})?\.[0-9a-f]{32}\b")),
 ]
 
 

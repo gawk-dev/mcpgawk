@@ -103,5 +103,7 @@ export const SECRET_SIGNATURES = [
     /\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b/g,
     // basic-auth URL
     /https?:\/\/[^\/\s:@]+:[^\/\s:@]{3,}@[^\/\s]+/g,
+    // mcpgawk trial key
+    /\bgawk-beta\.[^\s.'\"]+(?:\.[0-9a-f]{96})?\.[0-9a-f]{32}\b/g,
 ];
 //# sourceMappingURL=secret-signatures.js.map
