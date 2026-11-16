@@ -152,11 +152,13 @@ def test_a_dead_panel_is_said_on_the_page_not_discovered_by_clicking():
     assert "mcpgawk panel" in js, "the notice must name the way back, not just the failure"
 
 
-def test_a_synchronous_action_reports_under_its_own_label_and_clears_stale_state():
+def test_a_synchronous_action_reports_under_its_own_label_and_clears_stale_state(monkeypatch):
     """Driven live 2026-08-14: after a kite sign-in, 'Start monitoring' reported its result under
     the headline 'login-configure · __nosuch__' with a stale 'Open the sign-in page' link riding
     the banner. A banner that mixes two actions' state is wrong twice at once."""
     import mcpgawk.panel as panel
+    import mcpgawk.status as _status
+    monkeypatch.setattr(_status, "hold_state_here", lambda: "none")
 
     url, token, port = _serve_in_thread(panel.serve)
     panel._ACTION.update(running=False, label="login · kite", message="old",
@@ -167,6 +169,7 @@ def test_a_synchronous_action_reports_under_its_own_label_and_clears_stale_state
         pass
     with _get(url) as r:
         page = r.read().decode()
-    assert "keep blocked" in page, "the action's own label is missing from the banner"
-    assert "Left blocked" in page, "the action's own message is missing"
+    assert "keep waiting" in page, "the action's own label is missing from the banner"
+    # The message follows the hook (status.KEEP_WORDS); the hold state is pinned above.
+    assert "Left waiting. No guard hook" in page, "the action's own message is missing"
     assert "stale.example" not in page, "the previous action's sign-in link rode this banner"

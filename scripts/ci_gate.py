@@ -78,7 +78,12 @@ def main() -> int:
         # either way). The scan records what it sees, so a key that is new afterwards is a server
         # nobody approved.
         unapproved = sorted(_server_keys(copy) - approved_before) if baseline else []
-    return _judge(proc, unapproved, max_tokens, fail_on_flagged)
+        # Read the names each new key answers to while the copy still exists: the scan keys a
+        # server by the name it asserts (`mcp:toy-fixture`), the summary table by its config name
+        # (`mail`). Without this the gate failed the build and still showed that row as ok
+        # (real drive, 2026-11-16).
+        aliases = _aliases(copy, unapproved)
+    return _judge(proc, unapproved, max_tokens, fail_on_flagged, aliases)
 
 
 def _server_keys(path: str) -> set[str]:
@@ -90,7 +95,26 @@ def _server_keys(path: str) -> set[str]:
     return set(servers) if isinstance(servers, dict) else set()
 
 
-def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) -> int:
+def _aliases(path: str, keys: list[str]) -> dict[str, set[str]]:
+    """Every name each key answers to: its recorded aliases, and the asserted name after `mcp:`."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            servers = json.load(fh).get("servers")
+    except (OSError, ValueError, AttributeError):
+        servers = None
+    servers = servers if isinstance(servers, dict) else {}
+    out: dict[str, set[str]] = {}
+    for key in keys:
+        names = {key, key.split(":", 1)[1] if ":" in key else key}
+        entry = servers.get(key)
+        if isinstance(entry, dict):
+            names.update(a for a in (entry.get("aliases") or []) if isinstance(a, str))
+        out[key] = names
+    return out
+
+
+def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool,
+           aliases: dict[str, set[str]] | None = None) -> int:
     match = re.search(r"(\[.*\]|\{.*\})", proc.stdout, re.S)
     if not match:
         print("::error::mcpgawk-action: no JSON label produced by the scan.")
@@ -116,9 +140,16 @@ def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) 
     if unapproved:
         failures.append(f"{len(unapproved)} server(s) are not in your baseline and have never "
                         f"been approved: {', '.join(unapproved)}")
+    aliases = aliases if aliases is not None else {k: {k} for k in unapproved}
+    unmatched = set(unapproved)
     for server in servers:
         x = server.get("x-mcpgawk", {}) or {}
         name = server.get("name", "?")
+        info = server.get("serverInfo") if isinstance(server.get("serverInfo"), dict) else {}
+        asserted = info.get("name")
+        not_approved = [k for k in unapproved
+                        if name in aliases.get(k, {k}) or (asserted and f"mcp:{asserted}" == k)]
+        unmatched.difference_update(not_approved)
         tokens = int(x.get("cost_index_tokens", 0) or 0)
         tools = int(x.get("tool_count", 0) or 0)
         signals = x.get("bounded_signals") or []
@@ -144,7 +175,12 @@ def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) 
         if fail_on_flagged and nsig:
             failures.append(f"{name}: {nsig} bounded signal(s) — review them")
             status = "flagged" if status == "ok" else status
+        if not_approved and status == "ok":
+            status = "not in baseline"
         rows.append((name, tools, tokens, nsig, status))
+    for key in sorted(unmatched):
+        # A server the baseline check failed that no row above names: it still gets a red row.
+        rows.append((key, "?", "?", "?", "not in baseline"))
 
     lines = [
         "## mcpgawk — MCP hygiene gate",
@@ -154,9 +190,15 @@ def _judge(proc, unapproved: list[str], max_tokens: int, fail_on_flagged: bool) 
     ]
     for name, tools, tokens, nsig, status in rows:
         icon = "✅" if status == "ok" else "❌"
-        lines.append(f"| {name} | {tools} | {tokens:,} | {nsig} | {icon} {status} |")
+        shown = f"{tokens:,}" if isinstance(tokens, int) else tokens
+        lines.append(f"| {name} | {tools} | {shown} | {nsig} | {icon} {status} |")
     if max_tokens:
         lines.append(f"\nToken budget: **{max_tokens:,}** per server.")
+    if failures:
+        # The reasons go in the summary too: a run-level failure (a scan that did not complete)
+        # leaves every row green, and the log is not what a reviewer reads.
+        lines.append("\n**mcpgawk gate: failed**\n")
+        lines.extend(f"- {failure}" for failure in failures)
     lines.append("\n_Measured on the runner by mcpgawk; no scan result was uploaded._")
     summary = "\n".join(lines)
 

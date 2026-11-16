@@ -7,8 +7,9 @@ export declare function run(argv: readonly string[], log?: (message?: any, ...op
  *
  * DERIVED from `summary.status` via {@link exitCodeForStatus} — never computed independently. Until
  * 2026-08-02 this function re-derived its own answer from a different set of fields, so `incomplete`
- * could exit 0 and `clean` could exit 2: no single output field was trustworthy alone. `actionable`
- * (findings OR baseline drift) is the one input `status` cannot see, and it only ever escalates. */
+ * could exit 0 and `clean` could exit 2: no single output field was trustworthy alone. Drift has
+ * been part of `status` since 0.1.91 (`at-risk`, report.ts `withDrift`), so `actionable` (findings
+ * OR baseline drift) now agrees with it; it is kept as a guard and only ever escalates. */
 export declare function exitCode(report: VerificationReport, actionable: boolean): number;
 /** The undeclared-egress cluster for the terminal, grouped by host and ordered ANOMALY-FIRST (a host
  * reached by the fewest tools ranks first). See {@link groupEgressByHost} for the rationale. */

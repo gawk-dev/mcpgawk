@@ -592,12 +592,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="gawk at an MCP server before you trust it",
         epilog=(
             "Free, and included here:\n"
+            "  guard     the agent hook: checks each MCP call against the baseline you approved\n"
             "  verify    run a server in a sandbox and watch what it actually does\n"
             "  decide    review and approve servers that changed since you trusted them\n\n"
             "mcpgawk Platform — continuous protection (https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
             + "Run `mcpgawk <capability>` once subscribed. Scanning, behavioural verification\n"
-            + "and the runtime guard stay free and open-source.\n\n"
+            + "and the guard hook stay free and open-source.\n\n"
             + "Your subscription:\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in ACCOUNT_COMMANDS.items())
         ),
@@ -743,7 +744,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="accept a server's current tools as the trusted baseline (clears DRIFT)",
                        description="Accept a server's current tools as the baseline you trust. "
                                    "Until you do, a tool that appeared after the last baseline is "
-                                   "treated as drift and its calls are blocked. Run it with no "
+                                   "treated as drift, and its calls are held where the guard hook "
+                                   "is installed. Run it with no "
                                    "server name to see what is waiting.")
     a.add_argument("server", nargs="?",
                    help="the server name as it appears in your config, or its asserted identity")
@@ -788,9 +790,10 @@ def build_parser() -> argparse.ArgumentParser:
         "guard",
         help="install a Claude Code hook that checks MCP tool calls against your approved baseline",
         description=(
-            "Puts the approved baseline in your agent's loop. A single PreToolUse hook, installed "
-            "once, checks every MCP tool call — no per-server rewiring and no proxy. The decision "
-            "is made locally in ~10ms; nothing is uploaded and there is nothing to sign in to."
+            "Puts the approved baseline in Claude Code's loop. A single PreToolUse hook, installed "
+            "once, checks each MCP tool call before it runs — no per-server rewiring and no proxy. "
+            "The decision is made on your machine, and there is nothing to sign in to. For all six "
+            "agents with a hook point, run `mcpgawk` with no arguments."
         ),
     )
     g.add_argument("action", nargs="?", default="status",
@@ -871,7 +874,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="review and decide on servers that changed after you approved them (opens locally)",
         description="The one screen a human is required for. Opens a LOCAL page showing each "
                     "server that changed since you trusted it, what changed, and lets you approve "
-                    "or keep blocking. Read-only over your state until you click; approval needs "
+                    "or keep it waiting (its calls held where the guard hook is installed). "
+                    "Read-only over your state until you click; approval needs "
                     "the token printed here, and mcpgawk refuses an approval when it can see "
                     "an agent running it.")
     d.add_argument("--port", type=int, default=7717, help="local port (default: 7717)")
@@ -934,8 +938,8 @@ def build_parser() -> argparse.ArgumentParser:
         "runs",
         help="what has run on this machine, and how it went",
         description=(
-            "Your local run history — scans, and (with mcpgawk Platform) verify, enforce and monitor "
-            "runs, newest first. Read from ~/.mcpgawk/runs.db; nothing is uploaded anywhere. "
+            "Your local run history — scans and verify runs, and (with mcpgawk Platform) enforce "
+            "and monitor runs, newest first. Read from ~/.mcpgawk/runs.db, on your machine. "
             "A run that never closed shows as RUNNING, and as INCOMPLETE once its process is gone "
             "— it is never reported as success."
         ),
@@ -1325,10 +1329,13 @@ def _changes(args) -> int:
     for f in found:
         when = str(f["curr"].get("measured_at") or "?")[:16].replace("T", " ")
         before = str(f["prev"].get("measured_at") or "?")[:16].replace("T", " ")
-        head = f"\n    ⟳ {when}  {f['name']} changed  (previous snapshot {before}):"
+        # The blank line is printed HERE, not carried in `head`: render passes every line through
+        # the one-line sanitiser, which shows a newline as `?` (0.1.90 walk, 2026-11-16).
+        head = f"    ⟳ {when}  {f['name']} changed  (previous snapshot {before}):"
         # Each tools-only block already carries its own "(prompts/resources were not
         # fingerprinted in the earlier snapshot)" line from `render`; the footer is for the
         # no-change path, where there is no block to carry it.
+        print()
         print(drift.render(f["name"], f["report"], head=head))
     return 0
 
@@ -1407,7 +1414,7 @@ def _approve(args) -> int:
                 print(f"    mcpgawk approve {shlex.quote(key)}")
             print()
         if not waiting and (appeared or unsigned):
-            return 0 if args.list else 1
+            return 0   # bare `approve` lists, as `--list` does: listing is not a failure
         if not waiting:
             if _store_err:
                 print("Nothing to compare — the approval store is unreadable, so whether anything "
@@ -1427,7 +1434,7 @@ def _approve(args) -> int:
             print(f"    mcpgawk approve {shlex.quote(key)}")
         if len(waiting) > 1:
             print("    or all of them: mcpgawk approve --all")
-        return 0 if args.list else 1
+        return 0   # same exit as `--list` (0.1.90 walk, 2026-11-16)
 
     targets = (waiting + unsigned) if args.all else [k for k in [history.resolve(store, args.server)]
                                                      if k]
@@ -1477,6 +1484,19 @@ def _approval_signer(path: str | None) -> "tuple[Any, int | None]":
     return (None, 4) if refused else (signer, None)
 
 
+def _refuse_words() -> str:
+    """What happens to calls to an unsigned server, by whether a guard hook is installed here
+    (status.REFUSE_WORDS). "The agent hook refuses" was printed on machines with no hook."""
+    from .status import REFUSE_WORDS, hold_state_here
+    return REFUSE_WORDS[hold_state_here()]
+
+
+def _hold_words() -> str:
+    """status.HOLD_WORDS for this machine, "until you decide" said as "until you approve"."""
+    from .status import HOLD_WORDS, hold_state_here
+    return HOLD_WORDS[hold_state_here()].replace("until you decide", "until you approve")
+
+
 def _approvals(args) -> int:
     """`mcpgawk approvals lock|status` — the approval passphrase and the root-owned anchor."""
     from . import approval_lock as al
@@ -1490,7 +1510,7 @@ def _approvals(args) -> int:
             print(f"LOCKED — approvals on this machine need your passphrase (anchor: {anchor.path}).")
             if unsigned:
                 print(f"{len(unsigned)} server(s) hold a baseline with no valid signature, so "
-                      f"the agent hook refuses calls to them; `mcpgawk approve --list` names them.")
+                      f"{_refuse_words()}; `mcpgawk approve --list` names them.")
             by_name = history.name_only_approvals(store)
             if by_name:
                 print(f"{len(by_name)} server(s) allowed by name only, their tools NOT checked: "
@@ -1574,28 +1594,29 @@ def _approvals(args) -> int:
     never = [k for k in pending if k not in unsigned]
     if never:
         print(f"\n{len(never)} server(s) were never approved — mcpgawk took their baseline when it "
-              f"first saw them. Until you approve them, the agent hook refuses your agents' calls "
-              f"to them. Review each, then `mcpgawk approve <server>`:")
+              f"first saw them. Until you approve them, {_refuse_words()}. Review each, then "
+              f"`mcpgawk approve <server>`:")
         for key in never:
             print(f"    {history.display_name(store, key)} ({key})")
     if not unsigned:
         return 0
     print(f"\n{len(unsigned)} server(s) you approved before the lock. Until they are signed, "
-          f"the agent hook refuses your agents' calls to them:")
+          f"{_refuse_words()}:")
     for key in unsigned:
         print(f"    {history.display_name(store, key)} ({key})")
     try:
         if al.ask("Sign these approvals now, as they stand? [y/N] ").lower() not in ("y", "yes"):
-            print("Left unsigned — the agent hook refuses calls to them. `mcpgawk approve --list` names them.")
+            print(f"Left unsigned — {_refuse_words()}. `mcpgawk approve --list` names them.")
             return 0
         signer = al.unlock(al.read_passphrase("Approval passphrase: "), path)
     except al.NoTerminal:
-        print("Left unsigned (no terminal) — the agent hook refuses calls to them. `mcpgawk approve --list` "
+        print(f"Left unsigned (no terminal) — {_refuse_words()}. `mcpgawk approve --list` "
               "names them.")
         return 0
     except (al.WrongPassphrase, al.NotTheAnchoredKey) as exc:
-        print(f"Left unsigned — {exc}. The agent hook refuses calls to them; `mcpgawk approve --list` names "
-              f"them.", file=sys.stderr)
+        _rw = _refuse_words()
+        print(f"Left unsigned — {exc}. {_rw[0].upper()}{_rw[1:]}; "
+              f"`mcpgawk approve --list` names them.", file=sys.stderr)
         return 1
     signed = history.sign_approvals(unsigned, signer, path)
     print(f"✓ signed {len(signed)} approval{'s' if len(signed) != 1 else ''}.")
@@ -1748,6 +1769,17 @@ _ACCOUNT_NEEDS_PLATFORM = (
 )
 
 
+def _absent_help(command: str, rest: list[str], refusal: str) -> bool:
+    """`<paid command> --help` on a free install: usage and the same explanation, on STDOUT, exit
+    0. Help is help even where the command is absent; a real invocation still gets the refusal
+    and exit 3 (0.1.90 walk, 2026-11-16: `logout --help` and `push --help` exited 3)."""
+    head = rest[:rest.index("--")] if "--" in rest else rest
+    if "-h" not in head and "--help" not in head:
+        return False
+    print(f"usage: mcpgawk {command} ...\n\n{refusal}")
+    return True
+
+
 def _run_account_command(command: str, rest: list[str]) -> int:
     """Delegate an account command to mcpgawk Platform, or explain honestly that it isn't here.
 
@@ -1769,6 +1801,8 @@ def _run_account_command(command: str, rest: list[str]) -> int:
                 return 0
             if rest and not rest[0].startswith("-"):
                 return engine_fetch.login_with_fetch(rest[0])
+        if _absent_help(command, rest, _ACCOUNT_NEEDS_PLATFORM.format(cmd=command)):
+            return 0
         print(_ACCOUNT_NEEDS_PLATFORM.format(cmd=command), file=sys.stderr)
         return 3
     return run_account(command, rest)
@@ -1800,8 +1834,10 @@ def _run_platform_command(command: str, rest: list[str]) -> int:
     try:
         from gawk_platform.cli import main as platform_main
     except ImportError:
-        print(_PLATFORM_COMMAND_UNAVAILABLE.format(cmd=command, desc=PLATFORM_COMMANDS[command]),
-              file=sys.stderr)
+        _msg = _PLATFORM_COMMAND_UNAVAILABLE.format(cmd=command, desc=PLATFORM_COMMANDS[command])
+        if _absent_help(command, rest, _msg):
+            return 0
+        print(_msg, file=sys.stderr)
         return 3
     return platform_main([command, *rest])
 
@@ -1810,7 +1846,7 @@ def _run_platform_command(command: str, rest: list[str]) -> int:
 #: leaving it on this list meant the engine shipped in the wheel behind a paywall the copy still
 #: advertised — the code moved and the gate did not.
 PLATFORM_CAPABILITIES = {
-    "enforce": "guard a live server, call by call",
+    "enforce": "the gateway in front of a live server: arguments, responses, a hash-chained log",
     "monitor": "watch a server for drift after you approved it",
 }
 
@@ -1846,11 +1882,11 @@ def _run_platform_capability(capability: str, rest: list[str]) -> int:
             # Not something a licence would unlock: say what it is, not where to buy.
             print(f"mcpgawk {capability}: {WITHDRAWN_CAPABILITIES[capability]}", file=sys.stderr)
             return 3
-        print(
-            _PLATFORM_UNAVAILABLE.format(capability=capability, cap=capability,
-                                         desc=PLATFORM_CAPABILITIES[capability]),
-            file=sys.stderr,
-        )
+        _msg = _PLATFORM_UNAVAILABLE.format(capability=capability, cap=capability,
+                                            desc=PLATFORM_CAPABILITIES[capability])
+        if _absent_help(capability, rest, _msg):
+            return 0
+        print(_msg, file=sys.stderr)
         return 3  # the same "not licensed / not available" code every paid entry point returns
     return run_pillar(capability, rest)
 
@@ -2335,19 +2371,27 @@ def _scan_target(raw: list[str]) -> str | None:
                 return f"{flag.lstrip('-')}:{raw[i + 1]}"
     # A config path is a target too: `scan nc.json` is not a fleet-wide scan of this machine.
     # (`--only kite` was recorded as "fleet-wide" on the Evidence page, 2026-09-03.)
-    _takes_value = {"--header", "--only", "--oauth-client-id", "--oauth-client-secret-env",
-                    "--oauth-redirect-uri", "--stdio", "--http", "--sse", "--timeout"}
     skip = False
     for a in raw[1:]:
         if skip:
             skip = False
             continue
-        if a in _takes_value:
+        if a in _SCAN_TAKES_VALUE:
             skip = True                       # a --header value can contain `/` — never a target
             continue
         if not a.startswith("-") and (a.endswith(".json") or a.endswith(".toml") or "/" in a):
             return f"config:{a}"
     return None
+
+
+_SCAN_TAKES_VALUE = {"--header", "--only", "--oauth-client-id", "--oauth-client-secret-env",
+                     "--oauth-redirect-uri", "--stdio", "--http", "--sse", "--timeout"}
+
+
+#: Set by the scan body when it measured nothing although there was something to measure (no
+#: consent, or the only config unreadable). Exit 1 carries that to CI; this carries it to the run
+#: log, which otherwise reads a non-zero exit as `findings` (0.1.90 walk, 2026-11-16).
+_SCAN_MEASURED_NOTHING: list[bool] = []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2440,6 +2484,7 @@ def _main_body(argv: list[str] | None) -> int:
     # registry crawl runs under, on a read-only rootfs, where opening the run log produced
     # "run log close failed (OperationalError: disk I/O error)" beside the server's own stderr
     # and was once read as an instrument crash ([FOUNDER 2026-09-05] ledger 113, brief §1d).
+    # Reading help stays a run, labelled as help ([FOUNDER 2026-09-25] "keep the row, label it", D18).
     if "--no-track" in raw:
         code = _dispatch(argv)
         _staleness_advisory()
@@ -2456,6 +2501,7 @@ def _main_body(argv: list[str] | None) -> int:
     from .redact import redact as _redact
     _who = {"ppid": os.getppid(),
             "argv": _redact(" ".join(a for a in raw[:4] if not a.startswith("http"))) or ""}
+    _SCAN_MEASURED_NOTHING.clear()
     try:
         code = _dispatch(argv)
     except SystemExit as exc:
@@ -2474,8 +2520,14 @@ def _main_body(argv: list[str] | None) -> int:
     # Non-zero here means the scan RAN and something wants attention (findings, a caveat, drift) —
     # a crash would have raised. Calling that `error` would make every drift detection look like a
     # tool failure in the timeline.
-    runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK,
-                      {"exit_code": code, **_who})
+    # A scan that measured nothing found nothing because it looked at nothing: incomplete, never
+    # `findings`, whatever else the exit code carries.
+    if code and _SCAN_MEASURED_NOTHING:
+        runlog.finish_run(run_id, runlog.INCOMPLETE,
+                          {"exit_code": code, "measured_nothing": True, **_who})
+    else:
+        runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK,
+                          {"exit_code": code, **_who})
     _staleness_advisory()
     return code
 
@@ -2499,7 +2551,7 @@ def _print_held_change(shown: str, key: str, held: dict, report) -> None:
     made, and how to accept it. The guard holds its changed tools until then (history.held_sighting)."""
     at = str(held.get("measured_at") or "")[:10] or "an earlier scan"
     print(f"\n  ⚠ {shown}: matches your baseline now, but it CHANGED on {at} and changed back "
-          f"since. Its changed tools stay blocked until you approve. What it changed to:")
+          f"since. Its changed tools are {_hold_words()}. What it changed to:")
     print(drift.render(shown, report))
     _print_accept(key)
 
@@ -2853,6 +2905,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
                else "a config exists but could not be read (see the lines above)")
         print(f"mcpgawk: this scan measured nothing — {why}. Exiting non-zero: nothing here is "
               f"a clean result.", file=sys.stderr)
+        _SCAN_MEASURED_NOTHING.append(True)
 
     # ONE exit rule for every output mode (review N7, 2026-11-12): the text view failed on a server
     # that APPEARED since the fleet was approved, while --json and --fleet-json (what CI reads) did

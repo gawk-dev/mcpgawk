@@ -1,9 +1,15 @@
+import { hasDrift } from "./pins.js";
 import { isSuppressed, unreviewedHosts } from "./suppressions.js";
 /** 1.2 (2026-07-14): added `checkErrors`/`summary.checkErrors` — see {@link CheckError}'s
  * docstring in model.ts for the incident that made this necessary.
  * 1.3 (2026-11-15): added `servers[].rejectedInput`, `servers[].allCallsErrored` and
  * `summary.rejectedInput`. A check a tool answered with its own error is no longer a check
  * error: it is in neither check count and the tool is listed (review J1, narrowed). */
+/* 0.1.91 (2026-11-16), same schema, a change in what `status` means — read before upgrading: tool
+ * drift since the baseline (`servers[].drift` with anything added, removed or changed) now makes
+ * that server, and the summary, `at-risk` (a `vulnerable` conviction stays `vulnerable`). Before,
+ * a drifted run said `status: "clean"` while it exited 1. A consumer that took `at-risk` to mean
+ * "a reproduced finding" must also read `findings` and `drift`. */
 export const REPORT_SCHEMA_VERSION = "1.3";
 /**
  * The honest coverage boundary of the current sandbox backend. Egress-based checks observe HTTP(S)
@@ -169,8 +175,34 @@ export function deriveStatus(severity, completeness) {
         return severity;
     return completeness.complete ? "clean" : "incomplete";
 }
+/**
+ * Drift since the baseline lifts a `clean` or `incomplete` status to `at-risk`; it never lowers
+ * `vulnerable`. Until 0.1.91 drift changed only the exit code (1), so the terminal, JSON, HTML,
+ * SARIF and JUnit said `clean` over a server whose tools had changed since the baseline.
+ */
+export function withDrift(status, drifted) {
+    if (!drifted)
+        return status;
+    return status === "vulnerable" ? status : "at-risk";
+}
+/** One sentence for a drift, shared by the HTML, SARIF and JUnit renderers so they say the same
+ * thing the terminal's DRIFT line does. */
+export function driftWords(d) {
+    const parts = [];
+    if (d.changed.length)
+        parts.push(`changed: ${d.changed.join(", ")}`);
+    if (d.removed.length)
+        parts.push(`removed: ${d.removed.join(", ")}`);
+    if (d.added.length)
+        parts.push(`added: ${d.added.join(", ")}`);
+    return `tools changed since the baseline — ${parts.join("; ")} (possible rug-pull)`;
+}
+/** True when this drift records any change at all. Absent drift (no baseline) is no drift. */
+export function drifted(d) {
+    return d !== undefined && hasDrift(d);
+}
 /** The ONLY exit-code derivation: a pure function of {@link Status}. 1 = actionable (a reproduced
- * finding), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
+ * finding, or drift since the baseline), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
  * computed independently of `summary.status`, so `incomplete` could exit 0 and `clean` exit 2. */
 export function exitCodeForStatus(status) {
     switch (status) {
@@ -240,7 +272,7 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
         // 2026-07-27 on mcpgawk's OWN server: `toolsChecked: 0`, `status: "clean"`), and a server with
         // ANY check that never completed all land in the same place: INCOMPLETE, never clean.
         const completeness = serverCompleteness(r);
-        const status = deriveStatus(statusOf(active.map((f) => f.severity)), completeness);
+        const status = withDrift(deriveStatus(statusOf(active.map((f) => f.severity)), completeness), drifted(driftByServer[r.server]));
         return {
             server: r.server,
             transport: r.transport,
@@ -279,7 +311,7 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
     // is, at least one server was verified, at least one tool anywhere was exercised, and no server
     // failed outright. A summary can no longer say `clean` above a server saying `incomplete`.
     const completeness = runCompleteness(servers, errors);
-    const summaryStatus = deriveStatus(statusOf(activeFindings.map((f) => f.severity)), completeness);
+    const summaryStatus = withDrift(deriveStatus(statusOf(activeFindings.map((f) => f.severity)), completeness), servers.some((s) => drifted(s.drift)));
     return {
         schemaVersion: REPORT_SCHEMA_VERSION,
         tool: "gawk-verify",

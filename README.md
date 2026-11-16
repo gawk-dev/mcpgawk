@@ -12,7 +12,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
 [![Python](https://img.shields.io/pypi/pyversions/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-C8401F.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-C8401F.svg)](https://github.com/gawk-dev/mcpgawk/blob/main/LICENSE)
 [![CI](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml/badge.svg)](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml)
 [![Open VSX](https://img.shields.io/open-vsx/v/gawk-dev/mcpgawk?label=VS%20Code%20%2F%20Cursor)](https://open-vsx.org/extension/gawk-dev/mcpgawk)
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-C8401F?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
@@ -43,7 +43,7 @@ install fetches the paid engine and turns those on — one more command, nothing
        alt="mcpgawk demo: a server is approved, changes afterwards, and the guard blocks the tool that appeared">
 </p>
 <p align="center"><sub><code>mcpgawk demo</code> — its own output, in a sandbox that touches nothing of yours.
-Run the same command and you get the same thing.</sub></p>
+Recorded on 0.1.54.</sub></p>
 
 ## Why
 
@@ -67,15 +67,14 @@ request, used or not.
 ## Features
 
 - 🛑 **Block a changed tool before it runs** — running `mcpgawk` puts one pre-execution hook in the
-  loop of each agent on your machine that has a hook point (`mcpgawk guard install` does Claude Code alone). The decision is local, in about 10ms, with nothing to sign in to. Works on **6 of
+  loop of each agent on your machine that has a hook point (`mcpgawk guard install` does Claude Code alone). The decision is local, with nothing to sign in to. Works on **6 of
   the 21 supported clients**; the rest have no hook point and are named, not glossed over.
 - 🧪 **Run it, don't just read it** — `mcpgawk verify` drives tools in a sandbox and reports what they
   did: exfiltration, SSRF, tool poisoning, secret leaks. The sandbox is a proxy by default, so it
   needs no Docker; Docker adds full container isolation when you have it. Safe mode drives only
   provably read-only tools, and every tool it skips is named as skipped.
-- 🧑‍⚖️ **Approval needs a person** — `mcpgawk decide` opens a local screen for what changed. The buttons
-  live on the tokened link printed in your terminal, and mcpgawk refuses an approval when it can see
-  an agent running it.
+- 🧑‍⚖️ **mcpgawk refuses an approval when it can see an agent running it** — `mcpgawk decide` opens a
+  local screen for what changed. The buttons live on the tokened link printed in your terminal.
 - 🖥️ **One local panel** — `mcpgawk panel`: every server, every decision, every piece of evidence.
 - 📜 **The changelog no vendor publishes** — `mcpgawk changes` shows every change to a server's tool
   surface between the snapshots you have recorded: tools added or removed, input schemas widened,
@@ -114,8 +113,10 @@ Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
 
 ## When to run it
 
-- **Once, then leave it on** — `mcpgawk guard install`. After that a tool that appears on a server
-  you already approved does not get called.
+- **Once, then leave it on** — `mcpgawk`. It adds the hook to each of the six agents with a hook point
+  that it finds on your machine (Claude Code, Codex, Cursor, Gemini CLI, Kimi, Windsurf), writing their
+  hook configs. After that a tool that changed or appeared on a server you already approved is refused
+  before it runs.
 - **Before you add a server** — see what it costs and what it can do, before you trust it.
 - **When your agent feels slow or picks the wrong tool** — it's often MCP bloat (too many / too-heavy tools).
 - **On every PR** — the CI gate catches creeping token cost and flagged signals, and, given a committed baseline, a server that changed since you approved it.
@@ -126,7 +127,7 @@ Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
 ```bash
 mcpgawk                                  # first run: every agent config on this machine
 mcpgawk demo                             # the whole arc in a sandbox — approve, drift, block
-mcpgawk guard install                    # put the baseline in your agent's loop
+mcpgawk guard install                    # the hook in Claude Code only (bare `mcpgawk` does all six)
 mcpgawk guard status                     # is protection actually on?
 mcpgawk decide                           # what changed, and approve it as a human
 mcpgawk panel                            # the local page: servers, decisions, evidence
@@ -190,8 +191,13 @@ never a value.
     if any) — never your tool inventory — to the public npm registry or PyPI JSON API;
   - `mcpgawk install-node`, only when you run it: downloads Node from nodejs.org;
   - `mcpgawk login`, only when you run it: sends your key to mcp.gawk.dev, and a paid key is checked
-    with Lemon Squeezy;
-  - `mcpgawk push`, only when you run it: sends a scan report to your hosted fleet view.
+    with Lemon Squeezy (at login, then about once a day). On a free install it then downloads the paid engine from a short-lived signed
+    link that mcp.gawk.dev returns, and checks its sha256 before installing it;
+  - OAuth sign-in, only when you ask for it: your browser and mcpgawk talk to that server's sign-in
+    endpoints;
+  - `mcpgawk push`, only when you run it: sends a scan report to your hosted fleet view;
+  - `mcpgawk verify --webhook <url>`, only when you pass it: posts the verify report to that URL when
+    there are findings or drift.
 
   The measurement layers import no network library — they *cannot* egress by construction
   (enforced by a test). Public Server Card discovery is fetched with no auth and no redirect-following.
@@ -230,13 +236,13 @@ Available on the [GitHub Marketplace](https://github.com/marketplace/actions/mcp
 
 ## Contributing
 
-Issues and PRs welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and see the design
-boundaries in [THREAT-MODEL.md](THREAT-MODEL.md). Security reports go through [SECURITY.md](SECURITY.md)
+Issues and PRs welcome. Please read [CONTRIBUTING.md](https://github.com/gawk-dev/mcpgawk/blob/main/CONTRIBUTING.md) first, and see the design
+boundaries in [THREAT-MODEL.md](https://github.com/gawk-dev/mcpgawk/blob/main/THREAT-MODEL.md). Security reports go through [SECURITY.md](https://github.com/gawk-dev/mcpgawk/blob/main/SECURITY.md)
 (privately, not a public issue).
 
 ## License
 
-**Apache-2.0** — see [LICENSE](LICENSE). Part of the [**nativerse**](https://nativerse-ventures.com/) · [gawk.dev](https://gawk.dev/) family. Site and docs: [mcp.gawk.dev](https://mcp.gawk.dev/?utm_source=github&utm_medium=readme). The value is in the
+**Apache-2.0** — see [LICENSE](https://github.com/gawk-dev/mcpgawk/blob/main/LICENSE). Part of the [**nativerse**](https://nativerse-ventures.com/) · [gawk.dev](https://gawk.dev/) family. Site and docs: [mcp.gawk.dev](https://mcp.gawk.dev/?utm_source=github&utm_medium=readme). The value is in the
 repo, not a cloud.
 
 ## Use it from your agent (skill)

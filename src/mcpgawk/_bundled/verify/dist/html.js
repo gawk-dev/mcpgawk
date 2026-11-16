@@ -1,4 +1,4 @@
-import { groupCheckErrors, groupEgressByHost, } from "./report.js";
+import { driftWords, drifted, groupCheckErrors, groupEgressByHost, } from "./report.js";
 function esc(s) {
     return s
         .replace(/&/g, "&amp;")
@@ -58,7 +58,10 @@ function serverCard(s) {
                 // be printed (in --clean colour) beside a 4-failed-check run, with the warning demoted to a
                 // grey note. Derived from the same `complete` field as the pill, the exit code and SARIF.
                 s.complete
-                    ? `<p class="clean-note">nothing reproduced across ${s.toolsChecked} tool(s).</p>`
+                    ? drifted(s.drift)
+                        ? // No green note under drift: nothing reproduced, but the tools changed (0.1.91).
+                            `<p class="note">nothing reproduced across ${s.toolsChecked} tool(s); the drift above still needs review.</p>`
+                        : `<p class="clean-note">nothing reproduced across ${s.toolsChecked} tool(s).</p>`
                     : `<p class="note" style="color:var(--warn)"><strong>INCOMPLETE</strong> — ${s.checksCompleted}/${s.checksPlanned} check(s) completed. Nothing was reproduced in the checks that DID complete, which is not a clean result: ${esc(s.incompleteReasons.join("; "))}</p>`;
     const skipped = s.skipped.length
         ? `<p class="note">Not invoked (safe mode): ${s.skipped.map((k) => `${esc(k.tool)} (${esc(k.class)})`).join(", ")}</p>`
@@ -80,6 +83,10 @@ function serverCard(s) {
         ? `<p class="note">Remote server — can’t be sandboxed; egress checks not applicable. Ran: ${s.checksRun.map(esc).join(", ")}.</p>`
         : "";
     const dispatchNote = dispatchCard(s);
+    // Drift since the baseline, said where the pill says at-risk (0.1.91: the report never showed it).
+    const driftNote = s.drift && drifted(s.drift)
+        ? `<p class="note" style="color:var(--warn)"><strong>DRIFT</strong> — ${esc(driftWords(s.drift))}</p>`
+        : "";
     const sandboxNote = s.sandboxBackend === "proxy"
         ? `<p class="note" style="color:var(--warn)">ran under the proxy-only sandbox (degraded): ${esc(s.sandboxDegradedReason ?? "Docker unavailable")}</p>`
         : s.sandboxBackend === "docker"
@@ -90,7 +97,7 @@ function serverCard(s) {
       <h2>${esc(s.server)} <span class="transport">${esc(s.transport)}</span></h2>
       <span class="pill pill-${s.status}">${STATUS_LABEL[s.status]}</span>
     </div>
-    ${remoteNote}${sandboxNote}${dispatchNote}${skipped}${rejectedInput}${checkErrors}${egressBlock}${findings}
+    ${remoteNote}${sandboxNote}${driftNote}${dispatchNote}${skipped}${rejectedInput}${checkErrors}${egressBlock}${findings}
   </section>`;
 }
 /** F4: the hidden catalog, each tool marked probed vs NOT probed — so the HTML report (not just the
@@ -205,6 +212,7 @@ export const REPORT_CSS = `
 /** The report body (banner + chips + server cards + coverage) — no <head>, no page chrome. */
 export function renderReportBody(report) {
     const { summary } = report;
+    const driftCount = report.servers.filter((s) => drifted(s.drift)).length;
     const sev = summary.bySeverity;
     const chips = [
         `<span class="chip">${summary.servers} server(s)</span>`,
@@ -225,7 +233,7 @@ export function renderReportBody(report) {
     <span class="big">${summary.servers === 0 && summary.errors > 0 ? "Could not verify" : STATUS_LABEL[summary.status]}</span>
     <span>${summary.servers === 0 && summary.errors > 0
         ? `${summary.errors} server(s) could not be verified — nothing was probed. See the error(s) below.`
-        : `${summary.findings} reproduced finding(s) across ${summary.servers} server(s)${summary.errors > 0 ? ` · ${summary.errors} could not be verified` : ""}. ${summary.complete
+        : `${summary.findings} reproduced finding(s) across ${summary.servers} server(s)${summary.errors > 0 ? ` · ${summary.errors} could not be verified` : ""}${driftCount > 0 ? ` · tools changed since the baseline on ${driftCount} server(s)` : ""}. ${summary.complete
             ? `${summary.checksCompleted}/${summary.checksPlanned} check(s) completed.`
             : `NOT a clean pass — only ${summary.checksCompleted}/${summary.checksPlanned} check(s) completed: ${esc(summary.incompleteReasons.join("; "))}`}`}</span>
   </div>

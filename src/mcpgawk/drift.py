@@ -18,7 +18,7 @@ from typing import Any
 
 from .measure import _MCP_DEFAULT_HINTS, Measurement
 from .probe import ServerSnapshot
-from .redact import redact
+from .redact import PLACEHOLDER, redact
 
 
 def _hash(text: str | None) -> str:
@@ -1398,6 +1398,13 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                     # A deleted safety caveat steers the model as effectively as an added
                     # instruction. Showing only what was gained made that class invisible.
                     lines.append(f"            {short} lost:   {_excerpt(lost)}")
+                if PLACEHOLDER in f"{gained or ''}{lost or ''}":
+                    # The mask is by design (ADR-0012: an attacker's address is never stored), but
+                    # "read the inserted text" above a [REDACTED] tells the reader nothing. Said
+                    # only where something WAS masked (0.1.90 walk, 2026-11-16).
+                    lines.append(f"            {PLACEHOLDER} is masked on purpose: mcpgawk does not keep "
+                                 "that part of a server's text on disk; read the full text in "
+                                 "the server's own source.")
                 if not gained and not lost and not r.text_kept(key):
                     # The hash moved and the stored text did not: the change sits past the
                     # characters this store kept (two of Notion's four changes in Aug–Sep 2026

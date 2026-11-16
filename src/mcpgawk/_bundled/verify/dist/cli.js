@@ -10,7 +10,7 @@ import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, compareSharedBaseline, diffPins, hasDrift, } from "./pins.js";
 import { redactAuditEvent, redactDocument, redactText } from "./redact.js";
-import { buildReport, exitCodeForStatus, groupCheckErrors, groupEgressByHost, toCsv, } from "./report.js";
+import { buildReport, drifted, exitCodeForStatus, groupCheckErrors, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
 import { loadSuppressions, saveSuppressions, withSuppression } from "./suppressions.js";
@@ -29,7 +29,10 @@ config.json:
     "remote": { "url": "https://mcp.example.com/mcp", "transport": "http", "headers": { "Authorization": "Bearer \${MCP_TOKEN}" } }
   }
 }
-Local (stdio) servers run in a no-egress sandbox — all checks apply.
+Local (stdio) servers: the checks run in a sandbox whose egress checks observe HTTP(S) only
+(raw-socket / DNS / UDP exfiltration is not detected; --isolate blocks it). Each local server
+is first started once outside the sandbox, with its normal environment and network, to list
+its tools.
 Remote (http/sse) servers can't be sandboxed — only output-based checks (tool-poisoning) apply.
 \${VAR_NAME} in "headers"/"env" values is substituted from the environment at load time — so a
 config.json committed to a repo never needs to contain a literal secret (export MCP_TOKEN=... and
@@ -50,7 +53,8 @@ mcpgawk verify resolves it; a config that references an unset variable fails lou
 --baseline <file>: first run records a fingerprint of each server's tools; later runs flag DRIFT
                    (added / removed / changed tools) — i.e. a rug-pull.
 --behaviour-profile <file>: write a gawk.behaviour/1 profile (per-tool observed source/sink) — feed
-                   it to \`mcpgawk enforce --behaviour-profile\` so toxic-flow blocks by BEHAVIOUR, not name.
+                   it to \`mcpgawk enforce --behaviour-profile\`, a mcpgawk Platform command, so
+                   toxic-flow blocks by BEHAVIOUR, not name.
 --sarif <file>:    write a SARIF 2.1.0 report — GitHub code scanning / most CI security dashboards
                    ingest this natively. A suppressed finding is encoded as a SARIF suppression
                    (shows as "dismissed" on GitHub), not silently dropped from the file.
@@ -103,6 +107,13 @@ licenseOpts = {}) {
     //
     // What stays paid: ENFORCE (the live proxy), MONITOR (the continuous layer) and BUILD — each
     // gated in its own entry point, not here.
+    // `--help` / `-h` is a request for the usage, not a config path that is missing: stdout, exit 0.
+    // Until 0.1.91 it fell through to the config lookup and exited 2 with the usage on stderr.
+    // No arguments at all is still the usage error below (stderr, exit 2).
+    if (argv.includes("--help") || argv.includes("-h")) {
+        log(USAGE);
+        return 0;
+    }
     // `serve` subcommand: start the local web UI and block until the process is killed.
     if (argv[0] === "serve") {
         const port = Number(flagValue("--port") ?? 7878);
@@ -310,7 +321,7 @@ licenseOpts = {}) {
     }
     // Drift / rug-pull: establish or compare a baseline of each server's tool inventory.
     const driftByServer = {};
-    let drifted = false;
+    let anyDrift = false;
     // THE SHARED BASELINE. With no --baseline file, compare against what the operator has already
     // approved in the engine (`mcpgawk approve`) instead of holding a private opinion. This is the
     // hop that used to be manual: you approved a server in scan, and verify still called it drift.
@@ -323,14 +334,20 @@ licenseOpts = {}) {
             for (const [server, c] of Object.entries(results)) {
                 driftByServer[server] = c.drift;
                 if (hasDrift(c.drift))
-                    drifted = true;
+                    anyDrift = true;
             }
             const compared = Object.keys(results).length;
             if (compared > 0) {
-                log(`\nBaseline: comparing ${compared} server(s) against what you approved with \`mcpgawk approve\`.`);
+                // A person reads this, so with --json it goes to stderr: stdout is exactly one JSON
+                // document (until 0.1.91 these lines preceded it and stdout did not parse).
+                const say = asJson ? err : log;
+                // WHO set each baseline is said per server, from the engine's own record: a baseline
+                // trusted on first scan was called "what you approved" here until 0.1.91.
+                say(`\nBaseline: comparing ${compared} server(s) against the baseline \`mcpgawk baseline\` shows.`);
                 for (const [server, c] of Object.entries(results)) {
+                    say(`  ${server}: ${c.provenance ?? "who approved it is not on record"}.`);
                     if (c.reason)
-                        log(`  ${server}: ${c.reason}.`);
+                        say(`  ${server}: ${c.reason}.`);
                 }
             }
         }
@@ -365,7 +382,7 @@ licenseOpts = {}) {
                     const d = diffPins(prior, r.pins.tools);
                     driftByServer[r.server] = d;
                     if (hasDrift(d))
-                        drifted = true;
+                        anyDrift = true;
                 }
                 else {
                     unlisted.push(r);
@@ -403,7 +420,7 @@ licenseOpts = {}) {
         });
         renameSync(tmpPath, outPath);
     }
-    const actionable = report.summary.findings > 0 || drifted;
+    const actionable = report.summary.findings > 0 || anyDrift;
     // Alert sink: on any finding or drift, POST the report to a webhook (Monitor notification).
     if (webhookUrl && actionable) {
         try {
@@ -540,8 +557,9 @@ licenseOpts = {}) {
  *
  * DERIVED from `summary.status` via {@link exitCodeForStatus} — never computed independently. Until
  * 2026-08-02 this function re-derived its own answer from a different set of fields, so `incomplete`
- * could exit 0 and `clean` could exit 2: no single output field was trustworthy alone. `actionable`
- * (findings OR baseline drift) is the one input `status` cannot see, and it only ever escalates. */
+ * could exit 0 and `clean` could exit 2: no single output field was trustworthy alone. Drift has
+ * been part of `status` since 0.1.91 (`at-risk`, report.ts `withDrift`), so `actionable` (findings
+ * OR baseline drift) now agrees with it; it is kept as a guard and only ever escalates. */
 export function exitCode(report, actionable) {
     if (actionable)
         return 1;
@@ -698,6 +716,12 @@ export function printText(report, log) {
             // first — it is the same derived field the JSON/HTML/SARIF/JUnit and the exit code use.
             // With tools that rejected the test input, the tick speaks only for the tools checked.
             const unjudged = s.rejectedInput?.length ?? 0;
+            if (s.complete && drifted(s.drift)) {
+                // No tick under a DRIFT line: the checks found nothing, the tools still changed since the
+                // baseline, and this server is at-risk (0.1.91: the tick read as a pass).
+                log(`  - no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced in the ${s.toolsChecked} tool(s) checked; the drift above still needs review`);
+                continue;
+            }
             log(s.complete
                 ? unjudged > 0
                     ? `  ✓ no HTTP exfiltration / SSRF / poisoning / secret-leak reproduced in the ${s.toolsChecked} tool(s) checked; ${unjudged} not judged, listed above`
@@ -740,8 +764,14 @@ export function printText(report, log) {
     // The prose verdict is the SAME derived field as the JSON, the HTML banner, SARIF and the exit
     // code (1A) — never a separately-worded judgement. A run that did not complete says so first:
     // "no findings reproduced" over an examination that never happened is the central lie this fixes.
+    // Drift since the baseline is part of the verdict (status `at-risk`), so the verdict line names
+    // it. Until 0.1.91 a drifted run printed "no findings reproduced — status clean" and exited 1.
+    const driftedServers = report.servers.filter((s) => drifted(s.drift)).map((s) => s.server);
+    const driftNote = driftedServers.length > 0
+        ? ` DRIFT since baseline on ${driftedServers.length} server(s): ${driftedServers.join(", ")} (tools added, removed or changed — see above).`
+        : "";
     if (report.summary.findings > 0) {
-        log(`\nmcpgawk verify: CONVICTED ${report.summary.findings} finding(s) — status ${report.summary.status}.${partial}${suppressedNote}`);
+        log(`\nmcpgawk verify: CONVICTED ${report.summary.findings} finding(s) — status ${report.summary.status}.${partial}${suppressedNote}${driftNote}`);
     }
     else if (!report.summary.complete) {
         const why = report.summary.incompleteReasons.slice(0, 6).join("; ");
@@ -750,7 +780,12 @@ export function printText(report, log) {
             : "";
         log(`\nmcpgawk verify: INCOMPLETE — status ${report.summary.status}. ` +
             `${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed. ` +
-            `NOT a clean pass: ${why}${more}.${suppressedNote}`);
+            `NOT a clean pass: ${why}${more}.${suppressedNote}${driftNote}`);
+    }
+    else if (driftedServers.length > 0) {
+        log(`\nmcpgawk verify: DRIFT since baseline on ${driftedServers.length} server(s) — status ${report.summary.status}. ` +
+            `${driftedServers.join(", ")}: tools added, removed or changed since the baseline (possible rug-pull; see above). ` +
+            `No findings reproduced (${report.summary.checksCompleted}/${report.summary.checksPlanned} check(s) completed).${suppressedNote}`);
     }
     else {
         log(`\nmcpgawk verify: no findings reproduced — status ${report.summary.status} ` +

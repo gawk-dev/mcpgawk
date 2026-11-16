@@ -282,11 +282,31 @@ def _total_line(total: Any) -> str:
     return f'<p class="sub"><b>In total</b>, {_esc(words)}.</p>' if words else ""
 
 
+def _held_here() -> str:
+    """status.hold_state_here, never raising: a page that cannot tell claims only "where hooked"."""
+    try:
+        from .status import hold_state_here
+        return hold_state_here()
+    except Exception:                               # noqa: BLE001
+        return "some"
+
+
+def _keep_note() -> str:
+    """What "keep" leaves behind, by whether a guard hook holds it here (status.KEEP_WORDS)."""
+    from .status import KEEP_WORDS
+    return KEEP_WORDS[_held_here()]
+
+
 def render_page(items: list[dict[str, Any]], token: str, note: str = "",
-                gaps: dict[str, Any] | None = None, store_error: str | None = None) -> str:
+                gaps: dict[str, Any] | None = None, store_error: str | None = None,
+                held: str = "some") -> str:
     """The whole UI. One file, no assets, no network — it must work on a machine with no internet
     and must never fetch anything, because a security tool that phones out to render itself is
-    making a claim it cannot keep."""
+    making a claim it cannot keep.
+
+    `held` is status.hold_state for this machine: a blocking change is said to be blocked only
+    where a guard hook can hold it (0.1.90 walk, 2026-11-16). The default claims no more than
+    "where the guard hook is installed"."""
     if store_error:
         # Review H1, 2026-11-12: an unreadable store came back empty and this page said "Nothing is
         # waiting on you. Every server with a baseline still matches it." over a check that never
@@ -325,8 +345,15 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
         for it in items:
             r: drift.DriftReport = it["report"]
             danger = " danger" if it["hostile"] else ""
-            if _blocks_calls(r):
+            if _blocks_calls(r) and held == "all":
                 pill, gate = "blocked · waiting on you", "Your agents cannot call it until you decide."
+            elif _blocks_calls(r) and held == "none":
+                pill, gate = ("not held · waiting on you",
+                              ("No guard hook is installed here to hold it. Run "
+                               "<code>mcpgawk</code> to add it."))
+            elif _blocks_calls(r):
+                pill, gate = ("held where hooked · waiting on you",
+                              "Agents with the guard hook cannot call it until you decide.")
             else:
                 pill, gate = ("queued · waiting on you",
                               "Calls still go through; this waits for your sign-off.")
@@ -345,7 +372,7 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
     <input type="hidden" name="token" value="{_esc(token)}">
     <input type="hidden" name="key" value="{_esc(it['key'])}">
     <input type="hidden" name="pin" value="{_esc(it.get('pin') or '')}">
-    <button name="action" value="keep" class="btn danger-btn">Keep blocking</button>
+    <button name="action" value="keep" class="btn danger-btn">{"Keep blocking" if held == "all" else "Not yet"}</button>
     <button name="action" value="approve" class="btn">Trust this change</button>
   </form>''') if token else
    '<p class="sub">Read-only view. Open the link printed in your terminal to decide.</p>'}
@@ -494,7 +521,7 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
                  if secrets.compare_digest((q.get("t") or [""])[0], server.token) else "")
         self._send(200, render_page(pending_decisions(store), shown,
                                     getattr(self.server, "note", ""), uncovered(store),
-                                    store_error=store_error))
+                                    store_error=store_error, held=_held_here()))
 
     def do_POST(self) -> None:              # noqa: N802
         if self._foreign():
@@ -518,7 +545,7 @@ h1{{font-size:19px;margin:0 0 8px}} p{{margin:0;color:#5C6068}}
         if action == "approve" and key:
             note = _approve_reviewed(key, form.get("pin", ""), self._decide_server().signer)
         elif action == "keep":
-            note = "Left blocked. Your agents still cannot call it."
+            note = _keep_note()
         self._decide_server().note = note
         # Carry the token back: without it the human lands on the read view and the remaining
         # decisions become unclickable after the first approval.

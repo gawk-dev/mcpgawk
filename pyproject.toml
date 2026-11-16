@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.90"
-description = "One gateway in front of every MCP server your agents can reach — every call checked against a baseline you approved. Local-first: your inventory stays on your machine."
+version = "0.1.91"
+description = "Catches an MCP server that changed after you approved it, and holds the call before your agent runs it. Your inventory stays on your machine."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -16,6 +16,11 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries",
     "Environment :: Console",

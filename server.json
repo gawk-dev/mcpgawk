@@ -2,18 +2,18 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.gawk-dev/mcpgawk",
   "title": "mcpgawk",
-  "description": "One checkpoint in front of your MCP fleet: refuses a tool that changed since you approved it.",
+  "description": "Lets an agent scan MCP servers: tools, token cost, and which tools change data or reach the network.",
   "websiteUrl": "https://mcp.gawk.dev",
   "repository": {
     "url": "https://github.com/gawk-dev/mcpgawk",
     "source": "github"
   },
-  "version": "0.1.90",
+  "version": "0.1.91",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcpgawk",
-      "version": "0.1.90",
+      "version": "0.1.91",
       "runtimeHint": "uvx",
       "packageArguments": [
         {

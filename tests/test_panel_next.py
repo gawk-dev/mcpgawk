@@ -869,5 +869,79 @@ def test_a_schema_only_change_is_not_called_blocked_on_next(monkeypatch):
 
 
 def test_a_description_change_is_still_called_blocked_on_next(monkeypatch):
-    html = panel.render_next(_d(_store()), token="T")
+    d = {**_d(_store()), "hook_health": {"claude-code": "ok"}}
+    html = panel.render_next(d, token="T")
     assert "No agent can call it" in html and "BLOCKED UNTIL YOU DECIDE" in html
+
+
+# ── blocked only where a guard hook holds it (0.1.90 walk, 2026-11-16) ───────────────────────────
+def test_with_no_guard_hook_the_card_says_nothing_holds_it(monkeypatch):
+    d = {**_d(_store()), "hook_health": {"claude-code": "absent", "cursor": "absent"}}
+    html = panel.render_next(d, token="T")
+    assert "No agent can call it" not in html and "BLOCKED UNTIL YOU DECIDE" not in html, html
+    assert ">Keep blocked<" not in html
+    assert "NOT HELD — NO GUARD HOOK" in html and "No guard hook is installed here" in html
+
+
+def test_an_unread_hook_state_claims_only_where_the_hook_is(monkeypatch):
+    html = panel.render_next(_d(_store()), token="T")
+    assert "No agent can call it" not in html
+    assert "HELD WHERE THE GUARD HOOK IS INSTALLED" in html
+
+
+def _dash(hook_health):
+    return {**_d(_store(), {"gitnexus": {"command": "npx", "args": ["-y", "gitnexus@1"]}}),
+            "hook_health": hook_health,
+            "pending": ["mcp:gitnexus"], "recent_calls": [], "fleet_calls": [],
+            "denied_servers": set(), "verified_runs": {}, "observed": {}, "errors": {},
+            "findings": []}
+
+
+def test_the_dashboard_says_not_held_with_no_guard_hook(monkeypatch):
+    """The panel reads only the adapters whose config exists: on a fresh machine `hook_health` is
+    read and EMPTY. That is no hook, not an unknown."""
+    monkeypatch.setattr(panel, "_login_button_applicable", lambda e, n="": False)
+    import re as _re
+    page = panel.render(_dash({}), token="T")
+    assert "blocked until you decide" not in page and "Blocked meanwhile" not in page
+    assert ">Keep blocked<" not in page
+    # each site on its own
+    assert "Not held by a guard hook: none is installed here" in page, "the ask card"
+    assert "— not held: no guard hook is installed here" in page, "the Today row"
+    chips = _re.findall(r'<span class="chip bad[^"]*"><i></i>([^<]*)</span>', page)
+    assert chips and all(c.startswith("NOT held — no guard hook") for c in chips), chips
+    assert 'value="keep">Not yet</button>' in page, "the Decisions keep button"
+
+
+def test_the_dashboard_says_blocked_where_every_agent_is_hooked(monkeypatch):
+    monkeypatch.setattr(panel, "_login_button_applicable", lambda e, n="": False)
+    page = panel.render(_dash({"claude-code": "ok"}), token="T")
+    assert "Held by the guard hook meanwhile" in page
+    assert "— held by the guard hook until you decide" in page
+    assert '<i></i>Blocked' in page and ">Keep blocked<" in page
+
+
+def test_the_policy_row_follows_the_hook():
+    d = {**_dash({}), "entries": {"gitnexus": {"command": "x", "_clients": ["cursor"]}},
+         "adapters": {"cursor": object()}, "hooks": {}}
+    row = {r[0]: r[2] for r in panel.policy_rows(d)}["Server approval required"]
+    assert "guard in 0 of 1 agent(s)" in row, row
+    assert "blocked now" not in row and "not held (no guard hook)" in row, row
+
+
+def test_the_next_card_with_a_read_empty_hook_map_is_not_held(monkeypatch):
+    html = panel.render_next({**_d(_store()), "hook_health": {}}, token="T")
+    assert "NOT HELD — NO GUARD HOOK" in html
+    assert "No guard hook is installed here to hold it" in html
+    assert "no guard hook is installed here to hold it." in html, "the note under the buttons"
+
+
+def test_a_row_without_a_comparable_record_says_who_holds_it(monkeypatch):
+    """The Decisions row for a server with no diffable record said "your agents cannot call it"."""
+    from mcpgawk import decide as _decide
+    monkeypatch.setattr(_decide, "pending_decisions", lambda store: [])
+    d = {"entries": {}, "store": {"servers": {"mcp:x": {"aliases": ["x"]}}},
+         "pending": ["mcp:x"], "activity": {}, "recent_calls": [], "hook_health": {}}
+    page = panel.render(d, token="t")
+    assert "Moved since its baseline; no guard hook is installed here to hold it." in page
+    assert "your agents cannot call it" not in page

@@ -1,3 +1,4 @@
+import { driftWords, drifted } from "./report.js";
 /**
  * JUnit XML — the format most CI test-result UIs render natively (a red/green test tree, not
  * just a log). One `<testsuite>` per server; one `<testcase>` per finding. A suppressed finding
@@ -62,6 +63,13 @@ export function toJUnit(report) {
         // catalog never enumerated) must not fall through to the synthetic pass either — that is the
         // same green-for-nothing this file already refuses for checkErrors. One `<error>` carrying the
         // derived reasons, so JUnit agrees with the status/exit code like every other renderer.
+        // Drift since the baseline is a `<failure>`: the suite ran and found something a person must
+        // look at. Before 0.1.91 a drifted server got the synthetic passing testcase, green in CI over
+        // a run that exited 1.
+        const driftFailures = drifted(server.drift) ? 1 : 0;
+        if (server.drift && driftFailures) {
+            cases.push(`    <testcase name="inventory drift since baseline" classname="${esc(server.server)}">\n      <failure message="${esc(driftWords(server.drift))}">${esc(driftWords(server.drift))}</failure>\n    </testcase>`);
+        }
         let serverErrors = server.checkErrors.length;
         if (!server.complete && server.checkErrors.length === 0) {
             cases.push(`    <testcase name="verification completeness" classname="${esc(server.server)}">\n      <error message="${esc(server.incompleteReasons.join("; "))}">verification INCOMPLETE (${server.checksCompleted}/${server.checksPlanned} check(s) completed) — not a verdict, not a clean pass</error>\n    </testcase>`);
@@ -71,9 +79,9 @@ export function toJUnit(report) {
             cases.push(`    <testcase name="no findings" classname="${esc(server.server)}"/>`);
         }
         totalTests += Math.max(cases.length, 1);
-        totalFailures += active.length;
+        totalFailures += active.length + driftFailures;
         totalErrors += serverErrors;
-        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length}" errors="${serverErrors}" skipped="${suppressed.length + (server.rejectedInput?.length ?? 0)}">\n${cases.join("\n")}\n  </testsuite>`);
+        suites.push(`  <testsuite name="${esc(server.server)}" tests="${cases.length || 1}" failures="${active.length + driftFailures}" errors="${serverErrors}" skipped="${suppressed.length + (server.rejectedInput?.length ?? 0)}">\n${cases.join("\n")}\n  </testsuite>`);
     }
     // A server that FAILED TO START is in report.errors, not report.servers. It reached the XML only
     // when nothing else ran (the empty-run suite below), so one verified server plus one that never

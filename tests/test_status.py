@@ -283,17 +283,48 @@ def test_collect_reads_the_profile_the_rest_of_the_product_writes(tmp_path, monk
 # ── blocked vs queued, said apart (audit 2026-11-10, item E) ──────────────────────────────────────
 # Every pending server was printed "blocked until you decide", including a shape-only change the
 # guard lets through while it waits (decide._blocks_calls; the panel and decide already split it).
+_HOOKED = dict(hook_health={"claude-code": "ok"}, agents={"claude-code": 2})
+
+
 def test_a_queued_change_is_not_called_blocked():
     out = _render(pending=["notes", "resend"], pending_keys=["mcp:notes", "mcp:resend"],
-                  pending_queued=["notes"])
-    assert "1 server(s) changed since their baseline — blocked until" in out, out
+                  pending_queued=["notes"], **_HOOKED)
+    assert "1 server(s) changed since their baseline —" in out, out
+    assert "held by the guard hook until you decide" in out, out
     assert "calls still pass" in out and "notes" in out.split("calls still pass", 1)[1], out
 
 
 def test_without_a_split_every_pending_server_still_reads_blocked():
     """Calling a blocked change harmless is the worse error: no split means blocked."""
-    out = _render(pending=["resend"], pending_keys=["mcp:resend"])
-    assert "blocked until" in out and "calls still pass" not in out
+    out = _render(pending=["resend"], pending_keys=["mcp:resend"], **_HOOKED)
+    assert "held by the guard hook" in out and "calls still pass" not in out
+
+
+# ── held only where a hook holds it (0.1.90 walk, 2026-11-16) ─────────────────────────────────────
+# `status` said "blocked until you decide" on a machine with no guard hook, where nothing blocks.
+def test_with_no_guard_hook_a_changed_server_is_said_not_held():
+    out = _render(pending=["notes"], pending_keys=["mcp:notes"],
+                  hook_health={"claude-code": "absent", "cursor": "absent"}, agents={"cursor": 1})
+    assert "blocked until" not in out and "held by" not in out, out
+    assert "not held: no guard hook is installed here; run `mcpgawk` to add it" in out, out
+
+
+def test_a_broken_hook_holds_nothing():
+    out = _render(pending=["notes"], pending_keys=["mcp:notes"],
+                  hook_health={"claude-code": "broken"}, agents={"claude-code": 1})
+    assert "not held: no guard hook" in out, out
+
+
+def test_some_agents_hooked_says_where_it_holds():
+    out = _render(pending=["notes"], pending_keys=["mcp:notes"],
+                  hook_health={"claude-code": "ok", "cursor": "absent"},
+                  agents={"claude-code": 1, "cursor": 1})
+    assert "held where the guard hook is installed, until you decide" in out, out
+
+
+def test_an_unreadable_hook_probe_claims_neither_way():
+    out = _render(pending=["notes"], pending_keys=["mcp:notes"], hook_health={})
+    assert "held where the guard hook is installed" in out, out
 
 
 def test_queued_keys_come_from_decides_own_rule():

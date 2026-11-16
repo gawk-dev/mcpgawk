@@ -263,3 +263,27 @@ def test_an_unreadable_store_exits_4_not_0(tmp_path, monkeypatch, capsys):
     rc, out = _run(capsys, "--json")
     assert rc == 4, out
     assert "error" in json.loads(out)
+
+
+def test_a_change_block_opens_without_a_stray_mark(store, capsys):
+    """0.1.90 walk (2026-11-16): every block opened with `?` — the header carried its own leading
+    newline, and the one-line sanitiser turned it into the visible mark it gives control
+    characters. The blank line is printed, never passed through the sanitiser."""
+    rc, out = _run(capsys, "srv", "--since", "2026-08-01")
+    assert rc == 0, out
+    heads = [ln for ln in out.splitlines() if "⟳" in ln]
+    assert heads, out
+    for ln in heads:
+        assert ln.startswith("    ⟳"), repr(ln)
+    assert not any(ln.startswith("?") for ln in out.splitlines()), out
+
+
+def test_a_server_chosen_newline_in_the_name_still_reads_as_a_mark(store, capsys):
+    """The sanitiser still defends the header: a name carrying a newline cannot add a line."""
+    st = history.load(store)
+    st["servers"]["mcp:srv"]["aliases"] = ["srv\nFAKE LINE"]
+    history.save(st, store)
+    rc, out = _run(capsys, "mcp:srv", "--since", "2026-08-01")
+    assert rc == 0, out
+    assert "srv?FAKE LINE" in out, out
+    assert not any(ln.startswith("FAKE LINE") for ln in out.splitlines()), out

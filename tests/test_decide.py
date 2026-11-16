@@ -289,13 +289,40 @@ def test_a_queued_schema_change_is_not_called_blocked():
 
 
 def test_a_new_destination_parameter_is_still_called_blocked():
-    page = decide.render_page(decide.pending_decisions(_schema_store(["query", "url"])), token="t")
+    page = decide.render_page(decide.pending_decisions(_schema_store(["query", "url"])), token="t",
+                              held="all")
     assert "blocked · waiting on you" in page and "queued" not in page
 
 
 def test_a_description_change_is_still_called_blocked():
-    page = decide.render_page(decide.pending_decisions(_store()), token="t")
+    page = decide.render_page(decide.pending_decisions(_store()), token="t", held="all")
     assert "blocked · waiting on you" in page and "queued · waiting" not in page
+    assert ">Keep blocking<" in page
+
+
+# ── blocked only where a guard hook holds it (0.1.90 walk, 2026-11-16) ───────────────────────────
+def test_with_no_guard_hook_decide_says_nothing_holds_it():
+    page = decide.render_page(decide.pending_decisions(_store()), token="t", held="none")
+    assert "blocked · waiting" not in page and "cannot call it until" not in page, page
+    assert ">Keep blocking<" not in page and ">Not yet<" in page
+    assert "No guard hook is installed here" in page
+
+
+def test_decide_by_default_claims_only_where_the_hook_is():
+    page = decide.render_page(decide.pending_decisions(_store()), token="t")
+    assert "blocked · waiting" not in page and "Agents with the guard hook" in page
+
+
+def test_the_keep_words_follow_the_hook(monkeypatch):
+    from mcpgawk import status
+    from mcpgawk.status import KEEP_WORDS
+    monkeypatch.setattr(status, "hold_state_here", lambda: "none")
+    assert decide._keep_note() == KEEP_WORDS["none"]
+    monkeypatch.setattr(status, "hold_state_here", lambda: "all")
+    assert decide._keep_note() == KEEP_WORDS["all"]
+    assert "cannot call it" in KEEP_WORDS["all"]
+    assert "blocked" not in KEEP_WORDS["none"]
+    assert "No guard hook is installed here to hold it" in KEEP_WORDS["none"]
 
 
 # ── when the change was seen reaches the screen (audit 2026-11-10, item H) ───────────────────────

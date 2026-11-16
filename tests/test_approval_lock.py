@@ -315,6 +315,31 @@ def test_a_short_passphrase_is_refused_before_asking_again(tmp_path, store, anch
     assert al.read_anchor().status != "trusted"
 
 
+@pytest.mark.parametrize("held, want, never", [
+    ("none", "no guard hook is installed here to refuse calls to them", "the guard hook refuses"),
+    ("all", "the guard hook refuses calls to them", "no guard hook is installed"),
+])
+def test_lock_and_status_say_who_refuses_by_the_hook(tmp_path, anchor_dir, person, monkeypatch,
+                                                     capsys, held, want, never):
+    """0.1.90 walk (2026-11-16): `approvals status` and `approvals lock` said "the agent hook
+    refuses calls to them" on a machine with no guard hook installed."""
+    from mcpgawk import cli, status
+    monkeypatch.setattr(status, "hold_state_here", lambda: held)
+    store = str(tmp_path / "home" / ".mcpgawk" / "history.json")
+    Path(store).parent.mkdir(parents=True)
+    history.save({"servers": {
+        "mcp:seen": {"aliases": ["seen"], "history": [dict(SIGHTING)], "approved": dict(SIGHTING),
+                     "approved_via": "first-sighting"},
+    }}, store)
+    assert _cli_lock(store, monkeypatch, [PASS, PASS, PASS]) == 0
+    lock_out = " ".join(capsys.readouterr().out.split())
+    assert want in lock_out and never not in lock_out, lock_out
+    assert "agent hook refuses" not in lock_out
+    assert cli._dispatch(["approvals", "status"]) == 0
+    st_out = " ".join(capsys.readouterr().out.split())
+    assert "LOCKED" in st_out and want in st_out and never not in st_out, st_out
+
+
 @pytest.mark.skipif(not hasattr(os, "fork") or sys.platform.startswith("win"), reason="POSIX pty")
 def test_the_real_terminal_opens_and_answers():
     """MEASURED 2026-11-06: the founder's first `approvals lock` in their own terminal said "there is

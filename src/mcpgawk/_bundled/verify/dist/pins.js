@@ -189,6 +189,30 @@ export function hasDrift(d) {
 export const TOOLS_BASIS_CONTENT = 1;
 export const TOOLS_BASIS_SURFACE = 2;
 /**
+ * Who set this baseline, in the words `mcpgawk baseline` and the scan use for the same record
+ * (`decision.since_words` / `history.changed_head`). Until 0.1.91 verify said "what you approved
+ * with `mcpgawk approve`" of every shared baseline, including one trusted on first scan that
+ * nobody approved. An origin verify does not know is not guessed.
+ */
+export function baselineOriginWords(entry) {
+    switch (entry.baseline_origin) {
+        case "approve":
+            return "approved with `mcpgawk approve`";
+        case "fleet":
+            return "first seen, then accepted by your fleet approval";
+        case "first-sighting":
+            return "trusted on first scan; you have not approved this server yet";
+        case "unattended":
+            // `history.unattended_reason` is already the whole sentence ("approved without a person
+            // present — …"), printed as is by `mcpgawk baseline`.
+            return entry.unattended_reason || "approved without a person present";
+        case "unsigned":
+            return "this machine cannot verify who approved it";
+        default:
+            return "who approved it is not on record";
+    }
+}
+/**
  * The approved entry for the server verify knows by its CONFIG name — through the engine's own
  * `names` index, which it resolves with `history.resolve` (exact key, bare asserted name, alias;
  * ambiguous or unapproved ⇒ absent). verify never guesses a key itself: `servers[configName]`
@@ -220,8 +244,10 @@ export function compareShared(entry, current) {
         return {
             comparable: true,
             basis,
-            reason: "approved after a scan: description-only hashes, so a schema or annotation change is " +
-                "not visible against this approval",
+            // The scan's rule, whoever set the baseline: trust on first scan writes the same map an
+            // approval does, so this says what the hashes cover and claims nothing about who decided.
+            reason: "recorded by a scan: description-only hashes, so a schema or annotation change is " +
+                "not visible against this baseline",
             drift: diffPins(prior, byContent),
         };
     }
@@ -243,7 +269,7 @@ export function compareSharedBaseline(shared, servers) {
         const entry = sharedEntryFor(shared, s.server);
         if (!entry?.tools || Object.keys(entry.tools).length === 0)
             continue;
-        out[s.server] = compareShared(entry, s.tools);
+        out[s.server] = { ...compareShared(entry, s.tools), provenance: baselineOriginWords(entry) };
     }
     return out;
 }

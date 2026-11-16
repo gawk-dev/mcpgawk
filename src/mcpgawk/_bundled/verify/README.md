@@ -122,7 +122,8 @@ egress boundary) and `@gawk/oracle` (the N/N reproduction gate: an infra failure
   is exactly what `--isolate`'s ProxiedContainerSandbox closes (ADR-0014): those channels are
   dropped at the OS boundary while HTTP(S) stays observed. Under `--isolate`, non-HTTP protocols
   are BLOCKED but not parsed (blocking is a guarantee; parsing them is a later capability).
-- **Transports:** local **stdio** (sandboxed — all checks apply) and **remote HTTP/SSE**. A remote
+- **Transports:** local **stdio** (the checks run sandboxed; each server is first started once
+  outside the sandbox to list its tools) and **remote HTTP/SSE**. A remote
   hosted server can't be sandboxed, so only the output-based check (**tool-poisoning**) runs against
   it; the egress checks are reported as not-applicable, not faked.
 

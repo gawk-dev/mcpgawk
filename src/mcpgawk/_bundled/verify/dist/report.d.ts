@@ -1,6 +1,6 @@
 import type { Severity } from "@gawk/oracle";
 import type { CheckError, HiddenTool, RejectedInput, ServerReport, Transport } from "./model.js";
-import type { Drift } from "./pins.js";
+import { type Drift } from "./pins.js";
 import { type SuppressionsFile } from "./suppressions.js";
 /** 1.2 (2026-07-14): added `checkErrors`/`summary.checkErrors` — see {@link CheckError}'s
  * docstring in model.ts for the incident that made this necessary.
@@ -224,8 +224,19 @@ export declare function runCompleteness(servers: readonly ReportServer[], errors
  * failed checks (1 or 1000) still read as a clean pass.
  */
 export declare function deriveStatus(severity: Status, completeness: Completeness): Status;
+/**
+ * Drift since the baseline lifts a `clean` or `incomplete` status to `at-risk`; it never lowers
+ * `vulnerable`. Until 0.1.91 drift changed only the exit code (1), so the terminal, JSON, HTML,
+ * SARIF and JUnit said `clean` over a server whose tools had changed since the baseline.
+ */
+export declare function withDrift(status: Status, drifted: boolean): Status;
+/** One sentence for a drift, shared by the HTML, SARIF and JUnit renderers so they say the same
+ * thing the terminal's DRIFT line does. */
+export declare function driftWords(d: Drift): string;
+/** True when this drift records any change at all. Absent drift (no baseline) is no drift. */
+export declare function drifted(d: Drift | undefined): boolean;
 /** The ONLY exit-code derivation: a pure function of {@link Status}. 1 = actionable (a reproduced
- * finding), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
+ * finding, or drift since the baseline), 2 = incomplete (nothing can be claimed), 0 = clean and complete. Before 1A this was
  * computed independently of `summary.status`, so `incomplete` could exit 0 and `clean` exit 2. */
 export declare function exitCodeForStatus(status: Status): number;
 /** The three dispatch-coverage fields — shared by the raw {@link ServerReport} and the rendered

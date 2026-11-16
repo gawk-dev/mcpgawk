@@ -479,7 +479,7 @@ TIERS = (
     # 2026-10-05, so one HOME read "1 appeared" in the terminal and nothing at all here.
     ("appeared", "Appeared", "in an agent config since your fleet approval — named, not trusted; "
                              "nothing you approved to check its calls against"),
-    ("changed", "Changed", "moved off its baseline; your agents cannot call it"),
+    ("changed", "Changed", "moved off its baseline; held where the guard hook is installed"),
     # "With findings", not "Findings": every tier counts SERVERS, and the Findings tab's badge
     # counts FINDINGS. One page read "5 Findings" in the radar and "6" on the Findings tab —
     # the same word, two units (live 2026-09-03). The label now carries its unit.
@@ -606,7 +606,10 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
                      if isinstance(e, dict) and isinstance(e.get("approved"), dict))
     rows: list[tuple[str, str, str, str]] = []
     # 1
-    st = (f"guard in {covered} of {len(agents)} agent(s) · {pending} changed server(s) blocked now"
+    _held_now = ("held now" if covered == len(agents)
+                 else "held where the guard hook is installed" if covered
+                 else "not held (no guard hook)")
+    st = (f"guard in {covered} of {len(agents)} agent(s) · {pending} changed server(s) {_held_now}"
           if agents else "no agents found on this machine")
     rows.append(("Server approval required",
                  "a baseline is trusted only after `mcpgawk approve`; the guard hook refuses a "
@@ -2675,6 +2678,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     since last week" badge on three findings is not information.
     """
     from . import history as _h
+    from .status import HOLD_WORDS as _HOLD_WORDS
+    # Whether a changed server is HELD here: the hook's hold, so the words follow the hook.
+    _held = _hold_state(d)
+    _hold_words = _HOLD_WORDS[_held]
+    _blk = {"all": "Blocked", "some": "Blocked where the guard hook is installed",
+            "none": "NOT held — no guard hook is installed here"}[_held]
+    _hold_look = {"all": "your agents cannot call it until you look",
+                  "some": "agents with the guard hook cannot call it until you look",
+                  "none": "no guard hook is installed here to hold it"}[_held]
 
     def _origin_of(keys: "list[str]") -> "list[str | None]":
         """Each key's baseline origin — history's one rule — for the "since you approved" words."""
@@ -3424,7 +3436,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                       + (f'after you approved {"them" if len(pending) != 1 else "it"}'
                          if _h.vouched(_origin_of(pending)) else
                          _h.since_words(_origin_of(pending))) + '</h5>'
-                      '<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
+                      + {"all": '<p>Held by the guard hook meanwhile — the rug-pull shape is '
+                                'exactly this.</p>',
+                         "some": '<p>Held meanwhile where the guard hook is installed — the '
+                                 'rug-pull shape is exactly this.</p>',
+                         "none": '<p>Not held by a guard hook: none is installed here. Run '
+                                 '<code>mcpgawk</code> to add it.</p>'}[_held]
+                      + 
                       '<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
     # THE SAME CONTRADICTION, ONE ELEMENT DOWN. These cards are built from sign-ins and pending
     # approvals alone, so their empty state used to say "Nothing needs you — sign-ins and trust
@@ -3458,7 +3476,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         # Revolut X (measured, at baseline) both rendered as "waiting on your browser sign-in"
         # here, hiding the finding and contradicting the Servers table one click away.
         if _t2 == "changed":
-            _why2 = f"changed {_since_approval(_k2)} — blocked until you decide"
+            _why2 = f"changed {_since_approval(_k2)} — {_hold_words}"
             # A changed server with findings says BOTH: the reorder that made the counts agree
             # must not hide the conviction ("a server we convicted is not at its baseline").
             _nf2 = _f_by_srv.get(_n2, 0)
@@ -3475,7 +3493,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             # tile, the ask card and the strip all count it. A row saying only "appeared" left
             # Today counting one changed server and naming none (2026-10-05).
             if _k2 and _k2 in (pending or []):
-                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+                _why2 += f" · also changed {_since_approval(_k2)} — {_hold_words}"
             _nf2 = _f_by_srv.get(_n2, 0)
             if _nf2:
                 _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
@@ -3488,7 +3506,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             # as the appeared branch, or Today counts a changed server it never names
             # (2026-10-05). "a call was denied", not "blocked": the chip already says Blocked.
             if _k2 and _k2 in (pending or []):
-                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+                _why2 += f" · also changed {_since_approval(_k2)} — {_hold_words}"
             _nf2 = _f_by_srv.get(_n2, 0)
             if _nf2:
                 _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
@@ -4009,7 +4027,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 f'<input type="hidden" name="key" value="{_esc(k)}">'
                 f'{_review_pin_field(store, k)}'
                 f'<input type="hidden" name="tab" value="n3">'
-                f'<button class="act-sm" name="act" value="keep">Keep blocked</button>'
+                f'<button class="act-sm" name="act" value="keep">'
+                f'{"Keep blocked" if _held == "all" else "Not yet"}</button>'
                 f'<button class="act-sm warn" name="act" value="approve">Approve</button>'
                 f'</form>')
 
@@ -4023,11 +4042,11 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     def _dec_what(k: str) -> str:
         it = _dec_items.get(k)
         if not it and not _h.vouched(_origin_of([k])):
-            return (f'<span class="dim">Moved {_h.since_words(_origin_of([k]))}; your agents '
-                    'cannot call it until you look. Review it in Servers.</span>')
+            return (f'<span class="dim">Moved {_h.since_words(_origin_of([k]))}; {_hold_look}. '
+                    'Review it in Servers.</span>')
         if not it:
-            return ('<span class="dim">Moved since you approved it; your agents cannot call it '
-                    'until you look. Review it in Servers.</span>')
+            return (f'<span class="dim">Moved since you approved it; {_hold_look}. '
+                    'Review it in Servers.</span>')
         rep = it["report"]
         plain_changed = [t for t in rep.changed if t not in rep.hostile]
         bits = []
@@ -4104,9 +4123,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             else:
                 what = (", ".join(f'{t} ({days[t] or "date not recorded"})' for t in sorted(held))
                         + " changed and changed back")
-            return f'<span class="chip bad"><i></i>Blocked — {_esc(what)}</span>'
+            return f'<span class="chip bad"><i></i>{_blk} — {_esc(what)}</span>'
         if base and latest and base.get("items") != latest.get("items"):
-            return '<span class="chip bad"><i></i>Blocked</span>'
+            return f'<span class="chip bad"><i></i>{_blk}</span>'
         _rep = (_dec_items.get(k) or {}).get("report")
         _ext = _rep.extension_words() if _rep is not None and hasattr(_rep, "extension_words") else []
         if _ext and not (_rep.added or _rep.removed or _rep.changed or _rep.schema_changed
@@ -4117,7 +4136,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         grown = _h._permission_growth(base, latest) if base and latest else {}
         if grown:
             what = "; ".join(f"{t}: {', '.join(v)}" for t, v in sorted(grown.items()))
-            return f'<span class="chip bad say"><i></i>Blocked — {_esc(what)}</span>'
+            return f'<span class="chip bad say"><i></i>{_blk} — {_esc(what)}</span>'
         return ('<span class="chip warn say"><i></i>NOT blocked — an ordinary schema change, '
                 'calls still pass until you decide</span>')
 
@@ -4185,7 +4204,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
   <p>None has been watched running, so nothing here is a verdict yet.{_destr_line}</p>
   <ol>
     <li><b>Approve what you already trust</b><span>Records today's tool surface as the baseline.
-      After that, a server that changes is blocked until you look at it. Approval is human-only —
+      After that, where the guard hook is installed, a server that changes is held until you
+      look at it. Approval is human-only —
       it happens in Decisions or <code>mcpgawk decide</code>, never from an agent
       session.</span></li>
     <li><b>Watch one server run</b><span>Verify runs its tools and records every host it
@@ -6750,7 +6770,7 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                  + ("ended" if ended else "ended (the grant is still valid)")
                  + '. The gateway is passing every call through and enforcing NOTHING. Your agents '
                  'still work; they are not protected. '
-                 '<a href="https://mcp.gawk.dev/pricing">Subscribe</a> to restore protection, or '
+                 '<a href="https://mcp.gawk.dev/pricing.html">Subscribe</a> to restore protection, or '
                  'run <code>mcpgawk enforce uninstall</code> to remove it.</div>') + frame
     live = gw.get("live")
     live_html = ""
@@ -9304,6 +9324,24 @@ class _Markup(str):
     decided by where the text was made, never by what it looks like."""
 
 
+def _hold_state(d: dict) -> str:
+    """status.hold_state for the panel's own data: whether a changed server is HELD here, by the
+    hook health the panel read (absent key = not read = "some"). The panel said "blocked until you
+    decide" on machines with no guard hook (0.1.90 walk, 2026-11-16)."""
+    from .status import agents_on_this_machine, hold_state
+    try:
+        present = list(agents_on_this_machine(d.get("entries")))
+    except Exception:                               # noqa: BLE001
+        present = None
+    if "hook_health" not in d:
+        return "some"                    # not read: claim neither a hold nor its absence
+    if not d["hook_health"]:
+        # The panel asks only adapters whose config file exists: read, and empty, is no hook at
+        # all — not the probe failing (which leaves the key out, above).
+        return "none"
+    return hold_state(d["hook_health"], present)
+
+
 def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                 fresh_action: bool = False, skip: str = "") -> str:
     """The one-decision screen. Server-rendered from the same `collect()` as the dashboard, so it
@@ -9472,10 +9510,20 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             # waits for sign-off — the same rule `decide` and the dashboard chip already apply.
             from .decide import _blocks_calls
             blocking = _blocks_calls(it["report"])
-            stance = ('No agent can call it until you decide — a change under a recorded baseline '
-                      'is the rug-pull shape.' if blocking else
-                      'Calls still pass while it waits for you: only the shape of a tool changed, '
-                      'with no new permission, so the guard queues it rather than blocking it.')
+            # ...and only where a guard hook can hold it (0.1.90 walk, 2026-11-16): "No agent can
+            # call it" on a machine with no hook claimed a block nothing was enforcing.
+            held = _hold_state(d) if blocking else "all"
+            stance = ('Calls still pass while it waits for you: only the shape of a tool changed, '
+                      'with no new permission, so the guard queues it rather than blocking it.'
+                      if not blocking else
+                      'No agent can call it until you decide — a change under a recorded baseline '
+                      'is the rug-pull shape.' if held == "all" else
+                      'Agents with the guard hook cannot call it until you decide — a change under '
+                      'a recorded baseline is the rug-pull shape.'
+                      if held == "some" else
+                      'No guard hook is installed here to hold it — a change under a recorded '
+                      'baseline is the rug-pull shape. Run <code>mcpgawk</code> to add the hook.')
+            keep_words = blocking and held == "all"
             sub = (f'{n} change{"s" if n != 1 else ""} to the {noun} it declares. {stance}'
                    + (f' Approved by {_esc(it["approved_by"])}.'
                       if it["approved_by"] and it.get("origin") != "unattended" else '')
@@ -9484,7 +9532,7 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             acts = (f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
                     f'<input type="hidden" name="key" value="{_esc(it["key"])}">'
                     f'<input type="hidden" name="back" value="next">{skip_field}'
-                    f'<button class="btn" name="act" value="keep">{"Keep blocked" if blocking else "Not yet"}</button></form>'
+                    f'<button class="btn" name="act" value="keep">{"Keep blocked" if keep_words else "Not yet"}</button></form>'
                     f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
                     f'<input type="hidden" name="key" value="{_esc(it["key"])}">'
                     f'<input type="hidden" name="back" value="next">{skip_field}'
@@ -9492,11 +9540,20 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                     f'<button class="btn primary" name="act" value="approve">Approve the new surface</button></form>')
             note = ('Approve records this surface as the new baseline; the diff stays in the record '
                     'and the guard lets the next call through. Keep blocked leaves every agent '
-                    'refused until a person comes back to this screen.' if blocking else
+                    'refused until a person comes back to this screen.' if keep_words else
+                    'Approve records this surface as the new baseline; the diff stays in the record. '
+                    'Not yet leaves it waiting here; agents with the guard hook stay refused '
+                    'meanwhile.' if blocking and held == "some" else
+                    'Approve records this surface as the new baseline; the diff stays in the record. '
+                    'Not yet leaves it waiting here; no guard hook is installed here to hold it.'
+                    if blocking else
                     'Approve records this surface as the new baseline; the diff stays in the record. '
                     'Not yet leaves it waiting here; calls keep passing meanwhile.')
-            eyebrow = (f'1 OF {_eyebrow_n} · TRUST DECISION · '
-                       f'{"BLOCKED UNTIL YOU DECIDE" if blocking else "WAITING FOR YOUR SIGN-OFF"}'
+            _brow = ("WAITING FOR YOUR SIGN-OFF" if not blocking
+                     else "BLOCKED UNTIL YOU DECIDE" if held == "all"
+                     else "HELD WHERE THE GUARD HOOK IS INSTALLED" if held == "some"
+                     else "NOT HELD — NO GUARD HOOK")
+            eyebrow = (f'1 OF {_eyebrow_n} · TRUST DECISION · {_brow}'
                        + (f' · {n_dec} DECISIONS IN THE QUEUE' if n_dec > 1 else ''))
         elif it["kind"] == "signin":
             head = f'{_esc(it["name"])} cannot be measured until you sign in.'
@@ -10339,7 +10396,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                    "gateway-start": "gateway start",
                                    # never the gw-call key: it is the agent's credential
                                    "gw-call": "gateway call",
-                                   "keep": "keep blocked",
+                                   "keep": "keep waiting",
                                    "protect": f"protect · {_k}" if _k else "protect",
                                    "approve": f"approve · {_k}" if _k else "approve",
                                    "mute": f"mute · {_k}" if _k else "mute",
@@ -10396,7 +10453,8 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
             elif act == "keep":
                 # Leaving it blocked IS the decision — deliberately a no-op on state, exactly like
                 # `decide`'s keep. The message confirms the consequence, not an action performed.
-                _ACTION.update(message="Left blocked. Your agents still cannot call it.",
+                from .status import KEEP_WORDS, hold_state_here
+                _ACTION.update(message=KEEP_WORDS[hold_state_here()],
                                rows=[], level="ok", secret="", snippet="", at=_now())
             elif act == "protect":
                 # Install the pre-execution hook for ONE agent — the same guard.install_for the

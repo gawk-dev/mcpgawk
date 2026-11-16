@@ -1,3 +1,4 @@
+import { driftWords, drifted } from "./report.js";
 /**
  * SARIF 2.1.0 — the format GitHub code scanning (and most CI security dashboards) natively
  * ingest. A suppressed finding is encoded with SARIF's own `suppressions` array (kind:
@@ -24,6 +25,12 @@ function summarise(evidence) {
         return `output: "${evidence.snippet}"`;
     return JSON.stringify(evidence);
 }
+const DRIFT_RULE = {
+    id: "inventory-drift",
+    shortDescription: {
+        text: "tools added, removed or changed since the baseline (inventory-drift)",
+    },
+};
 export function toSarif(report) {
     const rules = new Map();
     const results = [];
@@ -58,6 +65,25 @@ export function toSarif(report) {
                     : {}),
             });
         }
+    }
+    // Drift since the baseline is a result, one per drifted server: the run exits 1 and the status is
+    // at-risk, so code scanning must not render it as a scan with no alerts (0.1.91). A warning, not
+    // an error: drift asks a person to review, it is not a reproduced conviction.
+    for (const server of report.servers) {
+        if (!server.drift || !drifted(server.drift))
+            continue;
+        if (!rules.has(DRIFT_RULE.id))
+            rules.set(DRIFT_RULE.id, DRIFT_RULE);
+        results.push({
+            ruleId: DRIFT_RULE.id,
+            level: "warning",
+            message: { text: `${server.server}: ${driftWords(server.drift)}` },
+            locations: [
+                { physicalLocation: { artifactLocation: { uri: `mcp-server:${server.server}` } } },
+            ],
+            partialFingerprints: { drift: `${server.server}:${driftWords(server.drift)}` },
+            properties: { server: server.server, drift: server.drift },
+        });
     }
     // toolExecutionNotifications: SARIF's own place for "the tool itself hit an error running a
     // check" — distinct from `results` (findings). A checkError rendered as a `result` would read

@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import shlex
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 #: Agents whose MCP calls the guard hook can currently intercept. Claude Code exposes PreToolUse
@@ -99,6 +100,75 @@ def hook_health_by_client() -> dict[str, str]:
     return out
 
 
+#: WHO HOLDS A CHANGED SERVER (0.1.90 walk, 2026-11-16). Every surface said "blocked until you
+#: decide" on a machine with no guard hook installed, where nothing blocks anything. The hold is
+#: the hook's, so the words follow the hook: "all" = every agent here has a working hook, "some" =
+#: some do (or it could not be told), "none" = no agent has one. Only a hook that can RUN counts
+#: ("broken" holds nothing). Said of the hook ALONE, in every state: the paid gateway refuses what
+#: the hook refuses, so "nothing holds it" would be false on a machine running the gateway.
+HOLD_WORDS = {
+    "all": "held by the guard hook until you decide",
+    "some": "held where the guard hook is installed, until you decide",
+    "none": "not held: no guard hook is installed here; run `mcpgawk` to add it",
+}
+
+#: The same three states, for a server whose baseline is unsigned on a locked machine.
+REFUSE_WORDS = {
+    "all": "the guard hook refuses calls to them",
+    "some": "the guard hook refuses calls to them where it is installed",
+    "none": "no guard hook is installed here to refuse calls to them (run `mcpgawk` to add it)",
+}
+
+
+#: What "keep" / "not yet" leaves behind, said by the same three states.
+KEEP_WORDS = {
+    "all": "Left blocked. Your agents still cannot call it.",
+    "some": "Left waiting. Agents with the guard hook still cannot call it.",
+    "none": "Left waiting. No guard hook is installed here to hold it — run `mcpgawk` to add one.",
+}
+
+
+def hold_state(hook_health: dict[str, str] | None,
+               agents: Iterable[str] | None = None) -> str:
+    """"all", "some" or "none" — see HOLD_WORDS. `hook_health` None = could not be read, which
+    claims neither a hold nor its absence; so does an EMPTY map, which is what the probe hands
+    back when it failed (every install has adapters to ask). `agents` None = which agents are here
+    is not known, so a working hook somewhere only earns "some".
+
+    Judged over the agents PRESENT, as scan's nudge (`cli._hook_coverage`) judges them: a Claude
+    Code hook on a machine whose only agent is Cursor holds nothing that reaches a server here.
+    With no agent found, a working hook stands for them, as it does there."""
+    if not hook_health:
+        return "some"
+    on = {c for c, h in hook_health.items() if h == "ok"}
+    if not on:
+        return "none"
+    if agents is None:
+        return "some"
+    present = set(agents)
+    if not present:
+        return "all"
+    if not present & on:
+        return "none"
+    return "all" if present <= on else "some"
+
+
+def hold_state_here() -> str:
+    """hold_state for this machine: the agents discovery finds, and each one's own hook."""
+    try:
+        from .discover import discover_servers
+        found = discover_servers()
+        entries = found[0] if isinstance(found, tuple) else found
+        present = list(agents_on_this_machine(entries))
+    except Exception:                               # noqa: BLE001
+        present = None
+    try:
+        health = hook_health_by_client()
+    except Exception:                               # noqa: BLE001
+        return "some"
+    return hold_state(health, present)
+
+
 def queued_keys(store: dict) -> set[str]:
     """Pending servers whose change the guard only QUEUES (calls still pass), by `decide`'s own
     rule — the panel's chip and /next use the same one. Empty on any failure: the caller then says
@@ -138,7 +208,7 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
                    + ("ended" if unprotected == "ended" else "ended (the grant is still valid)")
                    + ". The enforce gateway is PASSING EVERY CALL THROUGH and enforcing NOTHING.")
         out.append("      Your agents still work; they are not protected. Subscribe at "
-                   "https://mcp.gawk.dev/pricing, or `mcpgawk enforce uninstall` to remove it.")
+                   "https://mcp.gawk.dev/pricing.html, or `mcpgawk enforce uninstall` to remove it.")
 
     if not agents:
         if agents_error:
@@ -213,8 +283,10 @@ def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path |
         blocked = [n for n in pending if n not in set(queued)]
         out.append("")
         if blocked:
-            out.append(f"      {len(blocked)} server(s) changed since their baseline — blocked until")
-            out.append("      you decide:")
+            # Held only where a guard hook can run (HOLD_WORDS): "blocked" on a machine with no
+            # hook claimed a block nothing was enforcing (0.1.90 walk, 2026-11-16).
+            out.append(f"      {len(blocked)} server(s) changed since their baseline —")
+            out.append(f"      {HOLD_WORDS[hold_state(hook_health, agents)]}:")
             for name in blocked[:10]:
                 out.append(f"          {name}")
         if queued:

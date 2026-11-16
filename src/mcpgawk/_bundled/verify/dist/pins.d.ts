@@ -17,7 +17,7 @@ export declare const LEGACY_PINS_SCHEMA_VERSIONS: string[];
 /**
  * A fingerprint of one tool. `hash` is the SURFACE hash (basis 2: name + description + input schema +
  * annotations). `content` is the DESCRIPTION-ONLY hash (basis 1, `drift._hash`) — what a server
- * approved after a scan carries in the shared baseline, so verify can compare like with like.
+ * recorded by a scan carries in the shared baseline, so verify can compare like with like.
  */
 export interface ToolPin {
     readonly name: string;
@@ -88,7 +88,19 @@ export interface SharedBaselineEntry {
     readonly tools_basis?: number | null;
     readonly approved_at?: string | null;
     readonly aliases?: readonly string[];
+    /** `history.baseline_origin`: how this baseline was set — "approve", "fleet", "first-sighting",
+     * "unattended", "unsigned", or null/absent (older than the field, or an older engine). */
+    readonly baseline_origin?: string | null;
+    /** Why an "unattended" baseline had no person behind it (`history.unattended_reason`). */
+    readonly unattended_reason?: string | null;
 }
+/**
+ * Who set this baseline, in the words `mcpgawk baseline` and the scan use for the same record
+ * (`decision.since_words` / `history.changed_head`). Until 0.1.91 verify said "what you approved
+ * with `mcpgawk approve`" of every shared baseline, including one trusted on first scan that
+ * nobody approved. An origin verify does not know is not guessed.
+ */
+export declare function baselineOriginWords(entry: SharedBaselineEntry): string;
 /** The export: servers keyed by STORE IDENTITY, plus `names`, config name → that key. */
 export interface SharedBaselineShape {
     readonly schema: string;
@@ -100,6 +112,9 @@ export interface SharedComparison {
     readonly comparable: boolean;
     readonly basis: number | null;
     readonly reason?: string;
+    /** Who set the baseline compared against ({@link baselineOriginWords}); set by
+     * {@link compareSharedBaseline}, which holds the entry. */
+    readonly provenance?: string;
     readonly drift: Drift;
 }
 /**

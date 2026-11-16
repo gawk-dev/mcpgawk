@@ -506,6 +506,7 @@ def test_schema_only_drift_never_renders_as_blocked():
     html = panel.render(
         {"entries": {}, "store": store, "pending": ["mcp:schema-only", "mcp:tools-added"],
          "findings": [], "recent_calls": [], "hooks": {}, "adapters": {},
+         "hook_health": {"claude-code": "ok"},
          "unscannable": [], "observed": {}},
         token="tok", action=None)
     import re as _re
