@@ -1,11 +1,11 @@
 # mcpgawk — Claude Code plugin
 
 A skill that teaches Claude Code to use the mcpgawk CLI: measure an MCP server before you trust it, record
-the tool surface you approved, and catch it changing afterwards. Local-first; nothing is uploaded.
+the tool surface you approved, and catch it changing afterwards. Local-first: your inventory stays on your machine.
 
 The plugin is the skill only. It drives the `mcpgawk` command-line tool, which you install once:
 
-    uv tool install mcpgawk      # or: pipx install mcpgawk
+    uv tool install --force mcpgawk      # or: pipx install mcpgawk
 
 Install the plugin:
 

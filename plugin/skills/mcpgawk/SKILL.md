@@ -1,13 +1,14 @@
 ---
 name: mcpgawk
-description: Check what an MCP server can actually do before trusting it, record the tool surface you approved, and catch it changing afterwards. Use whenever the user adds, installs, updates or upgrades an MCP server, asks what their MCP servers can do or cost, or wants a changed tool refused until they have looked. Local-first; nothing is uploaded.
+description: Be told when an MCP server changes after you approved it, and refuse the changed tool until the user decides; check what a server can actually do before trusting it. Use whenever the user adds, installs, updates or upgrades an MCP server, asks what their MCP servers can do or cost, or wants a changed tool refused until they decide. Your inventory stays on your machine.
 ---
 
 # /mcpgawk — measure, approve, and watch the MCP servers your agent calls
 
 mcpgawk is a local CLI. It records what each MCP tool said when the user approved it, reports any
 change after that, and with the guard installed it refuses a call to a changed tool before it runs.
-State lives in `~/.mcpgawk` and `~/.gawk`. Nothing leaves the machine.
+State lives in `~/.mcpgawk` and `~/.gawk`, on this machine. mcpgawk connects out only for its
+PyPI version check, `--supply-chain` lookups, `install-node`, `login` and `push`.
 
 Install once (ask before running an installer):
 
@@ -54,8 +55,9 @@ hand over the approval:
     mcpgawk changes <server>                     # what the server's tools did over time
 
 A changed description, a changed input schema, a tool added or removed: each is printed with the
-old and new text. Walk the user through the diff. Only `mcpgawk approve` moves the baseline, and
-only the user runs it. A drifted server stays flagged until a person decides.
+old and new text. Walk the user through the diff. `mcpgawk approve` (or `decide`) moves the baseline.
+It refuses when it can see an agent running it, so print the command for the user. A drifted server
+stays flagged until the user decides.
 
 ## When the user wants the refusal to happen automatically
 
@@ -93,7 +95,8 @@ Use the CLI with JSON output rather than parsing tables:
 
 `baseline`, `skills` and `runs` take `--json` too. Run without a terminal, as you are, mcpgawk
 skips local (stdio) servers rather than launching them, and the output says so; to include them the
-user runs it in their own terminal, or tells you to add `--yes` (rule 2).
+user runs it in their own terminal, or tells you to add `--yes` (rule 2). If that leaves nothing
+measured, the scan fails rather than passing: report it as not checked.
 
 ## Optional: mcpgawk as an MCP server
 
