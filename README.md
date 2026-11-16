@@ -16,12 +16,13 @@
 [![CI](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml/badge.svg)](https://github.com/gawk-dev/mcpgawk/actions/workflows/ci.yml)
 [![Open VSX](https://img.shields.io/open-vsx/v/gawk-dev/mcpgawk?label=VS%20Code%20%2F%20Cursor)](https://open-vsx.org/extension/gawk-dev/mcpgawk)
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Action-C8401F?logo=github)](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)
-[![No egress](https://img.shields.io/badge/inventory-never%20uploaded-brightgreen.svg)](#guarantees)
+[![Local-first](https://img.shields.io/badge/inventory-stays%20local-brightgreen.svg)](#guarantees)
 
 Your agents call [Model Context Protocol](https://modelcontextprotocol.io) servers that can
 change what their tools do *after* you approved them, and the agent will call the new one without
 noticing. mcpgawk reads every server your agents can reach, checks every call against a baseline
-you approved, and blocks the ones that changed. It runs on your machine and uploads nothing.
+you approved, and blocks the ones that changed. It runs on your machine: your servers, approvals and call log stay there, and nothing about them is
+sent unless you ask for it (`mcpgawk push`, `--supply-chain`).
 
 The same engine powers **mcpgawk Platform**: `mcpgawk enforce` puts one endpoint in front of the
 whole fleet with a key per caller, policy on every call and a hash-chained audit log, and
@@ -59,8 +60,8 @@ request, used or not.
   pre-execution hook and a tool that appeared after you approved the server does not run.
 - **It runs the server, not just reads it.** `mcpgawk verify` drives tools in a sandbox and reports
   what they actually did — exfiltration, SSRF, poisoning — reproduced before it is reported.
-- **Nothing is uploaded.** Cloud scanners send your inventory to a server and gate the verdict there.
-  Every decision here is made on your machine, with no account and nothing to sign in to.
+- **Your inventory stays on your machine.** Cloud scanners send your inventory to a server and gate the verdict there.
+  Every decision here is made on your machine, and the free tools need no account.
 - **It says what it did not check.** Skipped tools are named as skipped, never counted as clean.
 
 ## Features
@@ -87,7 +88,7 @@ request, used or not.
   score.
 - 📌 **Integrity pin + drift** — catch a server that silently rewrites its tools. Every scan is recorded locally; `--no-track` skips it.
 - 🚩 **Bounded signals** — injection-shaped descriptions, cross-server shadowing, under-declaring Server Cards — pointers for a human, never verdicts.
-- 🔒 **Zero egress, by construction** — the measurement layers import no network library. Enforced by a test.
+- 🔒 **Your inventory stays on your machine** — the measurement layers import no network library. Enforced by a test.
   Two checks are opt-in and make an explicit exception (see [Guarantees](#guarantees)): `--supply-chain` and
   `--oauth-scopes`.
 
@@ -180,14 +181,21 @@ never a value.
 
 ## Guarantees
 
-- **No inventory egress.** The only network is the protocol client talking to the server you point
-  it at, plus one anonymous request to PyPI about once a day asking whether a newer mcpgawk exists
-  (it says nothing about your servers; `MCPGAWK_NO_UPDATE_CHECK=1` turns it off). The measurement layers import no network library — they *cannot* egress by construction
+- **Your servers, approvals and call log stay on your machine.** Nothing about them is sent unless
+  you ask for it (`mcpgawk push`, `--supply-chain`). Every network connection mcpgawk makes:
+  - the protocol client talking to the servers you point it at;
+  - one anonymous request to PyPI about once a day asking whether a newer mcpgawk exists (it says
+    nothing about your servers; `MCPGAWK_NO_UPDATE_CHECK=1` turns it off);
+  - `--supply-chain`, only when you pass it: sends the launched package's name (and pinned version,
+    if any) — never your tool inventory — to the public npm registry or PyPI JSON API;
+  - `mcpgawk install-node`, only when you run it: downloads Node from nodejs.org;
+  - `mcpgawk login`, only when you run it: sends your key to mcp.gawk.dev, and a paid key is checked
+    with Lemon Squeezy;
+  - `mcpgawk push`, only when you run it: sends a scan report to your hosted fleet view.
+
+  The measurement layers import no network library — they *cannot* egress by construction
   (enforced by a test). Public Server Card discovery is fetched with no auth and no redirect-following.
-  Two flags are the explicit, opt-in exception: `--supply-chain` sends the launched package's name
-  (and pinned version, if any) — never your tool inventory — to the public npm registry or PyPI JSON
-  API. `--oauth-scopes` makes no network call at all; it locally decodes a Bearer JWT you already
-  supplied. Neither runs unless you pass the flag.
+  `--oauth-scopes` makes no network call at all; it locally decodes a Bearer JWT you already supplied.
 - **Facts ≠ heuristics.** Exact capability facts and the token index never mix with the bounded
   heuristic signals — separate in code, separate in output.
 - **Reproducible.** One command, identical numbers.
@@ -203,7 +211,7 @@ uv run --extra dev --with mcp --with tiktoken --with httpx python -m pytest -q
 
 Scan your MCP servers on every pull request and fail the build if one gets too heavy or trips a signal.
 Give it a committed copy of your approvals and it also fails when a server changed since that copy, or is not in it.
-It runs entirely in your runner — nothing is uploaded — and posts a per-server cost/flag table to the job summary.
+It runs entirely in your runner — your inventory stays there — and posts a per-server cost/flag table to the job summary.
 
 ```yaml
 - uses: gawk-dev/mcpgawk@v1

@@ -19,11 +19,12 @@ either will not be merged.
 - Keep the EXACT / INDEX / BOUNDED tiers separate — never let a heuristic contaminate a fact.
 - Cost is a **named tokenizer index**, not an absolute count — keep it labelled honestly.
 - Add a test with every change. Run: `uv run --extra dev --with mcp --with tiktoken --with httpx python -m pytest -q`.
-- No telemetry, no account, no "phone home" — ever. That is the whole point of the tool.
+- No telemetry, ever. A user's servers, approvals and call log stay on their machine; nothing about them
+  is sent unless they ask for it (`mcpgawk push`, `--supply-chain`). That is the whole point of the tool.
 
 ## Dev setup
 ```bash
-git clone <repo> && cd mcpgawk
+git clone https://github.com/gawk-dev/mcpgawk && cd mcpgawk
 uv run --with mcp --with tiktoken --with httpx python -m mcpgawk scan examples/mcp.json
 ```
 

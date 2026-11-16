@@ -1,7 +1,7 @@
 # Security
 
-mcpgawk is a **local-first** tool: it connects only to the MCP server you point it at, and never uploads
-your inventory anywhere. The design and its boundaries are documented in [THREAT-MODEL.md](THREAT-MODEL.md).
+mcpgawk is a **local-first** tool: your servers, approvals and call log stay on your machine. Nothing
+about them is sent unless you ask for it (`mcpgawk push`, `--supply-chain`). The design and its boundaries are documented in [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## Reporting a vulnerability
 

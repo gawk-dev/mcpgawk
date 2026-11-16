@@ -1,20 +1,34 @@
 {
   "name": "mcpgawk",
-  "version": "0.1.0",
-  "description": "Measure the MCP servers your agent calls, record the tool surface you approved, and refuse a changed tool until a person has looked. Local-first.",
-  "author": { "name": "Nativerse", "email": "hello@nativerse-ventures.com", "url": "https://nativerse-ventures.com" },
+  "version": "0.1.89",
+  "description": "One checkpoint between your agent and its MCP servers: a tool that changed after you approved it is refused until you decide. Your inventory stays on your machine.",
+  "author": {
+    "name": "Nativerse",
+    "email": "hello@nativerse-ventures.com",
+    "url": "https://nativerse-ventures.com"
+  },
   "homepage": "https://mcp.gawk.dev",
   "repository": "https://github.com/gawk-dev/mcpgawk",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "security", "supply-chain", "drift", "agent", "skill"],
-  "skills": "./skills/",
+  "keywords": [
+    "mcp",
+    "security",
+    "supply-chain",
+    "drift",
+    "agent",
+    "skill"
+  ],
+  "skills": "./plugin/skills/",
   "interface": {
     "displayName": "mcpgawk",
-    "shortDescription": "Know what your MCP servers can do, and be told when they change.",
-    "longDescription": "mcpgawk measures every MCP server your agent can reach, records the tool surface you approved, reports any change after that, and with the guard installed refuses a changed tool before the call runs. Approval stays with the person at the keyboard. Nothing is uploaded.",
+    "shortDescription": "Be told when an MCP server changes after you approved it, before your agent calls it.",
+    "longDescription": "mcpgawk checks the MCP servers your agent can reach, records the tool surface you approved, reports any change after that, and with the guard installed refuses a changed tool before the call runs. mcpgawk refuses an approval when it can see an agent running it. Your inventory stays on your machine.",
     "developerName": "Nativerse",
     "category": "Security",
-    "capabilities": ["Read", "Execute"],
+    "capabilities": [
+      "Read",
+      "Execute"
+    ],
     "websiteURL": "https://mcp.gawk.dev",
     "defaultPrompt": [
       "Check what this MCP server can do before I add it.",

@@ -28,8 +28,13 @@ server "insecure."
   connected server (shadowing), or a public Server Card that hides tools the server actually exposes.
 
 ## Privacy / egress model
-The only network mcpgawk performs is the protocol client talking to the **server you point it at**. The
-measurement layers import no network library — they cannot exfiltrate what they saw by construction
+Your servers, approvals and call log stay on your machine. Nothing about them is sent unless you ask
+for it (`mcpgawk push`, `--supply-chain`). Every network connection mcpgawk makes: the protocol client
+talking to the **server you point it at**; an anonymous PyPI version check about once a day (off with
+`MCPGAWK_NO_UPDATE_CHECK=1`); and, only when you run them, `--supply-chain` package-registry lookups
+(npm / PyPI), `install-node` (downloads Node from nodejs.org), `login` (sends your key to
+mcp.gawk.dev; a paid key is checked with Lemon Squeezy) and `push` (sends a scan report to your
+hosted fleet view). The measurement layers import no network library — they cannot exfiltrate what they saw by construction
 (enforced by a test). Public Server Card discovery is fetched with **no auth headers and no
 redirect-following**, so a discovery endpoint can never capture your credentials.
 
