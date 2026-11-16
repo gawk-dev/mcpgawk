@@ -201,7 +201,12 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     """Returns snapshots, the raw entry (command/args/headers) each came from, and the targets we
     deliberately did NOT scan (consent withheld). The entries feed the opt-in supply-chain/
     oauth-scopes checks and the fleet view's auth step; the skipped list keeps unscanned servers
-    VISIBLE, so the summary can never imply coverage it doesn't have."""
+    VISIBLE, so the summary can never imply coverage it doesn't have.
+
+    It also leaves `args._rescan`: for each server it measured, how to measure it AGAIN with the
+    same options, for the "try again" answer when it could not be scanned. A server with no entry
+    there (a browser sign-in, a held session, a registry refusal) is never offered a retry."""
+    args._rescan = {}
     if args.stdio and (routed := _configured_as_command(shlex.split(args.stdio), args)):
         # The stdio twin of the URL routing below: a configured command scanned ad hoc used to
         # mint a nameless orphan record beside the real one (the config entry carries env —
@@ -230,6 +235,7 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
             entry, refused_snap = _registry_gate("cli-stdio", entry)
             if refused_snap is not None:
                 return [refused_snap], {"cli-stdio": entry}, []
+        args._rescan["cli-stdio"] = lambda: probe_stdio("cli-stdio", parts[0], parts[1:])
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}, []
     if (args.http or args.sse) and (routed := _configured_as(args.http or args.sse, args)):
         # Scanning a configured server BY URL is still scanning that server. Say so, then let the
@@ -274,6 +280,7 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
             # explicit --header still wins: the caller asked a different question.
             signed = with_stored_login({"url": url, "transport": transport, "headers": {}})
             if "_refreshable_login" in signed:
+                args._rescan[f"cli-{transport}"] = lambda: probe(signed, f"cli-{transport}")
                 return [await probe(signed, f"cli-{transport}")], {f"cli-{transport}": signed}, []
         # `--http`/`--sse` orders the attempts; it does not decide what we believe. The one case we
         # do NOT permute is --login: an OAuth provider would re-run its browser flow per candidate
@@ -284,6 +291,12 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         finally:
             if server is not None:
                 server.shutdown()
+        if auth is None:
+            # Not with --login: its provider and callback server are gone once this returns, and
+            # the sign-in itself is the retry.
+            args._rescan[f"cli-{transport}"] = lambda: probe_url(
+                f"cli-{transport}", url, entry["headers"], timeout, None, declared=transport,
+                permute=True)
         if auth is not None and snap.error:
             # `--login` IS the retry, so the scan-path advice "retry with `--login`" is circular
             # here, and a registration refusal must name the way through. `_signin_failure_line`
@@ -387,6 +400,9 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     if getattr(args, "sign_in", False):
         held_snaps = _measure_through_signin(approved)
     snaps = await asyncio.gather(*(probe(e, n) for n, e in approved if n not in held_snaps))
+    # `probe` by name at call time, so a retry goes through exactly what the first attempt did.
+    args._rescan.update({n: (lambda n=n, e=e: probe(e, n))
+                         for n, e in approved if n not in held_snaps})
     out = list(snaps) + [held_snaps[n] for n, _ in approved if n in held_snaps]
     out += [snap for snap, _ in refused.values()]
     return out, {**{n: e for n, e in approved}, **{n: e for n, (_, e) in refused.items()}}, skipped
@@ -2556,6 +2572,132 @@ def _print_held_change(shown: str, key: str, held: dict, report) -> None:
     _print_accept(key)
 
 
+#: The could-not-scan failures a second try can change: nothing answered, it answered too late,
+#: or it started and failed. Not a sign-in (the sign-in offer asks about those), and not a stale
+#: entry, a refused launch or a URL that is not MCP: trying again finds the same thing.
+ASK_WHAT_NEXT_KINDS = frozenset({"unreachable", "timed-out", "connect-failed", "nothing-listening",
+                                 "host-not-found", "server-error", "server-failed"})
+
+
+def _a_person_to_ask(args) -> bool:
+    """True only when a person at a terminal can answer a question.
+
+    Nobody to ask: `--json` / `--fleet-json` (stdout is for a program), `--yes` (non-interactive,
+    the same meaning the sign-in offer gives it), stdin or stderr not a terminal, or an agent
+    session — the markers and the process-ancestry check the approval gate uses, through
+    `history.approval_evidence`. The CI hatch is not read here: it waives approvals, not this."""
+    if getattr(args, "json", False) or getattr(args, "fleet_json", False) \
+            or getattr(args, "yes", False):
+        return False
+    try:
+        if not (sys.stdin.isatty() and sys.stderr.isatty()):
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    return bool(history.approval_evidence("cli").get("person_present"))
+
+
+def _shown(text: str | None) -> str:
+    from .redact import redact, redact_urls_in_text
+    return redact(redact_urls_in_text(text)) or ""
+
+
+def _could_not_scan_reason(snap: ServerSnapshot) -> str:
+    """The short reason on the prompt's first line, from what the probe already said."""
+    if snap.error_kind == "timed-out":
+        m = re.search(r"within (\d+)s", snap.error or "")
+        return f"no answer within {m.group(1)}s" if m else "no answer within the time budget"
+    first = (snap.error or "").splitlines()[0] if snap.error else ""
+    return _shown(first.rstrip(":").split(" — ")[0].strip()) or "it did not answer"
+
+
+def _prompt_name(name: str, entry: dict) -> str:
+    """A configured server by its name; an ad-hoc one (`cli-http`) by what was typed, redacted."""
+    if not name.startswith("cli-"):
+        return name
+    from .redact import redact_url_for_display
+    if entry.get("url"):
+        return _shown(redact_url_for_display(str(entry["url"])))
+    if entry.get("command"):
+        return _shown(shlex.join([str(entry["command"]), *(str(a) for a in entry.get("args") or [])]))
+    return name
+
+
+def _could_not_scan_details(snap: ServerSnapshot, entry: dict) -> list[str]:
+    """What is already known about the failure. Never the entry itself: it holds headers, env
+    and stored sign-ins. Everything printed goes through the redactor."""
+    from .redact import redact_url_for_display
+    lines = [f"    kind:       {snap.error_kind}", f"    transport:  {snap.transport}"]
+    if entry.get("url"):
+        lines.append(f"    url:        {_shown(redact_url_for_display(str(entry['url'])))}")
+    if entry.get("command"):
+        argv = [str(entry["command"]), *(str(a) for a in entry.get("args") or [])]
+        lines.append(f"    command:    {_shown(shlex.join(argv))}")
+    lines.append("    error:")
+    lines += [f"      {ln}" for ln in (_shown(snap.error) or "no detail").splitlines()]
+    return lines
+
+
+def _what_next() -> str:
+    """Ask once. EOF, Ctrl-C or an unreadable stdin is [s]: never hang, never crash."""
+    print("\n  What next?\n"
+          "    [r] try again\n"
+          "    [s] skip it and finish the scan\n"
+          "    [d] show why it failed\n"
+          "  > ", end="", file=sys.stderr, flush=True)
+    try:
+        return input().strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        print(file=sys.stderr)
+        return "s"
+
+
+def _ask_what_next(snaps: list, entries: dict, args) -> list:
+    """FOUNDER 2026-11-16: a server that could not be scanned, with a person at the terminal,
+    stops the scan and asks retry / skip / details. Nobody to ask: `snaps` back untouched, which
+    is exactly the scan before this existed. Skipping keeps the failure, so the exit code is 1 as
+    it always was — skipping never turns it into a pass."""
+    rescan = getattr(args, "_rescan", None) or {}
+
+    def stuck(sn: ServerSnapshot) -> bool:
+        return sn.is_failure and sn.error_kind in ASK_WHAT_NEXT_KINDS and sn.name in rescan
+
+    todo = [i for i, sn in enumerate(snaps) if stuck(sn)]
+    if not todo or not _a_person_to_ask(args):
+        return snaps
+    snaps = list(snaps)
+    for i in todo:
+        name = snaps[i].name
+        shown = _prompt_name(name, entries.get(name) or {})
+        print(f"\n  {shown}   could not scan — {_could_not_scan_reason(snaps[i])}",
+              file=sys.stderr)
+        while True:
+            answer = _what_next()
+            if answer == "s":
+                break
+            if answer == "d":
+                print("\n".join(_could_not_scan_details(snaps[i], entries.get(name) or {})),
+                      file=sys.stderr)
+                continue
+            if answer != "r":
+                print("  Type r, s or d.", file=sys.stderr)
+                continue
+            print(f"  Trying {shown} again…", file=sys.stderr, flush=True)
+            try:
+                snaps[i] = asyncio.run(rescan[name]())
+            except KeyboardInterrupt:
+                # Ctrl-C while it waits is [s]: keep the first failure and finish the scan.
+                print(f"\n  Stopped. {shown} stays not scanned.", file=sys.stderr)
+                break
+            if not stuck(snaps[i]):
+                if not snaps[i].is_failure:
+                    print(f"  {shown} answered this time.", file=sys.stderr)
+                break
+            print(f"\n  {shown}   could not scan — {_could_not_scan_reason(snaps[i])}",
+                  file=sys.stderr)
+    return snaps
+
+
 def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
     """The scan's exit-code decision — one answer for --json, --fleet-json and the terminal view.
 
@@ -2734,6 +2876,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
         snaps, entries, skipped = asyncio.run(_run(args))
     except _StopRun:
         return 2        # a usage problem (--only typo, unset secret env), already explained on stderr
+    # FOUNDER 2026-11-16: a server that could not be scanned stops the scan and asks the person
+    # what next — retry, skip or details — before anything is measured, recorded or printed.
+    snaps = _ask_what_next(snaps, entries, args)
     measurements = [measure(sn) for sn in snaps]
     # Cross-server signals need all snapshots together; merge into each involved server's signals.
     # Two DISTINCT techniques, both requiring the whole inventory:
