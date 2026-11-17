@@ -183,3 +183,20 @@ def test_the_demo_sandbox_can_actually_be_verified(tmp_path):
     unknown = call("no_such_tool")
     assert unknown.get("error", {}).get("code") == -32602, (
         "an unknown tool should be an invalid-params error, not method-not-found")
+
+
+def test_demo_closing_line_never_claims_nothing_is_uploaded(tmp_path, capsys, monkeypatch):
+    """0.1.93: "nothing uploaded" overstated it (the CLI makes named connections: the daily PyPI
+    check, login, push). Both endings, a person's run and an agent's, say where it ran instead."""
+    rc = _run(tmp_path / "person")
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "all on this machine, in a" in out and "throwaway sandbox." in out
+    assert "nothing uploaded" not in out and "nothing\nuploaded" not in out
+    _as_agent(monkeypatch)
+    rc = _run(tmp_path / "agent")
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "refuse your agent's approval" in out
+    assert "all on this machine, in a throwaway sandbox." in out
+    assert "nothing uploaded" not in out

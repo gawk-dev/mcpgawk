@@ -348,13 +348,13 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
         if by_you:
             print(_c("1", "\n✓ That is the whole product in one run:") +
                   " discover, measure, approve, detect drift, block both the tool that changed "
-                  "and\n  the tool that arrived after the approval — all locally, nothing "
-                  "uploaded.")
+                  "and\n  the tool that arrived after the approval — all on this machine, in a "
+                  "throwaway sandbox.")
         else:
             print(_c("1", "\n✓ That is the whole product in one run:") +
                   " discover, measure, refuse your agent's approval, detect drift, block both\n"
                   "  the tool that changed and the tool that arrived after the baseline — all "
-                  "locally, nothing uploaded.")
+                  "on this machine, in a throwaway sandbox.")
         _note(_c("2", "The added tool is denied by name. The rewritten tool is denied on the LAST "
                       "SCAN's evidence, not this call's: a change nobody has scanned yet passes "
                       "until the next scan or monitor tick — and every such denial says so."))
