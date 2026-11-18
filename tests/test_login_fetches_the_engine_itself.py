@@ -12,8 +12,9 @@ THE NON-NEGOTIABLES, each pinned below and mutation-checked at build time:
      deletes the download, exits non-zero and never says "installed".
   3. 403 names the ONE missing step (the key is not eligible) and exits 3 — the documented
      "cannot run". 503 says try again and exits 4 — "incomplete", never 0.
-  4. The key travels ONLY in the POST body. Never in a URL, never on a shell command line except
-     the one the customer typed themselves (the re-exec after install).
+  4. The key travels ONLY in the POST body. Never in a URL, never on a command line: the re-exec
+     after install gets it on stdin (`login --stdin`, review M12), because a child's argv is
+     readable through `ps` by every user on the machine.
   5. The wheel is installed WHERE THE RUNNING INTERPRETER LIVES — one rule, no fallback ladder.
      `install.sh` chooses where the free package goes; `login` puts the paid engine in the same
      place. Two install routes would be a second definition of "where mcpgawk is".
@@ -73,7 +74,7 @@ def free_install(monkeypatch, tmp_path):
     captures: list[bool] = []             # whether each _run was asked to hold its output
     installed: list[bytes] = []          # the wheel's bytes AS THE INSTALLER SAW THEM (it is deleted after)
 
-    def run(argv, capture=False):
+    def run(argv, capture=False, stdin_text=None):
         runs.append(list(argv))
         captures.append(capture)
         if argv[-1].endswith(".whl"):
@@ -81,6 +82,7 @@ def free_install(monkeypatch, tmp_path):
         return 0
 
     monkeypatch.setattr(engine_fetch, "_run", run)
+    monkeypatch.setattr(engine_fetch, "_reads_stdin", lambda binary: True)   # never run a real binary
     net.captures = captures
     monkeypatch.setattr(engine_fetch, "_download_dir", lambda: tmp_path)
     net.installed = installed
@@ -101,7 +103,8 @@ def test_login_on_a_free_install_fetches_verifies_installs_and_reexecs(free_inst
     install, reexec = runs
     assert install[-1].endswith("mcpgawk-9.9.9-py3-none-any.whl") and net.installed == [WHEEL_BYTES]
     assert not Path(install[-1]).exists(), "the downloaded wheel was left on disk after install"
-    assert reexec[-2:] == ["login", KEY], reexec
+    assert reexec[-2:] == ["login", "--stdin"], reexec
+    assert all(KEY not in a for argv in runs for a in argv), "the key is on a child's command line"
     # the install runs CAPTURED (chatter held), the re-exec STREAMS (the user sees login's output)
     assert net.captures == [True, False], net.captures
     assert "installed" in out.lower()
@@ -159,7 +162,7 @@ def test_a_download_that_fails_midway_says_so_and_exits_4(free_install, capsys):
 
 def test_an_installer_that_exits_nonzero_never_reexecs_and_never_says_installed(free_install, monkeypatch, capsys):
     net, runs = free_install
-    monkeypatch.setattr(engine_fetch, "_run", lambda argv, capture=False: (runs.append(list(argv)), 1)[1])
+    monkeypatch.setattr(engine_fetch, "_run", lambda argv, capture=False, stdin_text=None: (runs.append(list(argv)), 1)[1])
     rc = cli.main(["login", KEY])
     out = capsys.readouterr()
     text = (out.out + out.err).lower()
@@ -211,7 +214,8 @@ def test_login_without_a_key_on_a_free_install_names_the_key_as_the_one_missing_
     # -h on a free install prints usage and exits 0, exactly as the paid `login -h` does
     rc = cli.main(["login", "--help"])
     out = capsys.readouterr().out
-    assert rc == 0 and out.startswith("usage: mcpgawk login '<license-key>'"), out
+    assert rc == 0 and out.startswith("usage: mcpgawk login "), out
+    assert "mcpgawk login '<license-key>'" in out and "--stdin" in out, out
 
 
 def test_a_key_the_shell_split_at_a_pipe_is_caught_before_any_network_call(free_install, capsys):

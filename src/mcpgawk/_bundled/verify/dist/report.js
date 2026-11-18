@@ -10,7 +10,11 @@ import { isSuppressed, unreviewedHosts } from "./suppressions.js";
  * that server, and the summary, `at-risk` (a `vulnerable` conviction stays `vulnerable`). Before,
  * a drifted run said `status: "clean"` while it exited 1. A consumer that took `at-risk` to mean
  * "a reproduced finding" must also read `findings` and `drift`. */
-export const REPORT_SCHEMA_VERSION = "1.3";
+/* 1.4 (2026-11-18, 0.1.94): added `servers[].startedOutsideSandbox` and `servers[].startEgress`.
+ * On the default backend a local server's first start (package warm-up, listing, discover) now
+ * runs inside the sandbox; `startedOutsideSandbox` says whether it fell back to this machine, and
+ * `startEgress` lists what that start reached, blocked ones included (review G1). */
+export const REPORT_SCHEMA_VERSION = "1.4";
 /**
  * The honest coverage boundary of the current sandbox backend. Egress-based checks observe HTTP(S)
  * traffic routed through the proxy; a target that exfiltrates over a RAW socket / DNS / UDP is NOT
@@ -291,6 +295,8 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
             drift: driftByServer[r.server],
             sandboxBackend: r.sandboxBackend,
             sandboxDegradedReason: r.sandboxDegradedReason,
+            startedOutsideSandbox: r.startedOutsideSandbox,
+            startEgress: r.startEgress,
             labelNoiseNote: r.labelNoiseNote,
             dynamicDispatch: r.dynamicDispatch,
             hiddenCatalog: r.hiddenCatalog,
@@ -348,8 +354,12 @@ export function buildReport(reports, generatedAt, driftByServer = {}, errors = [
  */
 function coverageOf(servers, completeness) {
     const claim = coverageClaimOf(servers, completeness);
-    // Said once, whenever any local server ran: the first start is outside every backend.
-    return servers.some((s) => s.sandboxBackend !== "none") ? `${claim} ${ENUMERATION_SCOPE}` : claim;
+    // Said once, whenever any local server was first started outside the sandbox (review G1: on the
+    // default backend the listing start now runs inside it; a report row without the field is
+    // read the old way, as outside).
+    return servers.some((s) => s.sandboxBackend !== "none" && s.startedOutsideSandbox !== false)
+        ? `${claim} ${ENUMERATION_SCOPE}`
+        : claim;
 }
 function coverageClaimOf(servers, completeness) {
     // No coverage CLAIM on an incomplete run. What we can honestly say is what was NOT established.

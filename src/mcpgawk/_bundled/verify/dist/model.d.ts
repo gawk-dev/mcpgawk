@@ -95,6 +95,16 @@ export interface ServerReport {
     readonly sandboxBackend: "proxied-container" | "docker" | "proxy" | "none";
     /** Set only when `isolate` was requested but Docker was unavailable/unusable for this command. */
     readonly sandboxDegradedReason?: string;
+    /** Whether this local server was started directly on this machine, outside the sandbox, to list
+     * its tools (review G1 + J5). Absent on reports written before this field existed: read as true. */
+    readonly startedOutsideSandbox?: boolean;
+    /** What the sandboxed start reached (warm-up, listing, discover): one row per host and outcome.
+     * A blocked row is a destination the server tried on start-up that the sandbox refused. */
+    readonly startEgress?: readonly {
+        host: string;
+        allowed: boolean;
+        allowedBy?: string;
+    }[];
     /** Set when this server's restricting annotations were IGNORED as uninformative — every tool
      * carried the same restricting label (kite stamps all 22 destructive, get_ltp included).
      * Labels that never vary carry no information, and honouring them lets a server evade

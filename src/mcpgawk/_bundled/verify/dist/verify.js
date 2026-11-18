@@ -300,7 +300,44 @@ export async function verifyServer(server, opts = {}) {
     const probe = remote ? remoteProbe(server) : sandboxedProbe(effectiveServer, sandbox);
     const checks = remote ? CHECKS.filter((c) => c.applicability === "output") : CHECKS;
     emit({ type: "server", server: server.name, transport, mode });
-    const tools = await listTools(server);
+    // G1 + J5 (WP17): on the default backend the start that lists the tools runs inside the
+    // sandbox, through the same proxy as the checks, so what the server does on start-up is seen
+    // and, if not allowed, blocked. It falls back to the old start on this machine when the server
+    // cannot be started inside (a private package registry, a start-up download from a host not on
+    // its allow-list): that server then lists as before and the report says its first start was
+    // outside. The container backends still list on this machine: no container runtime here to
+    // prove them against, so they keep the old start and the old sentence.
+    let startedOutsideSandbox = !remote;
+    // Every destination the sandboxed starts reached (warm-up, listing, discover), one row per
+    // host and outcome. A listing made while something was blocked is kept, not retried on this
+    // machine: a retry outside would let exactly that traffic through, unseen.
+    const startEgressByKey = new Map();
+    const onStartEgress = (records) => {
+        for (const r of records) {
+            const by = r.allowedBy;
+            startEgressByKey.set(`${r.host}|${r.allowed}`, {
+                host: r.host,
+                allowed: r.allowed,
+                ...(by ? { allowedBy: by } : {}),
+            });
+        }
+    };
+    let tools;
+    if (!remote && sandboxBackend === "proxy") {
+        try {
+            tools = await listTools(effectiveServer, sandbox, onStartEgress);
+            startedOutsideSandbox = false;
+        }
+        catch {
+            tools = await listTools(server);
+        }
+    }
+    else {
+        tools = await listTools(server);
+    }
+    // A hidden catalogue's discover call starts the server again: same place as the listing start.
+    const startSandbox = startedOutsideSandbox ? undefined : sandbox;
+    const startServer = startedOutsideSandbox ? server : effectiveServer;
     emit({
         type: "enumerated",
         server: server.name,
@@ -329,7 +366,7 @@ export async function verifyServer(server, opts = {}) {
                 // and UNION the results — PARTIAL by nature. The server stays incomplete regardless.
                 const byName = new Map();
                 for (const q of DISCOVERY_QUERIES) {
-                    const cat = parseHiddenCatalog(await callToolText(server, discover, { [queryParam]: q }));
+                    const cat = parseHiddenCatalog(await callToolText(startServer, discover, { [queryParam]: q }, startSandbox, onStartEgress));
                     for (const h of cat)
                         if (!byName.has(h.name))
                             byName.set(h.name, h);
@@ -348,7 +385,7 @@ export async function verifyServer(server, opts = {}) {
             else {
                 // Listing discover: an empty call returns the whole catalog. callToolText is bounded +
                 // swallows failures, so a server we can't read simply stays at the correctness floor.
-                hiddenCatalog = parseHiddenCatalog(await callToolText(server, discover, {}));
+                hiddenCatalog = parseHiddenCatalog(await callToolText(startServer, discover, {}, startSandbox, onStartEgress));
                 emit({
                     type: "dispatch-enumeration",
                     server: server.name,
@@ -610,6 +647,8 @@ export async function verifyServer(server, opts = {}) {
         pins: pinInventory(server.name, tools),
         sandboxBackend,
         sandboxDegradedReason,
+        startedOutsideSandbox,
+        startEgress: startEgressByKey.size > 0 ? [...startEgressByKey.values()] : undefined,
         labelNoiseNote,
         authIncomplete,
         rejectedInput: rejectedInput.length > 0 ? rejectedInput : undefined,

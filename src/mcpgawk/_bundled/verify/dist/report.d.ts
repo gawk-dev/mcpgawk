@@ -7,7 +7,7 @@ import { type SuppressionsFile } from "./suppressions.js";
  * 1.3 (2026-11-15): added `servers[].rejectedInput`, `servers[].allCallsErrored` and
  * `summary.rejectedInput`. A check a tool answered with its own error is no longer a check
  * error: it is in neither check count and the tool is listed (review J1, narrowed). */
-export declare const REPORT_SCHEMA_VERSION = "1.3";
+export declare const REPORT_SCHEMA_VERSION = "1.4";
 /**
  * The honest coverage boundary of the current sandbox backend. Egress-based checks observe HTTP(S)
  * traffic routed through the proxy; a target that exfiltrates over a RAW socket / DNS / UDP is NOT
@@ -90,6 +90,15 @@ export interface ReportServer {
     readonly sandboxBackend: "proxied-container" | "docker" | "proxy" | "none";
     /** Set only when sandboxBackend is "proxy" because Docker was attempted and unavailable/unusable. */
     readonly sandboxDegradedReason?: string;
+    /** See {@link ServerReport.startedOutsideSandbox}; absent = true. */
+    readonly startedOutsideSandbox?: boolean;
+    /** What the sandboxed start reached (warm-up, listing, discover): one row per host and outcome.
+     * A blocked row is a destination the server tried on start-up that the sandbox refused. */
+    readonly startEgress?: readonly {
+        host: string;
+        allowed: boolean;
+        allowedBy?: string;
+    }[];
     /** Set when this server's restricting annotations were ignored as uninformative (blanket
      * labels, kite-style: every tool stamped destructive). Rendered by human surfaces so a
      * label-evading server can never look cautiously verified. */

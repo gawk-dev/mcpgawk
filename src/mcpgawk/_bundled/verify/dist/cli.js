@@ -605,6 +605,15 @@ export function printText(report, log) {
             // weeks because no printed line ever said why nothing was exercised.
             log(`  ! ${s.labelNoiseNote}`);
         }
+        const blockedAtStart = [
+            ...new Set((s.startEgress ?? []).filter((r) => !r.allowed).map((r) => r.host)),
+        ];
+        if (blockedAtStart.length > 0) {
+            // Review G1: the start now runs in the sandbox; a host it was refused is only ever seen
+            // here when safe mode skipped every tool and no check ran afterwards.
+            log(`  ! On start-up it tried to reach ${blockedAtStart.join(", ")}, which is not on its allowed list; ` +
+                "the sandbox blocked it. Its tool list may be incomplete.");
+        }
         if (s.transport !== "stdio") {
             log(`  (remote — can't sandbox; egress checks N/A, ran: ${s.checksRun.join(", ")})`);
         }

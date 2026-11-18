@@ -1,5 +1,5 @@
 import type { Candidate, ReproResult, ReproRunner } from "@gawk/oracle";
-import type { Sandbox } from "@gawk/sandbox";
+import type { EgressRecord, Sandbox } from "@gawk/sandbox";
 import type { Observation, VulnCheck } from "./checks.js";
 import type { ToolAnnotations } from "./classify.js";
 import { type ExecutorEnvelope } from "./dispatch.js";
@@ -61,14 +61,15 @@ export type VerifyClient = {
     }): Promise<unknown>;
     close(): Promise<void>;
 };
-/** Connect once and enumerate the server's tools (works for stdio and remote). */
-export declare function listTools(server: ServerConfig): Promise<ToolInfo[]>;
+/** Connect once and enumerate the server's tools (works for stdio and remote). With `sandbox`, a
+ * local server is started inside it; without, directly on this machine. */
+export declare function listTools(server: ServerConfig, sandbox?: Sandbox, onEgress?: (records: readonly EgressRecord[]) => void): Promise<ToolInfo[]>;
 /** Call ONE tool once and return its text output — for enumerating a dynamic-dispatch server's
  * hidden catalog via its (read-only) discover tool. Best-effort: bounded by the probe timeout and
  * returns "" on any failure, so a server that can't be enumerated degrades to the correctness floor
  * rather than throwing. NOT a behavioural probe (no sandbox/egress observation) — only used to read
  * a discover tool's listing. */
-export declare function callToolText(server: ServerConfig, toolName: string, args: Record<string, unknown>): Promise<string>;
+export declare function callToolText(server: ServerConfig, toolName: string, args: Record<string, unknown>, sandbox?: Sandbox, onEgress?: (records: readonly EgressRecord[]) => void): Promise<string>;
 /**
  * The allowed destinations the proxy could not reach during a call, in words, or "". The proxy
  * has recorded these since it learned to fail fast, and nothing read them (review J12): a tool

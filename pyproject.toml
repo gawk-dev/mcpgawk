@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcpgawk"
-version = "0.1.93"
+version = "0.1.94"
 description = "Catches an MCP server that changed after you approved it, and holds the call before your agent runs it. Your inventory stays on your machine."
 readme = "README.md"
 requires-python = ">=3.10"

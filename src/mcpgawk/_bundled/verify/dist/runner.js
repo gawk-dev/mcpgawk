@@ -175,15 +175,45 @@ async function connectEither(legacy, modern) {
         }
     }
 }
-/** Connect once and enumerate the server's tools (works for stdio and remote). */
-export async function listTools(server) {
+/**
+ * A sandbox session for ONE start of a local server outside the per-check probes: the listing
+ * start and a hidden catalogue's discover call (review G1 + J5, WP17). Both used to spawn the
+ * server directly on this machine, full network and no proxy, so whatever it did on start-up was
+ * neither seen nor blocked. With a sandbox they run through the same proxy the checks use.
+ */
+async function inSession(server, sandbox, run, onEgress) {
+    const session = await sandbox.enter(server.allowedHosts ?? [], {
+        command: server.command ?? "",
+        args: server.args ?? [],
+    });
+    try {
+        const spawnOverride = session.wrapSpawn?.(server.command ?? "", server.args ?? [], server.env);
+        return await run({ ...session.envOverrides }, spawnOverride);
+    }
+    finally {
+        // What this start reached, read BEFORE the session is disposed: the warm-up's records and
+        // the start's own. Blocked ones are the only trace of a server that reaches out on start-up
+        // when no check runs afterwards (every tool skipped).
+        await session.settle?.().catch(() => { });
+        onEgress?.([...(session.warmUpEgress?.() ?? []), ...session.egress()]);
+        await session.dispose();
+    }
+}
+/** Connect once and enumerate the server's tools (works for stdio and remote). With `sandbox`, a
+ * local server is started inside it; without, directly on this machine. */
+export async function listTools(server, sandbox, onEgress) {
+    if (sandbox && !isRemote(server)) {
+        return inSession(server, sandbox, (env, spawnOverride) => listToolsVia(server, stdioTransport(server, env, spawnOverride), () => modernFor(server, env, spawnOverride)), onEgress);
+    }
+    return listToolsVia(server, connectTransport(server), () => modernFor(server));
+}
+async function listToolsVia(server, transport, modern) {
     const client = new Client({ name: "gawk-verify", version: "1.0.0" });
-    const transport = connectTransport(server);
     try {
         return await listToolsWith(await connectEither(async () => {
             await client.connect(transport, { timeout: connectTimeoutMs() });
             return client;
-        }, () => modernFor(server)), server.backendPrefix);
+        }, modern), server.backendPrefix);
     }
     catch (e) {
         // A server that cannot start produces a useless protocol-level message ("MCP error -32000:
@@ -222,14 +252,20 @@ async function listToolsWith(client, backendPrefix) {
  * returns "" on any failure, so a server that can't be enumerated degrades to the correctness floor
  * rather than throwing. NOT a behavioural probe (no sandbox/egress observation) — only used to read
  * a discover tool's listing. */
-export async function callToolText(server, toolName, args) {
+export async function callToolText(server, toolName, args, sandbox, onEgress) {
+    if (sandbox && !isRemote(server)) {
+        return inSession(server, sandbox, (env, spawnOverride) => callToolTextVia(stdioTransport(server, env, spawnOverride), () => modernFor(server, env, spawnOverride), toolName, args), onEgress).catch(() => "");
+    }
+    return callToolTextVia(connectTransport(server), () => modernFor(server), toolName, args);
+}
+async function callToolTextVia(transport, modern, toolName, args) {
     const client = new Client({ name: "gawk-verify", version: "1.0.0" });
     let active = client;
     try {
         active = await connectEither(async () => {
-            await client.connect(connectTransport(server), { timeout: connectTimeoutMs() });
+            await client.connect(transport, { timeout: connectTimeoutMs() });
             return client;
-        }, () => modernFor(server));
+        }, modern);
         const res = await active.callTool({ name: toolName, arguments: args }, undefined, {
             timeout: probeTimeoutMs(),
         });

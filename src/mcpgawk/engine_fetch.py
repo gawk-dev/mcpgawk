@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import getpass
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,32 @@ ENDPOINT = "https://mcp.gawk.dev/api/license-status"
 #: success into a refusal. The tests pin that as a substring rule over stdout AND stderr.
 EXIT_NOT_ELIGIBLE = 3
 EXIT_INCOMPLETE = 4
+
+
+def read_key_from(rest: list[str]) -> tuple[str | None, int]:
+    """The key from `login`'s arguments, stdin, or a hidden prompt. Returns (key, exit code if none).
+
+    Review M12: a key typed as an argument sits in shell history, and a key handed to a child
+    process as an argument is readable through `ps` by every user on the machine while it runs.
+    `--stdin` reads it from standard input (the installer and the free install's hand-over use
+    this); a bare `login` at a terminal asks for it without echoing. A bare `login` with no terminal
+    prints usage and never waits on a stdin nobody will close (an agent, a CI step).
+    """
+    if rest and rest[0] == "--stdin":
+        key = sys.stdin.readline().strip()
+        if not key:
+            print("mcpgawk login: no licence key on standard input. Nothing was saved.", file=sys.stderr)
+            return None, 2
+        return key, 0
+    if rest:
+        return rest[0].strip(), 0
+    if sys.stdin.isatty():
+        key = getpass.getpass("Paste your licence key (input hidden): ").strip()
+        if not key:
+            print("mcpgawk login: no licence key entered. Nothing was saved.", file=sys.stderr)
+            return None, 2
+        return key, 0
+    return None, -1
 
 
 def request_body(key: str) -> str:
@@ -69,14 +96,16 @@ def _get(url: str) -> bytes:
         return resp.read()
 
 
-def _run(argv: list[str], capture: bool = False) -> int:
+def _run(argv: list[str], capture: bool = False, stdin_text: str | None = None) -> int:
     """Run argv. With capture=True the child's output is held and shown ONLY if it fails: the
     installer's progress chatter (uv's package list, its "not on PATH" warning) has no place
     between the two success lines of a login, but its error is exactly what a failed install must
-    show. Without capture the child streams, which is what the re-exec of `login` wants."""
+    show. Without capture the child streams, which is what the re-exec of `login` wants.
+    `stdin_text` is written to the child's stdin: how the key reaches the re-exec'd `login`
+    without sitting in its argv (review M12)."""
     if not capture:
-        return subprocess.run(argv, check=False).returncode
-    proc = subprocess.run(argv, check=False, capture_output=True, text=True)
+        return subprocess.run(argv, check=False, input=stdin_text, text=True).returncode
+    proc = subprocess.run(argv, check=False, capture_output=True, text=True, input=stdin_text)
     if proc.returncode != 0:
         out = ((proc.stdout or "") + (proc.stderr or "")).rstrip()
         if out:
@@ -121,8 +150,12 @@ def _own_binary() -> str:
 
 
 USAGE = (
-    "usage: mcpgawk login '<license-key>'\n\n"
-    "Keep the key in single quotes so your shell passes it through whole.\n\n"
+    "usage: mcpgawk login             (asks for the key, input hidden)\n"
+    "       mcpgawk login --stdin     (reads the key from standard input)\n"
+    "       mcpgawk login '<license-key>'\n\n"
+    "The first two keep the key out of your shell history and off the command line, where other\n"
+    "users on this machine can see it. If you pass it as an argument, keep it in single quotes so\n"
+    "your shell passes it through whole.\n\n"
     "Your key is the only thing you add. With it, `login` fetches the paid engine (pre-built,\n"
     "checksum-verified, gated on the key), installs it beside the free scanner, and saves the key\n"
     "so the paid capabilities unlock. Lost the key? It is in your subscription or trial email;\n"
@@ -192,5 +225,22 @@ def login_with_fetch(key: str) -> int:
               "Nothing was activated.", file=sys.stderr)
         return EXIT_INCOMPLETE
     print("  ✓ paid engine installed", flush=True)
-    # 6 — the platform's own `login` saves the key; run it from the binary that now has it.
-    return _run([_own_binary(), "login", key])
+    # 6 — the platform's own `login` saves the key; run it from the binary that now has it. The
+    # key goes over stdin, never argv: argv is readable through `ps` by every user on the machine
+    # for as long as that login's network check runs (review M12).
+    # An engine older than 0.1.94 has no `--stdin` and would read the flag as the key and refuse
+    # it, so ask the new binary first; only an engine that cannot read stdin gets the argument.
+    own = _own_binary()
+    if _reads_stdin(own):
+        return _run([own, "login", "--stdin"], stdin_text=key + "\n")
+    return _run([own, "login", key])
+
+
+def _reads_stdin(binary: str) -> bool:
+    """Whether this `mcpgawk` binary's `login` takes `--stdin` (0.1.94 and later)."""
+    try:
+        proc = subprocess.run([binary, "login", "--help"], check=False, capture_output=True,
+                              text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--stdin" in (proc.stdout or "")

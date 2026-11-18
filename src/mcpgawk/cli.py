@@ -1815,8 +1815,14 @@ def _run_account_command(command: str, rest: list[str]) -> int:
             if rest and rest[0] in ("-h", "--help"):
                 print(engine_fetch.USAGE)
                 return 0
-            if rest and not rest[0].startswith("-"):
-                return engine_fetch.login_with_fetch(rest[0])
+            if rest and rest[0].startswith("-") and rest[0] != "--stdin":
+                pass                                  # an unknown flag: the message below
+            else:
+                key, rc = engine_fetch.read_key_from(rest)
+                if key is not None:
+                    return engine_fetch.login_with_fetch(key)
+                if rc != -1:
+                    return rc
         if _absent_help(command, rest, _ACCOUNT_NEEDS_PLATFORM.format(cmd=command)):
             return 0
         print(_ACCOUNT_NEEDS_PLATFORM.format(cmd=command), file=sys.stderr)
